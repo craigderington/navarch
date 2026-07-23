@@ -16,6 +16,7 @@ import (
 
 	"github.com/craig/composectl/internal/api"
 	"github.com/craig/composectl/internal/config"
+	"github.com/craig/composectl/internal/rollout"
 	"github.com/craig/composectl/internal/store"
 )
 
@@ -96,9 +97,24 @@ func run(log *slog.Logger) error {
 	}
 	defer st.Close()
 
+	srvHandler := api.NewServer(st, log)
+
+	// Bootstrap the dev org the local agent registers into.
+	bootCtx, bootCancel := context.WithTimeout(ctx, 5*time.Second)
+	srvHandler.BootstrapDevOrg(bootCtx)
+	bootCancel()
+
+	// Scheduler + rollout controller: two loops over the deployment lifecycle.
+	// They are what turn a pending deployment into running, health-gated
+	// containers once an agent is reconciling.
+	sched := rollout.NewScheduler(st, log)
+	ctrl := rollout.NewController(st, log)
+	go runLoop(ctx, cfg.TickInterval, log, "scheduler", sched.ScheduleOnce)
+	go runLoop(ctx, cfg.TickInterval, log, "controller", ctrl.ReconcileOnce)
+
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.NewServer(st, log),
+		Handler:           srvHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -124,4 +140,23 @@ func run(log *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// runLoop invokes tick every interval until ctx is cancelled, bounding each
+// tick with its own timeout so a slow database can't wedge the loop.
+func runLoop(ctx context.Context, every time.Duration, log *slog.Logger, name string, tick func(context.Context) error) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			c, cancel := context.WithTimeout(ctx, 30*time.Second)
+			if err := tick(c); err != nil {
+				log.Warn("loop tick failed", "loop", name, "err", err)
+			}
+			cancel()
+		}
+	}
 }
