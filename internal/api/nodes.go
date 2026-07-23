@@ -1,18 +1,153 @@
 package api
 
-import "net/http"
+import (
+	"net/http"
+	"time"
 
-// Agent-facing endpoints and rollback are Sprint 2 work: they only become
-// meaningful once the node agent exists to register, heartbeat and report.
-// The store methods behind them are not written yet either.
+	"github.com/google/uuid"
 
-func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request)       { notImplemented(w) }
-func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request)   { notImplemented(w) }
-func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request)      { notImplemented(w) }
-func (s *Server) handleDesiredState(w http.ResponseWriter, r *http.Request)   { notImplemented(w) }
-func (s *Server) handleInstanceReport(w http.ResponseWriter, r *http.Request) { notImplemented(w) }
-func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request)      { notImplemented(w) }
+	"github.com/craig/composectl/internal/store"
+)
+
+// Node-facing handlers. The agent speaks only this HTTP surface — it never
+// touches Postgres — so the store's exclusive ownership of pgx holds across
+// binaries. Handlers stay thin: decode, delegate, encode.
+
+type registerNodeRequest struct {
+	Org           string            `json:"org"`
+	Hostname      string            `json:"hostname"`
+	AdvertiseAddr string            `json:"advertise_addr"`
+	CPUMillis     int               `json:"cpu_millis"`
+	MemoryBytes   int64             `json:"memory_bytes"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	AgentVersion  string            `json:"agent_version,omitempty"`
+}
+
+func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	var req registerNodeRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", nil)
+		return
+	}
+	org, err := s.st.GetOrganizationBySlug(ctx, req.Org)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	node, err := s.st.RegisterNode(ctx, store.RegisterNodeParams{
+		OrgID: org.ID, Hostname: req.Hostname, AdvertiseAddr: req.AdvertiseAddr,
+		CPUMillis: req.CPUMillis, MemoryBytes: req.MemoryBytes,
+		Labels: req.Labels, AgentVersion: req.AgentVersion,
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, node)
+}
+
+type heartbeatRequest struct {
+	AllocCPUMillis   int   `json:"alloc_cpu_millis"`
+	AllocMemoryBytes int64 `json:"alloc_memory_bytes"`
+}
+
+func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req heartbeatRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", nil)
+		return
+	}
+	if err := s.st.Heartbeat(ctx, id, store.HeartbeatParams{
+		AllocCPUMillis: req.AllocCPUMillis, AllocMemoryBytes: req.AllocMemoryBytes,
+	}); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleDesiredState returns the instances this node must run, each with its
+// resolved Service spec inline so the agent needs no second call to build
+// containers.
+func (s *Server) handleDesiredState(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	desired, err := s.st.DesiredStateForNode(ctx, id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"instances": desired})
+}
+
+type reportRequest struct {
+	Instances []struct {
+		InstanceID   uuid.UUID `json:"instance_id"`
+		State        string    `json:"state"`
+		ContainerID  string    `json:"container_id,omitempty"`
+		HealthStatus string    `json:"health_status,omitempty"`
+		LastError    string    `json:"last_error,omitempty"`
+		RestartCount int       `json:"restart_count,omitempty"`
+		SetStarted   bool      `json:"set_started,omitempty"`
+	} `json:"instances"`
+}
+
+func (s *Server) handleInstanceReport(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 10*time.Second)
+	defer cancel()
+	if _, ok := pathUUID(w, r, "id"); !ok {
+		return
+	}
+	var req reportRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", nil)
+		return
+	}
+	for _, in := range req.Instances {
+		if err := s.st.ReportInstance(ctx, in.InstanceID, store.ObservedInstance{
+			State: store.InstanceState(in.State), ContainerID: in.ContainerID,
+			HealthStatus: in.HealthStatus, LastError: in.LastError,
+			RestartCount: in.RestartCount, SetStarted: in.SetStarted,
+		}); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	orgID, err := uuid.Parse(r.URL.Query().Get("org"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "org query parameter is required", nil)
+		return
+	}
+	nodes, err := s.st.ListNodes(ctx, orgID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
+}
+
+// handleRollback is Slice C. The store method behind it is not written yet.
+func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) { notImplemented(w) }
 
 func notImplemented(w http.ResponseWriter) {
-	writeError(w, http.StatusNotImplemented, "not implemented until sprint 2", nil)
+	writeError(w, http.StatusNotImplemented, "not implemented until sprint 2 slice C", nil)
 }

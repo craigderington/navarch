@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -26,6 +27,15 @@ func NewServer(st *store.Store, log *slog.Logger) *Server {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
+}
+
+// BootstrapDevOrg ensures the dev org the local agent registers into exists.
+// Called at startup; idempotent, so a duplicate slug on restart is fine.
+func (s *Server) BootstrapDevOrg(ctx context.Context) {
+	if _, err := s.st.CreateOrganization(ctx, "dev", "Development"); err != nil &&
+		!errors.Is(err, store.ErrConflict) {
+		s.log.Warn("could not bootstrap dev org", "err", err)
+	}
 }
 
 // routes uses Go 1.22+ method-and-wildcard patterns, so no router
