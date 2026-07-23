@@ -69,6 +69,23 @@ func newOrg(t *testing.T, st *Store) *Organization {
 			)`, org.ID); err != nil {
 			t.Errorf("cleanup (clear live deployment): %v", err)
 		}
+		// Two FKs lack ON DELETE CASCADE, so the org cascade can delete a
+		// parent before its referrer: service_instances.node_id → nodes, and
+		// deployments.stack_version_id → stack_versions. Delete the referrers
+		// (instances, then deployments) and the org-scoped nodes explicitly,
+		// bottom-up, before the cascade runs.
+		orgScope := func(sql string) {
+			if _, err := st.pool.Exec(cleanupCtx, sql, org.ID); err != nil {
+				t.Errorf("cleanup (%s): %v", sql, err)
+			}
+		}
+		orgScope(`DELETE FROM service_instances WHERE node_id IN (SELECT id FROM nodes WHERE org_id = $1)`)
+		orgScope(`DELETE FROM deployments WHERE environment_id IN (
+			SELECT e.id FROM environments e
+			JOIN stacks s ON e.stack_id = s.id
+			JOIN applications a ON s.app_id = a.id
+			WHERE a.org_id = $1)`)
+		orgScope(`DELETE FROM nodes WHERE org_id = $1`)
 		if _, err := st.pool.Exec(cleanupCtx, `DELETE FROM organizations WHERE id = $1`, org.ID); err != nil {
 			t.Errorf("cleanup (delete org): %v", err)
 		}

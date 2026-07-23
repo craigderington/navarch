@@ -1,0 +1,151 @@
+package store
+
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/craig/composectl/internal/spec"
+)
+
+type NewInstance struct {
+	ServiceName string
+	Swappable   bool
+	ImageRef    string
+}
+
+// CreateServiceInstances writes the desired instance rows for a deployment in
+// one transaction. The unique (deployment_id, service_name) constraint makes a
+// double-schedule a no-op rather than a duplicate.
+func (s *Store) CreateServiceInstances(ctx context.Context, deploymentID, nodeID uuid.UUID, insts []NewInstance) error {
+	return s.tx(ctx, func(tx pgx.Tx) error {
+		for _, in := range insts {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO service_instances
+					(deployment_id, node_id, service_name, swappable, image_ref, state)
+				VALUES ($1,$2,$3,$4,$5,'pending')
+				ON CONFLICT (deployment_id, service_name) DO NOTHING
+			`, deploymentID, nodeID, in.ServiceName, in.Swappable, in.ImageRef); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+type DesiredInstance struct {
+	InstanceID   uuid.UUID
+	DeploymentID uuid.UUID
+	Env8         string
+	ProjectName  string
+	Slot         string
+	Revision     int
+	ServiceName  string
+	Swappable    bool
+	Service      spec.Service
+	State        InstanceState
+	ContainerID  string
+}
+
+// DesiredStateForNode returns the instances a node must run, joined to the
+// resolved Service spec from their deployment. Only deployments in an active
+// rollout state are included: a superseded or failed deployment's instances
+// vanish from desired state, so the agent garbage-collects their containers.
+func (s *Store) DesiredStateForNode(ctx context.Context, nodeID uuid.UUID) ([]DesiredInstance, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT si.id, si.deployment_id, d.environment_id, d.project_name, d.slot,
+		       d.revision, si.service_name, si.swappable, si.state,
+		       COALESCE(si.container_id,''), d.resolved_spec
+		FROM service_instances si
+		JOIN deployments d ON d.id = si.deployment_id
+		WHERE si.node_id = $1
+		  AND d.state IN ('scheduling','starting','healthy','live')
+		ORDER BY d.revision, si.service_name
+	`, nodeID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+
+	out := []DesiredInstance{}
+	for rows.Next() {
+		var di DesiredInstance
+		var envID uuid.UUID
+		var specJSON []byte
+		if err := rows.Scan(&di.InstanceID, &di.DeploymentID, &envID, &di.ProjectName,
+			&di.Slot, &di.Revision, &di.ServiceName, &di.Swappable, &di.State,
+			&di.ContainerID, &specJSON); err != nil {
+			return nil, err
+		}
+		var ds spec.DeploymentSpec
+		if err := json.Unmarshal(specJSON, &ds); err != nil {
+			return nil, err
+		}
+		svc, ok := ds.Services[di.ServiceName]
+		if !ok {
+			// The instance references a service not in its own spec — a
+			// scheduler bug. Skip rather than hand the agent a zero Service.
+			continue
+		}
+		di.Service = svc
+		di.Env8 = shortID(envID)
+		out = append(out, di)
+	}
+	return out, rows.Err()
+}
+
+type ObservedInstance struct {
+	State        InstanceState
+	ContainerID  string
+	HealthStatus string
+	LastError    string
+	RestartCount int
+	SetStarted   bool
+}
+
+func (s *Store) ReportInstance(ctx context.Context, instanceID uuid.UUID, o ObservedInstance) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE service_instances SET
+			state         = $2,
+			container_id  = NULLIF($3,''),
+			health_status = NULLIF($4,''),
+			last_error    = NULLIF($5,''),
+			restart_count = $6,
+			started_at    = CASE WHEN $7 AND started_at IS NULL THEN now() ELSE started_at END,
+			updated_at    = now()
+		WHERE id = $1
+	`, instanceID, o.State, o.ContainerID, o.HealthStatus, o.LastError, o.RestartCount, o.SetStarted)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) InstanceStates(ctx context.Context, deploymentID uuid.UUID) ([]InstanceState, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT state FROM service_instances WHERE deployment_id=$1
+	`, deploymentID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := []InstanceState{}
+	for rows.Next() {
+		var st InstanceState
+		if err := rows.Scan(&st); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteInstances(ctx context.Context, deploymentID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM service_instances WHERE deployment_id=$1`, deploymentID)
+	return mapErr(err)
+}

@@ -153,12 +153,15 @@ func (s *Store) UpdateDeploymentState(ctx context.Context, id uuid.UUID, to Depl
 	if !ok {
 		return fmt.Errorf("unknown target state %q", to)
 	}
+	// pgx cannot encode a []DeploymentState against the enum-array type, and
+	// comparing the enum column to a text[] needs an explicit cast. Pass the
+	// allowed states as text and cast the column: state::text = ANY($4).
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE deployments
 		SET state = $2,
 		    failure_reason = NULLIF($3, '')
-		WHERE id = $1 AND state = ANY($4)
-	`, id, to, reason, allowed)
+		WHERE id = $1 AND state::text = ANY($4)
+	`, id, to, reason, statesToText(allowed))
 	if err != nil {
 		return mapErr(err)
 	}
@@ -166,6 +169,17 @@ func (s *Store) UpdateDeploymentState(ctx context.Context, id uuid.UUID, to Depl
 		return fmt.Errorf("%w: illegal transition to %s", ErrConflict, to)
 	}
 	return nil
+}
+
+// statesToText renders deployment states as text for a text[] query parameter,
+// working around pgx's inability to encode a named-string slice as an enum
+// array. The column side is cast with state::text at the call site.
+func statesToText(states []DeploymentState) []string {
+	ss := make([]string, len(states))
+	for i, st := range states {
+		ss[i] = string(st)
+	}
+	return ss
 }
 
 // validTransitions maps a target state to the states it may be entered from.
@@ -234,4 +248,67 @@ func (s *Store) PromoteDeployment(ctx context.Context, id uuid.UUID) (superseded
 // shortID renders the first 8 hex chars of a UUID for use in project names.
 func shortID(id uuid.UUID) string {
 	return id.String()[:8]
+}
+
+type PendingDeployment struct {
+	Deployment
+	OrgID uuid.UUID
+}
+
+// ListPendingDeployments returns deployments awaiting scheduling, oldest
+// first, each carrying its org id so the scheduler can find eligible nodes.
+func (s *Store) ListPendingDeployments(ctx context.Context) ([]PendingDeployment, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT d.id, d.environment_id, d.stack_version_id, d.revision, d.slot,
+		       d.project_name, d.state, d.resolved_spec, d.created_at, d.updated_at,
+		       a.org_id
+		FROM deployments d
+		JOIN environments e ON e.id = d.environment_id
+		JOIN stacks s       ON s.id = e.stack_id
+		JOIN applications a ON a.id = s.app_id
+		WHERE d.state='pending'
+		ORDER BY d.created_at
+	`)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := []PendingDeployment{}
+	for rows.Next() {
+		var p PendingDeployment
+		var specJSON []byte
+		if err := rows.Scan(&p.ID, &p.EnvironmentID, &p.StackVersionID, &p.Revision,
+			&p.Slot, &p.ProjectName, &p.State, &specJSON, &p.CreatedAt, &p.UpdatedAt,
+			&p.OrgID); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(specJSON, &p.ResolvedSpec); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ListRolloutsInState returns deployments the controller must advance.
+func (s *Store) ListRolloutsInState(ctx context.Context, states ...DeploymentState) ([]Deployment, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, environment_id, stack_version_id, revision, slot, project_name,
+		       state, created_at, updated_at
+		FROM deployments WHERE state::text = ANY($1) ORDER BY updated_at
+	`, statesToText(states))
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := []Deployment{}
+	for rows.Next() {
+		var d Deployment
+		if err := rows.Scan(&d.ID, &d.EnvironmentID, &d.StackVersionID, &d.Revision,
+			&d.Slot, &d.ProjectName, &d.State, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
