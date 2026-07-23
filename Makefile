@@ -1,0 +1,61 @@
+.DEFAULT_GOAL := help
+DB_URL ?= postgres://composectl:composectl@localhost:5473/composectl?sslmode=disable
+API    ?= http://localhost:8417
+
+.PHONY: help
+help: ## Show this help
+	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
+		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n",$$1,$$2}'
+
+.PHONY: tidy
+tidy: ## Resolve module dependencies
+	go mod tidy
+
+.PHONY: build
+build: ## Build binaries into ./bin
+	CGO_ENABLED=0 go build -o bin/controlplane ./cmd/controlplane
+
+.PHONY: test
+test: ## Run tests
+	go test ./... -race -count=1
+
+.PHONY: up
+up: ## Start the dev stack
+	docker compose up -d --build
+
+.PHONY: down
+down: ## Stop the dev stack
+	docker compose down
+
+.PHONY: nuke
+nuke: ## Stop the dev stack and delete volumes
+	docker compose down -v
+
+.PHONY: logs
+logs: ## Tail control plane logs
+	docker compose logs -f controlplane
+
+.PHONY: psql
+psql: ## Open a psql shell
+	docker compose exec postgres psql -U composectl -d composectl
+
+.PHONY: migrate-up
+migrate-up: ## Apply migrations
+	docker compose run --rm migrate -path=/migrations -database="$(DB_URL)" up
+
+.PHONY: migrate-down
+migrate-down: ## Roll back one migration
+	docker compose run --rm migrate -path=/migrations -database="$(DB_URL)" down 1
+
+.PHONY: validate
+validate: ## Validate the example stack against the running API
+	curl -sS -X POST $(API)/v1/validate \
+		--data-binary @examples/webapp/compose.yaml | jq .
+
+.PHONY: health
+health: ## Check control plane health
+	curl -sS $(API)/healthz | jq .
+
+.PHONY: demo
+demo: ## Walk the full loop: catalog -> stack version -> deploy -> promote
+	API=$(API) ./scripts/demo.sh

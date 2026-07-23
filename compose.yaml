@@ -1,0 +1,58 @@
+# composectl local development stack.
+# Ports are deliberately non-standard to avoid colliding with other
+# projects already bound to the 3000/5000/8000/9000 ranges.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: composectl
+      POSTGRES_PASSWORD: composectl
+      POSTGRES_DB: composectl
+    ports:
+      - "5473:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U composectl -d composectl"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  migrate:
+    image: migrate/migrate:v4.18.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://composectl:composectl@postgres:5432/composectl?sslmode=disable"
+      - "up"
+
+  controlplane:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      COMPOSECTL_DATABASE_URL: postgres://composectl:composectl@postgres:5432/composectl?sslmode=disable
+      COMPOSECTL_LISTEN_ADDR: 0.0.0.0:8417
+      COMPOSECTL_AGENT_TOKEN: dev-token-change-me
+    ports:
+      - "8417:8417"
+    healthcheck:
+      test: ["CMD", "/composectl-controlplane", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  pgdata:

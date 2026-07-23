@@ -1,0 +1,237 @@
+package store
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/craig/composectl/internal/spec"
+)
+
+// CreateDeploymentParams is the input to a new rollout.
+type CreateDeploymentParams struct {
+	EnvironmentID  uuid.UUID
+	StackVersionID uuid.UUID
+	ResolvedSpec   *spec.DeploymentSpec
+	CreatedBy      string
+}
+
+// CreateDeployment allocates the next revision number and the opposite
+// color slot from the currently live deployment, then inserts a pending
+// deployment row.
+//
+// Concurrency: the revision number is allocated inside the transaction
+// with a row lock on the environment, so two simultaneous deploys cannot
+// claim the same revision. The partial unique index additionally rejects
+// a second active deployment for the environment — that surfaces as
+// ErrConflict, which the API maps to 409.
+func (s *Store) CreateDeployment(ctx context.Context, p CreateDeploymentParams) (*Deployment, error) {
+	var d Deployment
+
+	err := s.tx(ctx, func(tx pgx.Tx) error {
+		// Lock the environment row for the duration. Serializes rollouts
+		// per environment without a global lock.
+		var liveSlot *string
+		err := tx.QueryRow(ctx, `
+			SELECT d.slot
+			FROM environments e
+			LEFT JOIN deployments d ON d.id = e.live_deployment_id
+			WHERE e.id = $1
+			FOR UPDATE OF e
+		`, p.EnvironmentID).Scan(&liveSlot)
+		if err != nil {
+			return err
+		}
+
+		// Next revision.
+		var revision int
+		err = tx.QueryRow(ctx, `
+			SELECT COALESCE(MAX(revision), 0) + 1
+			FROM deployments WHERE environment_id = $1
+		`, p.EnvironmentID).Scan(&revision)
+		if err != nil {
+			return err
+		}
+
+		// Alternate slot. First ever deploy goes blue.
+		slot := "blue"
+		if liveSlot != nil && *liveSlot == "blue" {
+			slot = "green"
+		}
+
+		projectName := fmt.Sprintf("cc-%s-r%d-%s",
+			shortID(p.EnvironmentID), revision, slot)
+
+		specJSON, err := json.Marshal(p.ResolvedSpec)
+		if err != nil {
+			return err
+		}
+
+		return tx.QueryRow(ctx, `
+			INSERT INTO deployments (
+				environment_id, stack_version_id, revision, slot,
+				project_name, state, resolved_spec, created_by
+			) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7)
+			RETURNING id, environment_id, stack_version_id, revision, slot,
+			          project_name, state, created_at, updated_at
+		`, p.EnvironmentID, p.StackVersionID, revision, slot,
+			projectName, specJSON, p.CreatedBy,
+		).Scan(&d.ID, &d.EnvironmentID, &d.StackVersionID, &d.Revision,
+			&d.Slot, &d.ProjectName, &d.State, &d.CreatedAt, &d.UpdatedAt)
+	})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	d.ResolvedSpec = p.ResolvedSpec
+	return &d, nil
+}
+
+// GetDeployment returns a single deployment by id.
+func (s *Store) GetDeployment(ctx context.Context, id uuid.UUID) (*Deployment, error) {
+	var d Deployment
+	var specJSON []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, environment_id, stack_version_id, revision, slot,
+		       project_name, state, resolved_spec, promoted_at, superseded_at,
+		       COALESCE(failure_reason,''), COALESCE(created_by,''),
+		       created_at, updated_at
+		FROM deployments WHERE id = $1
+	`, id).Scan(&d.ID, &d.EnvironmentID, &d.StackVersionID, &d.Revision,
+		&d.Slot, &d.ProjectName, &d.State, &specJSON, &d.PromotedAt,
+		&d.SupersededAt, &d.FailureReason, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if err := json.Unmarshal(specJSON, &d.ResolvedSpec); err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+// ListDeployments returns revisions for an environment, newest first.
+func (s *Store) ListDeployments(ctx context.Context, envID uuid.UUID, limit int) ([]Deployment, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, environment_id, stack_version_id, revision, slot,
+		       project_name, state, promoted_at, superseded_at,
+		       COALESCE(failure_reason,''), COALESCE(created_by,''),
+		       created_at, updated_at
+		FROM deployments
+		WHERE environment_id = $1
+		ORDER BY revision DESC
+		LIMIT $2
+	`, envID, limit)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+
+	var out []Deployment
+	for rows.Next() {
+		var d Deployment
+		if err := rows.Scan(&d.ID, &d.EnvironmentID, &d.StackVersionID,
+			&d.Revision, &d.Slot, &d.ProjectName, &d.State, &d.PromotedAt,
+			&d.SupersededAt, &d.FailureReason, &d.CreatedBy,
+			&d.CreatedAt, &d.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// UpdateDeploymentState transitions a deployment, rejecting illegal moves.
+// The allowed-transition check lives in SQL so that a buggy agent cannot
+// drive a deployment backwards.
+func (s *Store) UpdateDeploymentState(ctx context.Context, id uuid.UUID, to DeploymentState, reason string) error {
+	allowed, ok := validTransitions[to]
+	if !ok {
+		return fmt.Errorf("unknown target state %q", to)
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE deployments
+		SET state = $2,
+		    failure_reason = NULLIF($3, '')
+		WHERE id = $1 AND state = ANY($4)
+	`, id, to, reason, allowed)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: illegal transition to %s", ErrConflict, to)
+	}
+	return nil
+}
+
+// validTransitions maps a target state to the states it may be entered from.
+var validTransitions = map[DeploymentState][]DeploymentState{
+	DeployScheduling: {DeployPending},
+	DeployStarting:   {DeployScheduling},
+	DeployHealthy:    {DeployStarting},
+	DeployLive:       {DeployHealthy},
+	DeploySuperseded: {DeployLive},
+	DeployFailed:     {DeployPending, DeployScheduling, DeployStarting, DeployHealthy},
+	DeployStopped:    {DeploySuperseded, DeployFailed, DeployLive},
+}
+
+// PromoteDeployment flips traffic to a healthy deployment: marks it live,
+// supersedes the previous live revision, and repoints the environment.
+// All three happen in one transaction — a partial promotion would leave
+// the router pointing at a deployment the database thinks is not live.
+func (s *Store) PromoteDeployment(ctx context.Context, id uuid.UUID) (superseded *uuid.UUID, err error) {
+	err = s.tx(ctx, func(tx pgx.Tx) error {
+		var envID uuid.UUID
+		var state DeploymentState
+		if err := tx.QueryRow(ctx, `
+			SELECT environment_id, state FROM deployments WHERE id = $1 FOR UPDATE
+		`, id).Scan(&envID, &state); err != nil {
+			return err
+		}
+		if state != DeployHealthy {
+			return fmt.Errorf("%w: deployment is %s, must be healthy to promote", ErrConflict, state)
+		}
+
+		var prev *uuid.UUID
+		if err := tx.QueryRow(ctx, `
+			SELECT live_deployment_id FROM environments WHERE id = $1 FOR UPDATE
+		`, envID).Scan(&prev); err != nil {
+			return err
+		}
+
+		if prev != nil {
+			if _, err := tx.Exec(ctx, `
+				UPDATE deployments
+				SET state = 'superseded', superseded_at = now()
+				WHERE id = $1 AND state = 'live'
+			`, *prev); err != nil {
+				return err
+			}
+			superseded = prev
+		}
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE deployments SET state = 'live', promoted_at = now() WHERE id = $1
+		`, id); err != nil {
+			return err
+		}
+
+		_, err := tx.Exec(ctx, `
+			UPDATE environments SET live_deployment_id = $2 WHERE id = $1
+		`, envID, id)
+		return err
+	})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return superseded, nil
+}
+
+// shortID renders the first 8 hex chars of a UUID for use in project names.
+func shortID(id uuid.UUID) string {
+	return id.String()[:8]
+}

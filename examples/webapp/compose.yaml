@@ -1,0 +1,80 @@
+# Example stack demonstrating how the parser classifies services.
+#
+#   api    -> swappable (no volumes) + ingress
+#   worker -> swappable
+#   db     -> PINNED (named volume) — runs once, shared across blue/green
+#   cache  -> swappable (tmpfs only)
+#
+# Peak rollout memory = (api + worker + cache) * 2 + db
+
+services:
+  api:
+    image: ghcr.io/example/webapp-api:1.4.0
+    environment:
+      DATABASE_URL: postgres://app:${secret:db_password}@db:5432/app
+      REDIS_URL: redis://cache:6379
+      LOG_LEVEL: info
+    depends_on:
+      - db
+      - cache
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    x-composectl:
+      ingress:
+        port: 8080
+        path: /
+
+  worker:
+    image: ghcr.io/example/webapp-api:1.4.0
+    command: ["worker", "--queue=default"]
+    environment:
+      DATABASE_URL: postgres://app:${secret:db_password}@db:5432/app
+      REDIS_URL: redis://cache:6379
+    depends_on:
+      - db
+      - cache
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_DB: app
+      POSTGRES_PASSWORD: ${secret:db_password}
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  cache:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+          memory: 128M
+
+volumes:
+  dbdata:

@@ -1,0 +1,196 @@
+package store
+
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/google/uuid"
+)
+
+// This file holds the catalog resources — the org → app → stack → env
+// hierarchy a deployment hangs off. They are plain inserts and scoped
+// lists; the interesting concurrency lives in deployments.go.
+
+// ------------------------------------------------------------ organizations
+
+func (s *Store) CreateOrganization(ctx context.Context, slug, name string) (*Organization, error) {
+	if err := validateSlug("slug", slug); err != nil {
+		return nil, err
+	}
+	var o Organization
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO organizations (slug, name)
+		VALUES ($1, $2)
+		RETURNING id, slug, name, created_at
+	`, slug, name).Scan(&o.ID, &o.Slug, &o.Name, &o.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &o, nil
+}
+
+func (s *Store) ListOrganizations(ctx context.Context) ([]Organization, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, slug, name, created_at FROM organizations ORDER BY slug
+	`)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+
+	out := []Organization{}
+	for rows.Next() {
+		var o Organization
+		if err := rows.Scan(&o.ID, &o.Slug, &o.Name, &o.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// ------------------------------------------------------------- applications
+
+func (s *Store) CreateApplication(ctx context.Context, orgID uuid.UUID, slug, name string) (*Application, error) {
+	if err := validateSlug("slug", slug); err != nil {
+		return nil, err
+	}
+	var a Application
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO applications (org_id, slug, name)
+		VALUES ($1, $2, $3)
+		RETURNING id, org_id, slug, name, created_at
+	`, orgID, slug, name).Scan(&a.ID, &a.OrgID, &a.Slug, &a.Name, &a.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &a, nil
+}
+
+func (s *Store) ListApplications(ctx context.Context, orgID uuid.UUID) ([]Application, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, org_id, slug, name, created_at
+		FROM applications WHERE org_id = $1 ORDER BY slug
+	`, orgID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+
+	out := []Application{}
+	for rows.Next() {
+		var a Application
+		if err := rows.Scan(&a.ID, &a.OrgID, &a.Slug, &a.Name, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ------------------------------------------------------------------ stacks
+
+func (s *Store) CreateStack(ctx context.Context, appID uuid.UUID, slug string) (*Stack, error) {
+	if err := validateSlug("slug", slug); err != nil {
+		return nil, err
+	}
+	var st Stack
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO stacks (app_id, slug)
+		VALUES ($1, $2)
+		RETURNING id, app_id, slug, created_at
+	`, appID, slug).Scan(&st.ID, &st.AppID, &st.Slug, &st.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &st, nil
+}
+
+// ------------------------------------------------------------- environments
+
+// CreateEnvironmentParams is the input to a new environment. Strategy and
+// Config may be zero; the schema default and an empty overlay apply.
+type CreateEnvironmentParams struct {
+	StackID  uuid.UUID
+	Slug     string
+	Strategy RolloutStrategy
+	Hostname string
+	Config   map[string]string
+}
+
+func (s *Store) CreateEnvironment(ctx context.Context, p CreateEnvironmentParams) (*Environment, error) {
+	if err := validateSlug("slug", p.Slug); err != nil {
+		return nil, err
+	}
+	configJSON, err := json.Marshal(orEmpty(p.Config))
+	if err != nil {
+		return nil, err
+	}
+
+	// Strategy is passed as NULL when unset so the column default stays the
+	// single source of truth for what a new environment gets.
+	var strategy *string
+	if p.Strategy != "" {
+		v := string(p.Strategy)
+		strategy = &v
+	}
+
+	var e Environment
+	var config []byte
+	err = s.pool.QueryRow(ctx, `
+		INSERT INTO environments (stack_id, slug, strategy, hostname, config)
+		VALUES (
+			$1, $2,
+			COALESCE($3::rollout_strategy, 'blue_green'::rollout_strategy),
+			NULLIF($4, ''),
+			$5
+		)
+		RETURNING id, stack_id, slug, strategy, COALESCE(hostname,''),
+		          config, live_deployment_id, created_at
+	`, p.StackID, p.Slug, strategy, p.Hostname, configJSON).
+		Scan(&e.ID, &e.StackID, &e.Slug, &e.Strategy, &e.Hostname,
+			&config, &e.LiveDeploymentID, &e.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if err := json.Unmarshal(config, &e.Config); err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+func (s *Store) ListEnvironments(ctx context.Context, stackID uuid.UUID) ([]Environment, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, stack_id, slug, strategy, COALESCE(hostname,''),
+		       config, live_deployment_id, created_at
+		FROM environments WHERE stack_id = $1 ORDER BY slug
+	`, stackID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+
+	out := []Environment{}
+	for rows.Next() {
+		var e Environment
+		var config []byte
+		if err := rows.Scan(&e.ID, &e.StackID, &e.Slug, &e.Strategy, &e.Hostname,
+			&config, &e.LiveDeploymentID, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(config, &e.Config); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// orEmpty keeps a nil map from marshalling to JSON null, which the config
+// column (NOT NULL) would reject.
+func orEmpty(m map[string]string) map[string]string {
+	if m == nil {
+		return map[string]string{}
+	}
+	return m
+}
