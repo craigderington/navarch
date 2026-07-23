@@ -90,6 +90,19 @@ func isForeignKeyViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }
 
+// GetOrganizationBySlug lets the agent register by org slug rather than a
+// UUID it has no way to know.
+func (s *Store) GetOrganizationBySlug(ctx context.Context, slug string) (*Organization, error) {
+	var o Organization
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, slug, name, created_at FROM organizations WHERE slug=$1
+	`, slug).Scan(&o.ID, &o.Slug, &o.Name, &o.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &o, nil
+}
+
 func mapErr(err error) error {
 	switch {
 	case err == nil:
