@@ -105,3 +105,88 @@ func TestSchedulerPlacesPendingDeployment(t *testing.T) {
 		t.Fatalf("expected 2 instances written, got %d", len(desired))
 	}
 }
+
+func advance(t *testing.T, st *store.Store, id uuid.UUID, states ...store.DeploymentState) {
+	t.Helper()
+	for _, s := range states {
+		if err := st.UpdateDeploymentState(ctx(t), id, s, ""); err != nil {
+			t.Fatalf("advance to %s: %v", s, err)
+		}
+	}
+}
+
+func reportAll(t *testing.T, st *store.Store, nodeID uuid.UUID, state store.InstanceState, health string) {
+	t.Helper()
+	desired, _ := st.DesiredStateForNode(ctx(t), nodeID)
+	for _, d := range desired {
+		if err := st.ReportInstance(ctx(t), d.InstanceID, store.ObservedInstance{
+			State: state, ContainerID: "c-" + d.ServiceName, HealthStatus: health, SetStarted: true,
+		}); err != nil {
+			t.Fatalf("report: %v", err)
+		}
+	}
+}
+
+func TestControllerDrivesSchedulingToHealthy(t *testing.T) {
+	st := testStore(t)
+	depID, nodeID, _ := fixture(t, st)
+	if err := NewScheduler(st, discardLog()).ScheduleOnce(ctx(t)); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	c := NewController(st, discardLog())
+
+	// Instances still pending → controller cannot advance past scheduling.
+	if err := c.ReconcileOnce(ctx(t)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if dep, _ := st.GetDeployment(ctx(t), depID); dep.State != store.DeployScheduling {
+		t.Fatalf("expected still scheduling, got %s", dep.State)
+	}
+
+	// All instances have containers now → starting.
+	reportAll(t, st, nodeID, store.InstanceStarting, "starting")
+	_ = c.ReconcileOnce(ctx(t))
+	if dep, _ := st.GetDeployment(ctx(t), depID); dep.State != store.DeployStarting {
+		t.Fatalf("expected starting, got %s", dep.State)
+	}
+
+	// All healthy → healthy.
+	reportAll(t, st, nodeID, store.InstanceRunning, "healthy")
+	_ = c.ReconcileOnce(ctx(t))
+	if dep, _ := st.GetDeployment(ctx(t), depID); dep.State != store.DeployHealthy {
+		t.Fatalf("expected healthy, got %s", dep.State)
+	}
+}
+
+func TestControllerFailsOnInstanceFailure(t *testing.T) {
+	st := testStore(t)
+	depID, nodeID, _ := fixture(t, st)
+	_ = NewScheduler(st, discardLog()).ScheduleOnce(ctx(t))
+	reportAll(t, st, nodeID, store.InstanceFailed, "exited")
+
+	if err := NewController(st, discardLog()).ReconcileOnce(ctx(t)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	dep, _ := st.GetDeployment(ctx(t), depID)
+	if dep.State != store.DeployFailed {
+		t.Fatalf("expected failed, got %s", dep.State)
+	}
+	if states, _ := st.InstanceStates(ctx(t), depID); len(states) != 0 {
+		t.Fatalf("expected instances torn down, got %v", states)
+	}
+}
+
+func TestControllerTearsDownSuperseded(t *testing.T) {
+	st := testStore(t)
+	depID, nodeID, _ := fixture(t, st)
+	_ = NewScheduler(st, discardLog()).ScheduleOnce(ctx(t))
+	reportAll(t, st, nodeID, store.InstanceRunning, "healthy")
+	advance(t, st, depID, store.DeployStarting, store.DeployHealthy, store.DeployLive, store.DeploySuperseded)
+
+	if err := NewController(st, discardLog()).ReconcileOnce(ctx(t)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if states, _ := st.InstanceStates(ctx(t), depID); len(states) != 0 {
+		t.Fatalf("superseded deployment instances must be torn down, got %v", states)
+	}
+}
