@@ -1,4 +1,8 @@
-FROM golang:1.23-alpine AS build
+# Toolchain is 1.25 (not 1.23): the Docker Engine SDK the agent uses pulls an
+# OpenTelemetry/grpc stack that requires go >= 1.25. Bumped deliberately and in
+# step with the go.mod directive — a real runtime dependency, unlike the earlier
+# test-only go-internal pin.
+FROM golang:1.25-alpine AS build
 WORKDIR /src
 
 COPY go.mod go.sum ./
