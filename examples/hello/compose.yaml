@@ -1,0 +1,39 @@
+# A runnable stack for the end-to-end demo: every image actually pulls, so the
+# agent can bring it up for real. Same shape the parser classifies in
+# examples/webapp, but with real images:
+#
+#   api   -> swappable (no volume) + ingress
+#   cache -> swappable
+#   db    -> PINNED (named volume) — runs once, shared across blue/green
+#
+# The secret ${secret:db_password} is expanded by the agent at container start
+# (dev source in Sprint 2; encrypted store in Sprint 3).
+
+services:
+  api:
+    image: nginx:alpine
+    environment:
+      DATABASE_URL: postgres://app:${secret:db_password}@db:5432/app
+      LOG_LEVEL: info
+    depends_on:
+      - db
+      - cache
+    x-composectl:
+      ingress:
+        port: 80
+
+  cache:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_DB: app
+      POSTGRES_PASSWORD: ${secret:db_password}
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+
+volumes:
+  dbdata:

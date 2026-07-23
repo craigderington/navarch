@@ -36,6 +36,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
+      target: controlplane
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,6 +54,28 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+
+  # Node agent: reconciles the host Docker daemon to the control plane's desired
+  # state. It creates sibling containers on the host daemon via the mounted
+  # socket. The platform already rejects bind mounts, so there are no host-path
+  # translation traps — only named volumes, which the host daemon owns.
+  agent:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: agent
+    depends_on:
+      controlplane:
+        condition: service_healthy
+    environment:
+      COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
+      COMPOSECTL_ORG: dev
+      COMPOSECTL_NODE_HOSTNAME: dev-node-1
+      COMPOSECTL_AGENT_TOKEN: dev-token-change-me
+      # Dev secret source — Sprint 3 replaces this with the encrypted store.
+      COMPOSECTL_DEV_SECRETS: db_password=devpassword
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   pgdata:

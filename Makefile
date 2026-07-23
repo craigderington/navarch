@@ -57,5 +57,13 @@ health: ## Check control plane health
 	curl -sS $(API)/healthz | jq .
 
 .PHONY: demo
-demo: ## Walk the full loop: catalog -> stack version -> deploy -> promote
+demo: ## Walk the full loop: catalog -> version -> agent-driven rollout -> promote
 	API=$(API) ./scripts/demo.sh
+
+.PHONY: demo-failure
+demo-failure: ## Show a failed rollout leaving any live deployment untouched
+	API=$(API) ./scripts/demo-failure.sh
+
+.PHONY: agent-logs
+agent-logs: ## Tail the node agent logs
+	docker compose logs -f agent
