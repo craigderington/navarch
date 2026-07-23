@@ -1,0 +1,139 @@
+package agent
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/craig/composectl/internal/agent/dockerd"
+	"github.com/craig/composectl/internal/store"
+)
+
+type Config struct {
+	ControlPlaneURL string
+	Org             string
+	Hostname        string
+	AdvertiseAddr   string
+	AgentToken      string
+	DockerHost      string
+	CPUMillis       int
+	MemoryBytes     int64
+	PollInterval    time.Duration
+	Secrets         map[string]string
+}
+
+// Run registers this node and then reconciles on a ticker until ctx is done.
+// The agent speaks only HTTP to the control plane — it never touches Postgres,
+// preserving the store's exclusive ownership of pgx across binaries.
+func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
+	drv, err := dockerd.New(cfg.DockerHost, EnvSecrets(cfg.Secrets))
+	if err != nil {
+		return err
+	}
+	rec := NewReconciler(drv)
+	c := &cpClient{base: cfg.ControlPlaneURL, token: cfg.AgentToken, http: &http.Client{Timeout: 30 * time.Second}}
+
+	nodeID, err := c.register(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("register: %w", err)
+	}
+	log.Info("agent registered", "node", nodeID, "org", cfg.Org)
+
+	ticker := time.NewTicker(cfg.PollInterval)
+	defer ticker.Stop()
+	for {
+		if err := c.reconcileTick(ctx, nodeID, rec, log); err != nil {
+			log.Warn("reconcile tick failed", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+type cpClient struct {
+	base  string
+	token string
+	http  *http.Client
+}
+
+func (c *cpClient) register(ctx context.Context, cfg Config) (uuid.UUID, error) {
+	var out struct {
+		ID uuid.UUID `json:"id"`
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/nodes/register", map[string]any{
+		"org": cfg.Org, "hostname": cfg.Hostname, "advertise_addr": cfg.AdvertiseAddr,
+		"cpu_millis": cfg.CPUMillis, "memory_bytes": cfg.MemoryBytes, "agent_version": "sprint2-a",
+	}, &out)
+	return out.ID, err
+}
+
+func (c *cpClient) reconcileTick(ctx context.Context, nodeID uuid.UUID, rec *Reconciler, log *slog.Logger) error {
+	var desired struct {
+		Instances []store.DesiredInstance `json:"instances"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/nodes/"+nodeID.String()+"/desired-state", nil, &desired); err != nil {
+		return err
+	}
+	reports := rec.Reconcile(ctx, desired.Instances)
+	if len(reports) > 0 {
+		if err := c.do(ctx, http.MethodPost, "/v1/nodes/"+nodeID.String()+"/report",
+			map[string]any{"instances": toReportDTO(reports)}, nil); err != nil {
+			return err
+		}
+	}
+	return c.do(ctx, http.MethodPost, "/v1/nodes/"+nodeID.String()+"/heartbeat",
+		map[string]any{"alloc_cpu_millis": 0, "alloc_memory_bytes": 0}, nil)
+}
+
+func toReportDTO(reports []Report) []map[string]any {
+	out := make([]map[string]any, len(reports))
+	for i, r := range reports {
+		out[i] = map[string]any{
+			"instance_id": r.InstanceID, "state": string(r.State),
+			"container_id": r.ContainerID, "health_status": r.HealthStatus,
+			"last_error": r.LastError, "restart_count": r.RestartCount, "set_started": r.SetStarted,
+		}
+	}
+	return out
+}
+
+func (c *cpClient) do(ctx context.Context, method, path string, body, out any) error {
+	var rdr io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rdr = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rdr)
+	if err != nil {
+		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, bytes.TrimSpace(msg))
+	}
+	if out != nil {
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+	return nil
+}
