@@ -3,6 +3,7 @@ module github.com/craig/composectl
 go 1.25.0
 
 require (
+	filippo.io/age v1.3.1
 	github.com/compose-spec/compose-go/v2 v2.4.7
 	github.com/docker/docker v27.5.1+incompatible
 	github.com/google/uuid v1.6.0
@@ -10,6 +11,7 @@ require (
 )
 
 require (
+	filippo.io/hpke v0.4.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
