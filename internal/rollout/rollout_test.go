@@ -133,7 +133,7 @@ func TestControllerDrivesSchedulingToHealthy(t *testing.T) {
 	if err := NewScheduler(st, discardLog()).ScheduleOnce(ctx(t)); err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
-	c := NewController(st, discardLog())
+	c := NewController(st, discardLog(), nil)
 
 	// Instances still pending → controller cannot advance past scheduling.
 	if err := c.ReconcileOnce(ctx(t)); err != nil {
@@ -164,7 +164,7 @@ func TestControllerFailsOnInstanceFailure(t *testing.T) {
 	_ = NewScheduler(st, discardLog()).ScheduleOnce(ctx(t))
 	reportAll(t, st, nodeID, store.InstanceFailed, "exited")
 
-	if err := NewController(st, discardLog()).ReconcileOnce(ctx(t)); err != nil {
+	if err := NewController(st, discardLog(), nil).ReconcileOnce(ctx(t)); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	dep, _ := st.GetDeployment(ctx(t), depID)
@@ -183,10 +183,30 @@ func TestControllerTearsDownSuperseded(t *testing.T) {
 	reportAll(t, st, nodeID, store.InstanceRunning, "healthy")
 	advance(t, st, depID, store.DeployStarting, store.DeployHealthy, store.DeployLive, store.DeploySuperseded)
 
-	if err := NewController(st, discardLog()).ReconcileOnce(ctx(t)); err != nil {
+	if err := NewController(st, discardLog(), nil).ReconcileOnce(ctx(t)); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if states, _ := st.InstanceStates(ctx(t), depID); len(states) != 0 {
 		t.Fatalf("superseded deployment instances must be torn down, got %v", states)
+	}
+}
+
+func TestControllerAutoPromotes(t *testing.T) {
+	st := testStore(t)
+	depID, nodeID, _ := fixture(t, st)
+	if err := NewScheduler(st, discardLog()).ScheduleOnce(ctx(t)); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	c := NewController(st, discardLog(), nil)
+	reportAll(t, st, nodeID, store.InstanceRunning, "healthy")
+	// One legal transition per tick: scheduling→starting→healthy→live.
+	for i := 0; i < 4; i++ {
+		if err := c.ReconcileOnce(ctx(t)); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	dep, _ := st.GetDeployment(ctx(t), depID)
+	if dep.State != store.DeployLive {
+		t.Fatalf("expected live after auto-promote, got %s", dep.State)
 	}
 }

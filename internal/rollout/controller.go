@@ -5,17 +5,27 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/craig/composectl/internal/router"
 	"github.com/craig/composectl/internal/store"
 )
+
+// RouterSync repoints external traffic to the current set of live routes. It is
+// an interface so the controller stays testable without a filesystem, and so
+// the concrete *router.Router (which knows Traefik) is the only Traefik-aware
+// piece. Nil is allowed — routing is opt-in via COMPOSECTL_ROUTER_DIR.
+type RouterSync interface {
+	Sync(routes []router.Route) error
+}
 
 type Controller struct {
 	st           *store.Store
 	log          *slog.Logger
+	rtr          RouterSync
 	startTimeout time.Duration
 }
 
-func NewController(st *store.Store, log *slog.Logger) *Controller {
-	return &Controller{st: st, log: log, startTimeout: 5 * time.Minute}
+func NewController(st *store.Store, log *slog.Logger, rtr RouterSync) *Controller {
+	return &Controller{st: st, log: log, rtr: rtr, startTimeout: 5 * time.Minute}
 }
 
 // ReconcileOnce advances every active rollout by the aggregate of its
@@ -46,7 +56,33 @@ func (c *Controller) ReconcileOnce(ctx context.Context) error {
 			c.log.Warn("teardown failed", "deployment", dep.ID, "err", err)
 		}
 	}
+
+	// Repoint external traffic to the current live routes. Doing this every
+	// tick (not only on promote) is self-healing: a router restart or a missed
+	// write reconverges within a tick.
+	if c.rtr != nil {
+		if err := c.syncRouter(ctx); err != nil {
+			c.log.Warn("router sync failed", "err", err)
+		}
+	}
 	return nil
+}
+
+func (c *Controller) syncRouter(ctx context.Context) error {
+	routes, err := c.st.ListLiveRoutes(ctx)
+	if err != nil {
+		return err
+	}
+	rr := make([]router.Route, 0, len(routes))
+	for _, lr := range routes {
+		rr = append(rr, router.Route{
+			Key:              lr.Env8,
+			Hostname:         lr.Hostname,
+			ServiceContainer: lr.ProjectName + "-" + lr.IngressService,
+			Port:             lr.IngressPort,
+		})
+	}
+	return c.rtr.Sync(rr)
 }
 
 func (c *Controller) advance(ctx context.Context, dep store.Deployment) error {
@@ -80,8 +116,16 @@ func (c *Controller) advance(ctx context.Context, dep store.Deployment) error {
 		return c.st.UpdateDeploymentState(ctx, dep.ID, store.DeployHealthy, "")
 	case dep.State == store.DeployStarting && time.Since(dep.UpdatedAt) > c.startTimeout:
 		return c.st.UpdateDeploymentState(ctx, dep.ID, store.DeployFailed, "timed out waiting for health")
+	case dep.State == store.DeployHealthy:
+		// Auto-promote: flip to live atomically (supersedes the old revision).
+		// The router sync at the end of the tick repoints Traefik; the terminal
+		// teardown deletes the superseded revision's rows so the agent GCs its
+		// swappable containers.
+		if _, err := c.st.PromoteDeployment(ctx, dep.ID); err != nil {
+			return err
+		}
+		c.log.Info("auto-promoted", "deployment", dep.ID, "revision", dep.Revision)
+		return nil
 	}
-	// Slice A stops at healthy. Slice B adds: healthy → rewrite Traefik →
-	// PromoteDeployment → the terminal teardown above handles the old revision.
 	return nil
 }

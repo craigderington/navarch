@@ -108,7 +108,7 @@ func run(log *slog.Logger) error {
 	// They are what turn a pending deployment into running, health-gated
 	// containers once an agent is reconciling.
 	sched := rollout.NewScheduler(st, log)
-	ctrl := rollout.NewController(st, log)
+	ctrl := rollout.NewController(st, log, nil) // router wired in below when configured
 	go runLoop(ctx, cfg.TickInterval, log, "scheduler", sched.ScheduleOnce)
 	go runLoop(ctx, cfg.TickInterval, log, "controller", ctrl.ReconcileOnce)
 
