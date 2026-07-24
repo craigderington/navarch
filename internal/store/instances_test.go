@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -185,3 +186,71 @@ func TestListLiveRoutes(t *testing.T) {
 		t.Fatalf("live route not found in %+v", routes)
 	}
 }
+
+// driveToLive takes a deployment from pending to live: writes instances,
+// reports them running, walks the state machine, and promotes.
+func driveToLive(t *testing.T, st *Store, dep *Deployment, node *Node) {
+	t.Helper()
+	insts := make([]NewInstance, 0)
+	for name, s := range dep.ResolvedSpec.Services {
+		insts = append(insts, NewInstance{ServiceName: name, Swappable: s.Swappable, ImageRef: s.Image})
+	}
+	if err := st.CreateServiceInstances(testCtx(t), dep.ID, node.ID, insts); err != nil {
+		t.Fatalf("instances: %v", err)
+	}
+	if err := st.UpdateDeploymentState(testCtx(t), dep.ID, DeployScheduling, ""); err != nil {
+		t.Fatalf("scheduling: %v", err)
+	}
+	desired, _ := st.DesiredStateForNode(testCtx(t), node.ID)
+	for _, d := range desired {
+		if d.DeploymentID == dep.ID {
+			_ = st.ReportInstance(testCtx(t), d.InstanceID, ObservedInstance{State: InstanceRunning, ContainerID: "c", SetStarted: true})
+		}
+	}
+	for _, s := range []DeploymentState{DeployStarting, DeployHealthy} {
+		if err := st.UpdateDeploymentState(testCtx(t), dep.ID, s, ""); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+	if _, err := st.PromoteDeployment(testCtx(t), dep.ID); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+}
+
+func TestRollbackDeploymentReusesEarlierVersion(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	node, _ := st.RegisterNode(testCtx(t), RegisterNodeParams{
+		OrgID: org.ID, Hostname: uniq("n"), AdvertiseAddr: "10.0.0.2", CPUMillis: 8000, MemoryBytes: 16 << 30})
+	env, _ := st.CreateEnvironment(testCtx(t), CreateEnvironmentParams{StackID: stack.ID, Slug: "prod"})
+
+	v1, _ := st.CreateStackVersion(testCtx(t), stack.ID, "raw1", specWithImage(t, "nginx:1.25"), "t")
+	d1, _ := st.CreateDeployment(testCtx(t), CreateDeploymentParams{EnvironmentID: env.ID, StackVersionID: v1.ID, ResolvedSpec: v1.Spec})
+	driveToLive(t, st, d1, node)
+
+	v2, _ := st.CreateStackVersion(testCtx(t), stack.ID, "raw2", specWithImage(t, "nginx:1.27"), "t")
+	d2, _ := st.CreateDeployment(testCtx(t), CreateDeploymentParams{EnvironmentID: env.ID, StackVersionID: v2.ID, ResolvedSpec: v2.Spec})
+	driveToLive(t, st, d2, node)
+
+	// Roll back to revision 1: a new deployment reusing v1's stack version.
+	d3, err := st.RollbackDeployment(testCtx(t), env.ID, 1)
+	if err != nil {
+		t.Fatalf("rollback to 1: %v", err)
+	}
+	if d3.StackVersionID != v1.ID {
+		t.Fatalf("rollback should reuse v1 (%s), got %s", v1.ID, d3.StackVersionID)
+	}
+	if d3.Revision != 3 {
+		t.Fatalf("expected revision 3, got %d", d3.Revision)
+	}
+	_ = d2
+
+	// A rollback target that never existed is ErrNotFound.
+	if _, err := st.RollbackDeployment(testCtx(t), env.ID, 99); !errorsIs(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for unknown revision, got %v", err)
+	}
+}
+
+func errorsIs(err, target error) bool { return errors.Is(err, target) }

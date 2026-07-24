@@ -89,6 +89,38 @@ func (s *Store) CreateDeployment(ctx context.Context, p CreateDeploymentParams) 
 	return &d, nil
 }
 
+// RollbackDeployment re-deploys an earlier revision's stack version as a new
+// revision. Append-only holds: nothing is mutated — a new deployment is created
+// and runs the normal rollout (and auto-promotes). toRevision <= 0 means "the
+// revision before the current live one".
+func (s *Store) RollbackDeployment(ctx context.Context, envID uuid.UUID, toRevision int) (*Deployment, error) {
+	var svID uuid.UUID
+	var specJSON []byte
+	q := `SELECT stack_version_id, resolved_spec FROM deployments WHERE environment_id=$1 AND revision=$2`
+	args := []any{envID, toRevision}
+	if toRevision <= 0 {
+		q = `SELECT stack_version_id, resolved_spec FROM deployments
+		     WHERE environment_id=$1 AND revision < (
+		       SELECT revision FROM deployments
+		       WHERE id=(SELECT live_deployment_id FROM environments WHERE id=$1))
+		     ORDER BY revision DESC LIMIT 1`
+		args = []any{envID}
+	}
+	if err := s.pool.QueryRow(ctx, q, args...).Scan(&svID, &specJSON); err != nil {
+		return nil, mapErr(err)
+	}
+	var resolved spec.DeploymentSpec
+	if err := json.Unmarshal(specJSON, &resolved); err != nil {
+		return nil, err
+	}
+	return s.CreateDeployment(ctx, CreateDeploymentParams{
+		EnvironmentID:  envID,
+		StackVersionID: svID,
+		ResolvedSpec:   &resolved,
+		CreatedBy:      "rollback",
+	})
+}
+
 // GetDeployment returns a single deployment by id.
 func (s *Store) GetDeployment(ctx context.Context, id uuid.UUID) (*Deployment, error) {
 	var d Deployment
