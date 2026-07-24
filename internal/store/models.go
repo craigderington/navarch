@@ -118,6 +118,7 @@ type Node struct {
 	AllocMemoryBytes int64             `json:"alloc_memory_bytes"`
 	Labels           map[string]string `json:"labels"`
 	AgentVersion     string            `json:"agent_version,omitempty"`
+	AgeRecipient     string            `json:"age_recipient,omitempty"`
 	LastHeartbeat    *time.Time        `json:"last_heartbeat,omitempty"`
 	CreatedAt        time.Time         `json:"created_at"`
 }

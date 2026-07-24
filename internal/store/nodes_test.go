@@ -51,6 +51,25 @@ func TestListReadyNodesReturnsRegistered(t *testing.T) {
 	}
 }
 
+func TestRegisterNodeStoresRecipient(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	n, err := st.RegisterNode(testCtx(t), RegisterNodeParams{
+		OrgID: org.ID, Hostname: uniq("node"), AdvertiseAddr: "10.0.0.7",
+		CPUMillis: 1000, MemoryBytes: 1 << 30, AgeRecipient: "age1exampletestrecipient",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if n.AgeRecipient != "age1exampletestrecipient" {
+		t.Fatalf("recipient not returned: %q", n.AgeRecipient)
+	}
+	ready, _ := st.ListReadyNodes(testCtx(t), org.ID)
+	if len(ready) != 1 || ready[0].AgeRecipient != "age1exampletestrecipient" {
+		t.Fatalf("recipient not persisted: %+v", ready)
+	}
+}
+
 func TestGetOrganizationBySlugUnknownIsNotFound(t *testing.T) {
 	st := testStore(t)
 	if _, err := st.GetOrganizationBySlug(testCtx(t), uniq("nope")); !errors.Is(err, ErrNotFound) {

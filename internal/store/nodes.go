@@ -15,6 +15,7 @@ type RegisterNodeParams struct {
 	MemoryBytes   int64
 	Labels        map[string]string
 	AgentVersion  string
+	AgeRecipient  string
 }
 
 // RegisterNode upserts by (org_id, hostname): a re-registering agent keeps
@@ -29,8 +30,8 @@ func (s *Store) RegisterNode(ctx context.Context, p RegisterNodeParams) (*Node, 
 	var labelsOut []byte
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO nodes (org_id, hostname, advertise_addr, state,
-		                   cpu_millis, memory_bytes, labels, agent_version, last_heartbeat)
-		VALUES ($1,$2,$3,'ready',$4,$5,$6,NULLIF($7,''),now())
+		                   cpu_millis, memory_bytes, labels, agent_version, age_recipient, last_heartbeat)
+		VALUES ($1,$2,$3,'ready',$4,$5,$6,NULLIF($7,''),NULLIF($8,''),now())
 		ON CONFLICT (org_id, hostname) DO UPDATE SET
 			advertise_addr = EXCLUDED.advertise_addr,
 			state          = 'ready',
@@ -38,15 +39,16 @@ func (s *Store) RegisterNode(ctx context.Context, p RegisterNodeParams) (*Node, 
 			memory_bytes   = EXCLUDED.memory_bytes,
 			labels         = EXCLUDED.labels,
 			agent_version  = EXCLUDED.agent_version,
+			age_recipient  = EXCLUDED.age_recipient,
 			last_heartbeat = now()
 		RETURNING id, org_id, hostname, host(advertise_addr), state,
 		          cpu_millis, memory_bytes, alloc_cpu_millis, alloc_memory_bytes,
-		          labels, COALESCE(agent_version,''), last_heartbeat, created_at
+		          labels, COALESCE(agent_version,''), COALESCE(age_recipient,''), last_heartbeat, created_at
 	`, p.OrgID, p.Hostname, p.AdvertiseAddr, p.CPUMillis, p.MemoryBytes,
-		labels, p.AgentVersion).
+		labels, p.AgentVersion, p.AgeRecipient).
 		Scan(&n.ID, &n.OrgID, &n.Hostname, &n.AdvertiseAddr, &n.State,
 			&n.CPUMillis, &n.MemoryBytes, &n.AllocCPUMillis, &n.AllocMemoryBytes,
-			&labelsOut, &n.AgentVersion, &n.LastHeartbeat, &n.CreatedAt)
+			&labelsOut, &n.AgentVersion, &n.AgeRecipient, &n.LastHeartbeat, &n.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -80,7 +82,7 @@ func (s *Store) ListNodes(ctx context.Context, orgID uuid.UUID) ([]Node, error) 
 	return s.queryNodes(ctx, `
 		SELECT id, org_id, hostname, host(advertise_addr), state,
 		       cpu_millis, memory_bytes, alloc_cpu_millis, alloc_memory_bytes,
-		       labels, COALESCE(agent_version,''), last_heartbeat, created_at
+		       labels, COALESCE(agent_version,''), COALESCE(age_recipient,''), last_heartbeat, created_at
 		FROM nodes WHERE org_id=$1 ORDER BY hostname
 	`, orgID)
 }
@@ -90,7 +92,7 @@ func (s *Store) ListReadyNodes(ctx context.Context, orgID uuid.UUID) ([]Node, er
 	return s.queryNodes(ctx, `
 		SELECT id, org_id, hostname, host(advertise_addr), state,
 		       cpu_millis, memory_bytes, alloc_cpu_millis, alloc_memory_bytes,
-		       labels, COALESCE(agent_version,''), last_heartbeat, created_at
+		       labels, COALESCE(agent_version,''), COALESCE(age_recipient,''), last_heartbeat, created_at
 		FROM nodes
 		WHERE org_id=$1 AND state='ready'
 		  AND last_heartbeat > now() - interval '30 seconds'
@@ -110,7 +112,7 @@ func (s *Store) queryNodes(ctx context.Context, sql string, args ...any) ([]Node
 		var labels []byte
 		if err := rows.Scan(&n.ID, &n.OrgID, &n.Hostname, &n.AdvertiseAddr, &n.State,
 			&n.CPUMillis, &n.MemoryBytes, &n.AllocCPUMillis, &n.AllocMemoryBytes,
-			&labels, &n.AgentVersion, &n.LastHeartbeat, &n.CreatedAt); err != nil {
+			&labels, &n.AgentVersion, &n.AgeRecipient, &n.LastHeartbeat, &n.CreatedAt); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(labels, &n.Labels); err != nil {
