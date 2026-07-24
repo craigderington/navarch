@@ -38,17 +38,17 @@ func LoadOrGenerateIdentity(path string) (Identity, error) {
 		}
 		return Identity{id: id}, nil
 	} else if !os.IsNotExist(err) {
-		return Identity{}, err
+		return Identity{}, fmt.Errorf("read identity %s: %w", path, err)
 	}
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
-		return Identity{}, err
+		return Identity{}, fmt.Errorf("generate identity: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return Identity{}, err
+		return Identity{}, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 	}
 	if err := os.WriteFile(path, []byte(id.String()+"\n"), 0o600); err != nil {
-		return Identity{}, err
+		return Identity{}, fmt.Errorf("write identity %s: %w", path, err)
 	}
 	return Identity{id: id}, nil
 }

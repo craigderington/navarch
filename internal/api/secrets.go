@@ -64,7 +64,8 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	ct, err := secrets.Encrypt(req.Value, recipients)
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.log.Error("secret encryption failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to encrypt secret", nil)
 		return
 	}
 	// key_id records what it was sealed to, for audit/rotation. The recipients
