@@ -27,6 +27,10 @@ type Config struct {
 	AgentToken string
 	// TickInterval paces the scheduler and rollout controller loops.
 	TickInterval time.Duration
+	// RouterDir is where Traefik dynamic config is written. Empty disables
+	// routing (the controller runs without a router), which keeps the control
+	// plane usable without Traefik in the stack.
+	RouterDir string
 }
 
 func Load() (*Config, error) {
@@ -35,6 +39,7 @@ func Load() (*Config, error) {
 		ListenAddr:   ListenAddr(),
 		AgentToken:   os.Getenv("COMPOSECTL_AGENT_TOKEN"),
 		TickInterval: time.Duration(intEnv("COMPOSECTL_TICK_SECONDS", 1)) * time.Second,
+		RouterDir:    os.Getenv("COMPOSECTL_ROUTER_DIR"),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("COMPOSECTL_DATABASE_URL is required")
