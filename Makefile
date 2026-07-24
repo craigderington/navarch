@@ -66,6 +66,10 @@ demo: ## Walk the full loop: catalog -> version -> agent-driven rollout -> promo
 demo-failure: ## Show a failed rollout leaving any live deployment untouched
 	API=$(API) ./scripts/demo-failure.sh
 
+.PHONY: demo-rollback
+demo-rollback: ## Deploy two versions, then roll back to the first
+	API=$(API) ./scripts/demo-rollback.sh
+
 .PHONY: agent-logs
 agent-logs: ## Tail the node agent logs
 	docker compose logs -f agent
