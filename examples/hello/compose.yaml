@@ -11,7 +11,10 @@
 
 services:
   api:
-    image: nginx:alpine
+    # whoami echoes its own container name in the response body, so `curl`ing
+    # through Traefik shows exactly which revision is serving — the traffic
+    # flip becomes visible.
+    image: traefik/whoami
     environment:
       DATABASE_URL: postgres://app:${secret:db_password}@db:5432/app
       LOG_LEVEL: info

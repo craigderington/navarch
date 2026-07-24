@@ -21,6 +21,7 @@ test: ## Run tests
 
 .PHONY: up
 up: ## Start the dev stack
+	docker network inspect cc-ingress >/dev/null 2>&1 || docker network create cc-ingress
 	docker compose up -d --build
 
 .PHONY: down
@@ -30,6 +31,7 @@ down: ## Stop the dev stack
 .PHONY: nuke
 nuke: ## Stop the dev stack and delete volumes
 	docker compose down -v
+	-docker network rm cc-ingress 2>/dev/null
 
 .PHONY: logs
 logs: ## Tail control plane logs

@@ -42,10 +42,15 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      traefik-init:
+        condition: service_completed_successfully
     environment:
       COMPOSECTL_DATABASE_URL: postgres://composectl:composectl@postgres:5432/composectl?sslmode=disable
       COMPOSECTL_LISTEN_ADDR: 0.0.0.0:8417
       COMPOSECTL_AGENT_TOKEN: dev-token-change-me
+      COMPOSECTL_ROUTER_DIR: /dynamic
+    volumes:
+      - traefik-dynamic:/dynamic
     ports:
       - "8417:8417"
     healthcheck:
@@ -54,6 +59,37 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+
+  # The control plane runs distroless-nonroot and can't write a root-owned fresh
+  # volume; this one-shot makes /dynamic writable before it starts.
+  traefik-init:
+    image: busybox
+    command: ["sh", "-c", "mkdir -p /dynamic && chmod 777 /dynamic"]
+    volumes:
+      - traefik-dynamic:/dynamic
+
+  # Traefik routes the env hostname to the live revision's ingress container.
+  # It watches the file-provider dir the control plane writes, and sits on the
+  # external cc-ingress network the agent attaches ingress containers to.
+  traefik:
+    image: traefik:v3.3
+    command:
+      - "--entryPoints.web.address=:80"
+      - "--providers.file.directory=/dynamic"
+      - "--providers.file.watch=true"
+      - "--api.insecure=true"
+      - "--log.level=INFO"
+    depends_on:
+      controlplane:
+        condition: service_healthy
+    ports:
+      - "8095:80"
+      - "8096:8080"
+    volumes:
+      - traefik-dynamic:/dynamic:ro
+    networks:
+      - default
+      - cc-ingress
 
   # Node agent: reconciles the host Docker daemon to the control plane's desired
   # state. It creates sibling containers on the host daemon via the mounted
@@ -77,5 +113,12 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
+# cc-ingress is created by `make up` before compose comes up (external), so both
+# Traefik and the agent-created ingress containers can share it.
+networks:
+  cc-ingress:
+    external: true
+
 volumes:
   pgdata:
+  traefik-dynamic:
