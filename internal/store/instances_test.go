@@ -44,7 +44,8 @@ func twoServiceSpec() *spec.DeploymentSpec {
 		SpecVersion: spec.SpecVersion,
 		Services: map[string]spec.Service{
 			"api": {Name: "api", Image: "nginx:alpine", Swappable: true,
-				Limits: spec.ResourceLimit{CPUMillis: 250, MemoryBytes: 256 << 20}},
+				Ingress: &spec.Ingress{Port: 80},
+				Limits:  spec.ResourceLimit{CPUMillis: 250, MemoryBytes: 256 << 20}},
 			"db": {Name: "db", Image: "postgres:16-alpine", Swappable: false,
 				Limits: spec.ResourceLimit{CPUMillis: 250, MemoryBytes: 256 << 20}},
 		},
@@ -149,3 +150,38 @@ func TestListPendingDeploymentsCarriesOrg(t *testing.T) {
 }
 
 func uuidNil() uuid.UUID { return uuid.UUID{} }
+
+func TestListLiveRoutes(t *testing.T) {
+	st := testStore(t)
+	dep, node := deployFixture(t, st)
+	_, _ = st.Pool().Exec(testCtx(t),
+		`UPDATE environments SET hostname='prod.example.com' WHERE id=(SELECT environment_id FROM deployments WHERE id=$1)`, dep.ID)
+	_ = st.CreateServiceInstances(testCtx(t), dep.ID, node.ID, []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "x"}})
+	for _, s := range []DeploymentState{DeployScheduling, DeployStarting, DeployHealthy} {
+		if err := st.UpdateDeploymentState(testCtx(t), dep.ID, s, ""); err != nil {
+			t.Fatalf("advance %s: %v", s, err)
+		}
+	}
+	if _, err := st.PromoteDeployment(testCtx(t), dep.ID); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	routes, err := st.ListLiveRoutes(testCtx(t))
+	if err != nil {
+		t.Fatalf("ListLiveRoutes: %v", err)
+	}
+	var found bool
+	for _, r := range routes {
+		if r.Hostname == "prod.example.com" {
+			found = true
+			if r.IngressService != "api" || r.IngressPort != 80 {
+				t.Fatalf("bad route: %+v", r)
+			}
+			if r.ProjectName == "" || r.Env8 == "" {
+				t.Fatalf("route missing project context: %+v", r)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("live route not found in %+v", routes)
+	}
+}

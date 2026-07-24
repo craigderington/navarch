@@ -250,6 +250,53 @@ func shortID(id uuid.UUID) string {
 	return id.String()[:8]
 }
 
+type LiveRoute struct {
+	Env8           string
+	ProjectName    string
+	IngressService string
+	Hostname       string
+	IngressPort    int
+}
+
+// ListLiveRoutes returns one route per live deployment whose environment has a
+// hostname and whose spec declares an ingress service. The router turns these
+// into Traefik config. resolved_spec is parsed here (not in the router) so the
+// router stays free of the spec type and pgx.
+func (s *Store) ListLiveRoutes(ctx context.Context) ([]LiveRoute, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT d.environment_id, d.project_name, COALESCE(e.hostname,''), d.resolved_spec
+		FROM deployments d
+		JOIN environments e ON e.id = d.environment_id
+		WHERE d.state = 'live' AND e.hostname IS NOT NULL AND e.hostname <> ''
+	`)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := []LiveRoute{}
+	for rows.Next() {
+		var envID uuid.UUID
+		var project, hostname string
+		var specJSON []byte
+		if err := rows.Scan(&envID, &project, &hostname, &specJSON); err != nil {
+			return nil, err
+		}
+		var ds spec.DeploymentSpec
+		if err := json.Unmarshal(specJSON, &ds); err != nil {
+			return nil, err
+		}
+		name, ok := ds.IngressService()
+		if !ok {
+			continue
+		}
+		out = append(out, LiveRoute{
+			Env8: shortID(envID), ProjectName: project, IngressService: name,
+			Hostname: hostname, IngressPort: ds.Services[name].Ingress.Port,
+		})
+	}
+	return out, rows.Err()
+}
+
 type PendingDeployment struct {
 	Deployment
 	OrgID uuid.UUID
