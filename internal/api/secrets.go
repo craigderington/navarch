@@ -2,11 +2,16 @@ package api
 
 import (
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/craig/composectl/internal/secrets"
-	"github.com/craig/composectl/internal/spec"
 )
+
+// secretKeyPattern is the anchored form of the ${secret:KEY} key charset. It
+// validates the whole key — unlike spec.SecretRefPattern, which is deliberately
+// unanchored to find markers embedded in larger strings.
+var secretKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // Secret handlers. The control plane never sees plaintext at rest: a value
 // arrives here once over TLS, gets encrypted immediately to every ready
@@ -30,9 +35,9 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body", nil)
 		return
 	}
-	// A secret key must be a valid ${secret:KEY} reference key, since that is
-	// how it is consumed. Anchor the pattern for the whole key.
-	if req.Key == "" || !spec.SecretRefPattern.MatchString("${secret:"+req.Key+"}") {
+	// A secret key must match the valid key pattern: alphanumerics, dots,
+	// underscores, and hyphens only.
+	if !secretKeyPattern.MatchString(req.Key) {
 		writeError(w, http.StatusBadRequest, "invalid secret key", nil)
 		return
 	}

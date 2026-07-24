@@ -159,3 +159,24 @@ func TestDeleteSecret(t *testing.T) {
 		t.Fatalf("deleted key still listed: %s", rec.Body.String())
 	}
 }
+
+func TestSetSecretWithMalformedKeyIsRejected(t *testing.T) {
+	srv := testServer(t)
+	envID, _ := seedEnvWithNode(t, srv)
+
+	tests := []string{
+		"bad key!",        // spaces not allowed
+		"x}${secret:y",    // special characters not allowed
+		"",                // empty key not allowed
+		"key with spaces", // spaces not allowed
+	}
+
+	for _, malformedKey := range tests {
+		body, _ := json.Marshal(map[string]string{"key": malformedKey, "value": "hunter2"})
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/envs/"+envID+"/secrets", bytes.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("malformed key %q: expected 400, got %d: %s", malformedKey, rec.Code, rec.Body.String())
+		}
+	}
+}
