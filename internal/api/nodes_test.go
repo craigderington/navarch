@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/craig/composectl/internal/store"
 )
 
@@ -52,5 +54,26 @@ func TestRegisterNodeHandler(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
 	if got.ID == "" {
 		t.Fatal("expected a node id in the response")
+	}
+}
+
+func TestRollbackUnknownEnvIsNotFound(t *testing.T) {
+	srv := testServer(t)
+	body := bytes.NewReader([]byte(`{"to_revision":1}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/envs/"+uuid.NewString()+"/rollback", body))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 rolling back an env with no deployments, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRollbackInvalidEnvIsBadRequest(t *testing.T) {
+	srv := testServer(t)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/envs/not-a-uuid/rollback",
+		bytes.NewReader([]byte(`{}`))))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a bad env id, got %d", rec.Code)
 	}
 }

@@ -145,9 +145,30 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
 }
 
-// handleRollback is Slice C. The store method behind it is not written yet.
-func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) { notImplemented(w) }
+type rollbackRequest struct {
+	// ToRevision selects the revision to re-deploy. 0 (or omitted) means the
+	// revision before the current live one.
+	ToRevision int `json:"to_revision,omitempty"`
+}
 
-func notImplemented(w http.ResponseWriter) {
-	writeError(w, http.StatusNotImplemented, "not implemented until sprint 2 slice C", nil)
+// handleRollback re-deploys an earlier stack version as a new revision, which
+// then runs the normal rollout and auto-promotes. deployments stays append-only.
+func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 15*time.Second)
+	defer cancel()
+	envID, ok := pathUUID(w, r, "env")
+	if !ok {
+		return
+	}
+	var req rollbackRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", nil)
+		return
+	}
+	dep, err := s.st.RollbackDeployment(ctx, envID, req.ToRevision)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, dep)
 }
