@@ -186,6 +186,21 @@ func (s *Store) ListEnvironments(ctx context.Context, stackID uuid.UUID) ([]Envi
 	return out, rows.Err()
 }
 
+// OrgForEnvironment resolves an environment up through stacks and
+// applications to the owning org. Secret handlers need this to scope which
+// nodes' recipients a value should be encrypted to — an environment only
+// ever names its stack, never its org directly.
+func (s *Store) OrgForEnvironment(ctx context.Context, envID uuid.UUID) (uuid.UUID, error) {
+	var orgID uuid.UUID
+	err := s.pool.QueryRow(ctx, `
+		SELECT a.org_id FROM environments e
+		JOIN stacks s ON s.id = e.stack_id
+		JOIN applications a ON a.id = s.app_id
+		WHERE e.id = $1
+	`, envID).Scan(&orgID)
+	return orgID, mapErr(err)
+}
+
 // orEmpty keeps a nil map from marshalling to JSON null, which the config
 // column (NOT NULL) would reject.
 func orEmpty(m map[string]string) map[string]string {

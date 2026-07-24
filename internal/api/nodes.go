@@ -21,6 +21,10 @@ type registerNodeRequest struct {
 	MemoryBytes   int64             `json:"memory_bytes"`
 	Labels        map[string]string `json:"labels,omitempty"`
 	AgentVersion  string            `json:"agent_version,omitempty"`
+	// AgeRecipient is the agent's public encryption key. Without it the node
+	// is invisible to handleSetSecret's recipient collection, so it never
+	// receives any secret sealed after it registers.
+	AgeRecipient string `json:"age_recipient,omitempty"`
 }
 
 func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
@@ -41,6 +45,7 @@ func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
 		OrgID: org.ID, Hostname: req.Hostname, AdvertiseAddr: req.AdvertiseAddr,
 		CPUMillis: req.CPUMillis, MemoryBytes: req.MemoryBytes,
 		Labels: req.Labels, AgentVersion: req.AgentVersion,
+		AgeRecipient: req.AgeRecipient,
 	})
 	if err != nil {
 		s.writeStoreError(w, err)

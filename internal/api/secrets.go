@@ -1,0 +1,101 @@
+package api
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/craig/composectl/internal/secrets"
+	"github.com/craig/composectl/internal/spec"
+)
+
+// Secret handlers. The control plane never sees plaintext at rest: a value
+// arrives here once over TLS, gets encrypted immediately to every ready
+// node's age recipient, and only the ciphertext is stored. See
+// internal/secrets for the encrypt/decrypt boundary.
+
+type setSecretRequest struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	envID, ok := pathUUID(w, r, "env")
+	if !ok {
+		return
+	}
+	var req setSecretRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", nil)
+		return
+	}
+	// A secret key must be a valid ${secret:KEY} reference key, since that is
+	// how it is consumed. Anchor the pattern for the whole key.
+	if req.Key == "" || !spec.SecretRefPattern.MatchString("${secret:"+req.Key+"}") {
+		writeError(w, http.StatusBadRequest, "invalid secret key", nil)
+		return
+	}
+	orgID, err := s.st.OrgForEnvironment(ctx, envID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	nodes, err := s.st.ListReadyNodes(ctx, orgID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	var recipients []string
+	for _, n := range nodes {
+		if n.AgeRecipient != "" {
+			recipients = append(recipients, n.AgeRecipient)
+		}
+	}
+	if len(recipients) == 0 {
+		writeError(w, http.StatusUnprocessableEntity,
+			"no ready node with an encryption key; is an agent running?", nil)
+		return
+	}
+	ct, err := secrets.Encrypt(req.Value, recipients)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	// key_id records what it was sealed to, for audit/rotation. The recipients
+	// double as the id in Sprint 2's single-node world.
+	if err := s.st.SetSecret(ctx, envID, req.Key, ct, recipients[0]); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"key": req.Key})
+}
+
+func (s *Server) handleListSecrets(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	envID, ok := pathUUID(w, r, "env")
+	if !ok {
+		return
+	}
+	metas, err := s.st.SecretKeysForEnv(ctx, envID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"secrets": metas})
+}
+
+func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	envID, ok := pathUUID(w, r, "env")
+	if !ok {
+		return
+	}
+	if err := s.st.DeleteSecret(ctx, envID, r.PathValue("key")); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

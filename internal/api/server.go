@@ -79,6 +79,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/nodes/{id}/desired-state", s.handleDesiredState)
 	s.mux.HandleFunc("POST /v1/nodes/{id}/report", s.handleInstanceReport)
 	s.mux.HandleFunc("GET /v1/nodes", s.handleListNodes)
+
+	// Secrets — encrypted at rest, plaintext never stored. The list response
+	// never includes values; see internal/secrets for the encrypt boundary.
+	s.mux.HandleFunc("POST /v1/envs/{env}/secrets", s.handleSetSecret)
+	s.mux.HandleFunc("GET /v1/envs/{env}/secrets", s.handleListSecrets)
+	s.mux.HandleFunc("DELETE /v1/envs/{env}/secrets/{key}", s.handleDeleteSecret)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
