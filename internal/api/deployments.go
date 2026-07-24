@@ -71,6 +71,32 @@ func (s *Server) handleCreateDeployment(w http.ResponseWriter, r *http.Request) 
 	// plaintext never touches the control plane or the database.
 	resolved := applyEnvConfig(sv.Spec, env.Config)
 
+	// Fail fast if the spec references a secret this environment has never
+	// had set. Catching it here means a bad deploy never reaches a node —
+	// the alternative is discovering the gap when the container crash-loops.
+	if req := resolved.RequiredSecrets(); len(req) > 0 {
+		have, err := s.st.SecretKeysForEnv(ctx, envID)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		set := map[string]bool{}
+		for _, m := range have {
+			set[m.Key] = true
+		}
+		var missing []string
+		for _, k := range req {
+			if !set[k] {
+				missing = append(missing, k)
+			}
+		}
+		if len(missing) > 0 {
+			writeJSON(w, http.StatusUnprocessableEntity, errorBody{
+				Error: "environment is missing required secrets", Details: missing})
+			return
+		}
+	}
+
 	d, err := s.st.CreateDeployment(ctx, store.CreateDeploymentParams{
 		EnvironmentID:  envID,
 		StackVersionID: svID,

@@ -11,9 +11,21 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/craig/composectl/internal/parser"
 	"github.com/craig/composectl/internal/secrets"
 	"github.com/craig/composectl/internal/store"
 )
+
+// secretRequiringCompose is a minimal compose file whose one service
+// references a secret mid-string, the pattern the parser is required to
+// pick up (see spec.SecretRefPattern — deliberately unanchored).
+const secretRequiringCompose = `
+services:
+  api:
+    image: nginx:alpine
+    environment:
+      DB: postgres://app:${secret:db_password}@db/app
+`
 
 // uniqSlug builds a slug that satisfies the store's lowercase-alphanumeric-
 // with-dashes rule while staying unique across test runs against the same
@@ -66,6 +78,49 @@ func seedEnvWithNode(t *testing.T, srv *Server) (string, *store.Node) {
 	}
 
 	return env.ID.String(), node
+}
+
+// seedEnvWithSecretRequiringStack builds the same catalog chain as
+// seedEnvWithNode, but pushes a stack version parsed from
+// secretRequiringCompose so the environment's latest spec has a non-empty
+// RequiredSecrets(). Returns the environment id (string, for building
+// deployment URLs).
+func seedEnvWithSecretRequiringStack(t *testing.T, srv *Server) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	org, err := srv.st.GetOrganizationBySlug(ctx, "dev")
+	if err != nil {
+		t.Fatalf("GetOrganizationBySlug(dev): %v", err)
+	}
+
+	slug := uniqSlug("secretreq")
+	app, err := srv.st.CreateApplication(ctx, org.ID, slug, "Secret-Requiring App")
+	if err != nil {
+		t.Fatalf("CreateApplication: %v", err)
+	}
+	stack, err := srv.st.CreateStack(ctx, app.ID, slug)
+	if err != nil {
+		t.Fatalf("CreateStack: %v", err)
+	}
+
+	dspec, err := parser.Parse(ctx, []byte(secretRequiringCompose), slug)
+	if err != nil {
+		t.Fatalf("parser.Parse: %v", err)
+	}
+	if _, err := srv.st.CreateStackVersion(ctx, stack.ID, secretRequiringCompose, dspec, "tester"); err != nil {
+		t.Fatalf("CreateStackVersion: %v", err)
+	}
+
+	env, err := srv.st.CreateEnvironment(ctx, store.CreateEnvironmentParams{
+		StackID: stack.ID, Slug: slug,
+	})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+
+	return env.ID.String()
 }
 
 func TestSetAndListSecret(t *testing.T) {
@@ -178,5 +233,64 @@ func TestSetSecretWithMalformedKeyIsRejected(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("malformed key %q: expected 400, got %d: %s", malformedKey, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+// TestCreateDeploymentWithMissingSecretIsUnprocessable is the deploy-time
+// fail-fast check: an environment whose latest stack version references
+// ${secret:db_password} but has never had that secret set must be rejected
+// with 422 before a deployment row is even created — not discovered later
+// via a crash-looping container.
+func TestCreateDeploymentWithMissingSecretIsUnprocessable(t *testing.T) {
+	srv := testServer(t)
+	envID := seedEnvWithSecretRequiringStack(t, srv)
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/envs/"+envID+"/deployments", bytes.NewReader([]byte("{}"))))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 with missing secret, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("db_password")) {
+		t.Fatalf("response body must name the missing secret: %s", rec.Body.String())
+	}
+}
+
+// TestCreateDeploymentWithSecretSetSucceeds is the happy-path counterpart:
+// once the required secret is set, the same environment/stack deploys
+// normally.
+func TestCreateDeploymentWithSecretSetSucceeds(t *testing.T) {
+	srv := testServer(t)
+	envID := seedEnvWithSecretRequiringStack(t, srv)
+
+	// Register a node so the encrypt-to-recipients step in handleSetSecret
+	// has somewhere to seal the ciphertext to.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	org, err := srv.st.GetOrganizationBySlug(ctx, "dev")
+	if err != nil {
+		t.Fatalf("GetOrganizationBySlug(dev): %v", err)
+	}
+	id, err := secrets.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	if _, err := srv.st.RegisterNode(ctx, store.RegisterNodeParams{
+		OrgID: org.ID, Hostname: uniqSlug("secretreq-node"), AdvertiseAddr: "10.0.0.10",
+		CPUMillis: 1000, MemoryBytes: 1 << 30, AgeRecipient: id.Recipient(),
+	}); err != nil {
+		t.Fatalf("RegisterNode: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]string{"key": "db_password", "value": "hunter2"})
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/envs/"+envID+"/secrets", bytes.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("set secret: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/envs/"+envID+"/deployments", bytes.NewReader([]byte("{}"))))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 once secret is set, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
