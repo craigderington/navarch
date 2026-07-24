@@ -33,7 +33,7 @@ type Config struct {
 // The agent speaks only HTTP to the control plane — it never touches Postgres,
 // preserving the store's exclusive ownership of pgx across binaries.
 func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
-	drv, err := dockerd.New(cfg.DockerHost, EnvSecrets(cfg.Secrets))
+	drv, err := dockerd.New(cfg.DockerHost)
 	if err != nil {
 		return err
 	}

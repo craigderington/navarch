@@ -25,7 +25,7 @@ func (f *fakeDriver) EnsureImage(ctx context.Context, ref string) error { return
 func (f *fakeDriver) EnsureNetwork(ctx context.Context, name string, l map[string]string) (string, error) {
 	return "net-" + name, nil
 }
-func (f *fakeDriver) EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec) (string, bool, error) {
+func (f *fakeDriver) EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (string, bool, error) {
 	f.created = append(f.created, cs.Name)
 	return "id-" + cs.Name, true, nil
 }

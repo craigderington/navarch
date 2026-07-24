@@ -27,11 +27,10 @@ type SecretSource interface {
 }
 
 type Driver struct {
-	cli     *client.Client
-	secrets SecretSource
+	cli *client.Client
 }
 
-func New(host string, secrets SecretSource) (*Driver, error) {
+func New(host string) (*Driver, error) {
 	opts := []client.Opt{client.FromEnv, client.WithAPIVersionNegotiation()}
 	if host != "" {
 		opts = append(opts, client.WithHost(host))
@@ -40,7 +39,7 @@ func New(host string, secrets SecretSource) (*Driver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
-	return &Driver{cli: cli, secrets: secrets}, nil
+	return &Driver{cli: cli}, nil
 }
 
 type VolumeMount struct {
@@ -120,14 +119,17 @@ func (d *Driver) removeNetwork(ctx context.Context, name string) error {
 // EnsureContainer creates and starts the container if absent, or adopts the
 // existing one by name. Adoption is how a pinned service is shared: the second
 // deployment to want it finds it already running and reports created=false.
-func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec) (string, bool, error) {
+//
+// secrets is per-call, not a Driver field, because Sprint 3 resolves secrets
+// per-environment — a single Driver reconciles instances across many envs.
+func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets SecretSource) (string, bool, error) {
 	if existing, err := d.findByName(ctx, cs.Name); err != nil {
 		return "", false, err
 	} else if existing != "" {
 		return existing, false, nil
 	}
 
-	env, err := d.resolveEnv(cs.Env, cs.SecretEnv)
+	env, err := d.resolveEnv(cs.Env, cs.SecretEnv, secrets)
 	if err != nil {
 		return "", false, err
 	}
@@ -278,7 +280,11 @@ func (d *Driver) findByName(ctx context.Context, name string) (string, error) {
 // SecretSource, using exactly spec.SecretRefPattern so the agent expands the
 // same syntax the parser recognized. A missing secret is a hard error — better
 // than handing the container a half-built connection string.
-func (d *Driver) resolveEnv(env, secretEnv map[string]string) (map[string]string, error) {
+//
+// secrets may be nil (no source configured for this call) — every
+// ${secret:KEY} reference is then treated as missing, same as a source that
+// simply doesn't have the key.
+func (d *Driver) resolveEnv(env, secretEnv map[string]string, secrets SecretSource) (map[string]string, error) {
 	out := make(map[string]string, len(env)+len(secretEnv))
 	for k, v := range env {
 		out[k] = v
@@ -287,7 +293,11 @@ func (d *Driver) resolveEnv(env, secretEnv map[string]string) (map[string]string
 		var missing string
 		expanded := spec.SecretRefPattern.ReplaceAllStringFunc(tmpl, func(m string) string {
 			sub := spec.SecretRefPattern.FindStringSubmatch(m)
-			val, ok := d.secrets.Get(sub[1])
+			var val string
+			var ok bool
+			if secrets != nil {
+				val, ok = secrets.Get(sub[1])
+			}
 			if !ok {
 				missing = sub[1]
 				return m

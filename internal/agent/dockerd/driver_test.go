@@ -12,7 +12,7 @@ func (s staticSecrets) Get(k string) (string, bool) { v, ok := s[k]; return v, o
 
 func testDriver(t *testing.T) *Driver {
 	t.Helper()
-	d, err := New("", staticSecrets{})
+	d, err := New("")
 	if err != nil {
 		t.Skipf("docker unavailable: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestEnsureContainerCreatesAndAdopts(t *testing.T) {
 		Cmd:    []string{"sh", "-c", "sleep 30"},
 		Labels: labels, Network: netName, MemoryBytes: 64 << 20,
 	}
-	id, created, err := d.EnsureContainer(ctx, cs)
+	id, created, err := d.EnsureContainer(ctx, cs, nil)
 	if err != nil {
 		t.Fatalf("EnsureContainer: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestEnsureContainerCreatesAndAdopts(t *testing.T) {
 	})
 
 	// Second call adopts the existing container rather than creating a new one.
-	id2, created2, err := d.EnsureContainer(ctx, cs)
+	id2, created2, err := d.EnsureContainer(ctx, cs, nil)
 	if err != nil {
 		t.Fatalf("EnsureContainer (adopt): %v", err)
 	}
@@ -91,13 +91,14 @@ func TestEnsureContainerCreatesAndAdopts(t *testing.T) {
 }
 
 func TestSecretExpansion(t *testing.T) {
-	d, err := New("", staticSecrets{"db_password": "s3cr3t"})
+	d, err := New("")
 	if err != nil {
 		t.Skipf("docker client init: %v", err)
 	}
 	env, err := d.resolveEnv(
 		map[string]string{"LOG_LEVEL": "info"},
 		map[string]string{"URL": "postgres://app:${secret:db_password}@db/app"},
+		staticSecrets{"db_password": "s3cr3t"},
 	)
 	if err != nil {
 		t.Fatalf("resolveEnv: %v", err)
@@ -111,8 +112,26 @@ func TestSecretExpansion(t *testing.T) {
 }
 
 func TestSecretExpansionMissingKeyErrors(t *testing.T) {
-	d, _ := New("", staticSecrets{})
-	if _, err := d.resolveEnv(nil, map[string]string{"URL": "${secret:absent}"}); err == nil {
+	d, _ := New("")
+	if _, err := d.resolveEnv(nil, map[string]string{"URL": "${secret:absent}"}, staticSecrets{}); err == nil {
 		t.Fatal("expected an error for a missing secret")
+	}
+}
+
+// A nil SecretSource is what a caller passes when no per-environment source
+// applies (e.g. today's minimal agent wiring, before Task 7 lands the real
+// one). It must behave exactly like an empty source: no refs, no problem;
+// any ref is reported missing rather than panicking.
+func TestSecretExpansionNilSourceTreatsReferencesAsMissing(t *testing.T) {
+	d, _ := New("")
+	if _, err := d.resolveEnv(nil, map[string]string{"URL": "${secret:absent}"}, nil); err == nil {
+		t.Fatal("expected a nil SecretSource to report the referenced secret as missing")
+	}
+	env, err := d.resolveEnv(map[string]string{"LOG_LEVEL": "info"}, nil, nil)
+	if err != nil {
+		t.Fatalf("resolveEnv with no secret refs and a nil source must not error: %v", err)
+	}
+	if env["LOG_LEVEL"] != "info" {
+		t.Fatalf("plain env lost: %q", env["LOG_LEVEL"])
 	}
 }

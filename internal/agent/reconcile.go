@@ -18,7 +18,10 @@ import (
 type DockerDriver interface {
 	EnsureImage(ctx context.Context, ref string) error
 	EnsureNetwork(ctx context.Context, name string, labels map[string]string) (string, error)
-	EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec) (string, bool, error)
+	// secrets is a placeholder (nil) until Task 7 wires the per-environment
+	// source through the reconciler; the dockerd.Driver signature already
+	// takes it per-call so that wiring doesn't touch this file's shape again.
+	EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (string, bool, error)
 	AttachNetwork(ctx context.Context, containerID, network string, aliases ...string) error
 	InspectHealth(ctx context.Context, containerID string) (dockerd.Health, error)
 	StopRemove(ctx context.Context, containerID string) error
@@ -93,7 +96,9 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 	}
 
 	cs := containerSpec(di, name)
-	id, _, err := r.drv.EnsureContainer(ctx, cs)
+	// TODO(Task 7): pass the environment's SecretSource instead of nil once
+	// the reconciler is wired to per-environment secrets.
+	id, _, err := r.drv.EnsureContainer(ctx, cs, nil)
 	if err != nil {
 		return fail(err)
 	}
