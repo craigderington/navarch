@@ -5,7 +5,6 @@ import (
 	"os"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -27,7 +26,7 @@ func LoadConfig() (Config, error) {
 		CPUMillis:       intEnv("COMPOSECTL_NODE_CPU_MILLIS", runtime.NumCPU()*1000),
 		MemoryBytes:     int64(intEnv("COMPOSECTL_NODE_MEMORY_MB", 8192)) << 20,
 		PollInterval:    time.Duration(intEnv("COMPOSECTL_POLL_SECONDS", 2)) * time.Second,
-		Secrets:         parseSecrets(os.Getenv("COMPOSECTL_DEV_SECRETS")),
+		IdentityFile:    envOr("COMPOSECTL_AGE_IDENTITY_FILE", "/identity/age.key"),
 	}
 	if cfg.ControlPlaneURL == "" {
 		return Config{}, fmt.Errorf("COMPOSECTL_CONTROLPLANE_URL is required")
@@ -49,19 +48,4 @@ func intEnv(key string, def int) int {
 		}
 	}
 	return def
-}
-
-// parseSecrets reads "k1=v1,k2=v2" into the dev secret map. Dev-only; the real
-// encrypted store is Sprint 3.
-func parseSecrets(raw string) map[string]string {
-	out := map[string]string{}
-	if raw == "" {
-		return out
-	}
-	for _, pair := range strings.Split(raw, ",") {
-		if k, v, ok := strings.Cut(pair, "="); ok {
-			out[k] = v
-		}
-	}
-	return out
 }

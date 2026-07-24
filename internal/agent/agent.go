@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/craig/composectl/internal/agent/dockerd"
+	"github.com/craig/composectl/internal/secrets"
 	"github.com/craig/composectl/internal/store"
 )
 
@@ -26,7 +27,7 @@ type Config struct {
 	CPUMillis       int
 	MemoryBytes     int64
 	PollInterval    time.Duration
-	Secrets         map[string]string
+	IdentityFile    string
 }
 
 // Run registers this node and then reconciles on a ticker until ctx is done.
@@ -38,7 +39,16 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 		return err
 	}
 	rec := NewReconciler(drv)
-	c := &cpClient{base: cfg.ControlPlaneURL, token: cfg.AgentToken, http: &http.Client{Timeout: 30 * time.Second}}
+
+	// The identity persists across restarts (LoadOrGenerateIdentity writes it to
+	// disk on first run) — a fresh one on every restart couldn't decrypt secrets
+	// already sealed to the old recipient.
+	id, err := secrets.LoadOrGenerateIdentity(cfg.IdentityFile)
+	if err != nil {
+		return fmt.Errorf("load identity: %w", err)
+	}
+
+	c := &cpClient{base: cfg.ControlPlaneURL, token: cfg.AgentToken, http: &http.Client{Timeout: 30 * time.Second}, id: id}
 
 	nodeID, err := c.register(ctx, cfg)
 	if err != nil {
@@ -64,6 +74,7 @@ type cpClient struct {
 	base  string
 	token string
 	http  *http.Client
+	id    secrets.Identity
 }
 
 func (c *cpClient) register(ctx context.Context, cfg Config) (uuid.UUID, error) {
@@ -73,18 +84,40 @@ func (c *cpClient) register(ctx context.Context, cfg Config) (uuid.UUID, error) 
 	err := c.do(ctx, http.MethodPost, "/v1/nodes/register", map[string]any{
 		"org": cfg.Org, "hostname": cfg.Hostname, "advertise_addr": cfg.AdvertiseAddr,
 		"cpu_millis": cfg.CPUMillis, "memory_bytes": cfg.MemoryBytes, "agent_version": "sprint2-a",
+		"age_recipient": c.id.Recipient(),
 	}, &out)
 	return out.ID, err
 }
 
 func (c *cpClient) reconcileTick(ctx context.Context, nodeID uuid.UUID, rec *Reconciler, log *slog.Logger) error {
 	var desired struct {
-		Instances []store.DesiredInstance `json:"instances"`
+		Instances []store.DesiredInstance            `json:"instances"`
+		Secrets   map[string][]store.EncryptedSecret `json:"secrets"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/v1/nodes/"+nodeID.String()+"/desired-state", nil, &desired); err != nil {
 		return err
 	}
-	reports := rec.Reconcile(ctx, desired.Instances)
+
+	// Decrypt happens here, agent-side, per environment — plaintext never
+	// crosses back to the control plane. A single bad ciphertext (e.g. sealed
+	// to a stale recipient after identity rotation) must not stall every other
+	// env's containers, so a decrypt failure is logged and that key is skipped
+	// rather than aborting the tick.
+	sources := map[string]dockerd.SecretSource{}
+	for env8, list := range desired.Secrets {
+		m := EnvSecrets{}
+		for _, es := range list {
+			v, err := c.id.Decrypt(es.Ciphertext)
+			if err != nil {
+				log.Warn("secret decrypt failed", "env", env8, "key", es.Key, "err", err)
+				continue
+			}
+			m[es.Key] = v
+		}
+		sources[env8] = m
+	}
+
+	reports := rec.Reconcile(ctx, desired.Instances, sources)
 	if len(reports) > 0 {
 		if err := c.do(ctx, http.MethodPost, "/v1/nodes/"+nodeID.String()+"/report",
 			map[string]any{"instances": toReportDTO(reports)}, nil); err != nil {

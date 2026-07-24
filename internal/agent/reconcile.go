@@ -18,9 +18,6 @@ import (
 type DockerDriver interface {
 	EnsureImage(ctx context.Context, ref string) error
 	EnsureNetwork(ctx context.Context, name string, labels map[string]string) (string, error)
-	// secrets is a placeholder (nil) until Task 7 wires the per-environment
-	// source through the reconciler; the dockerd.Driver signature already
-	// takes it per-call so that wiring doesn't touch this file's shape again.
 	EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (string, bool, error)
 	AttachNetwork(ctx context.Context, containerID, network string, aliases ...string) error
 	InspectHealth(ctx context.Context, containerID string) (dockerd.Health, error)
@@ -51,7 +48,12 @@ func NewReconciler(drv DockerDriver) *Reconciler {
 // per instance. It also garbage-collects containers this env manages that are
 // no longer desired — that is how a superseded revision's swappable containers
 // are torn down.
-func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInstance) []Report {
+//
+// secrets is keyed by env8; each environment's decrypted values only reach
+// containers in that environment. A missing entry (env8 not in the map) is
+// nil, which the driver treats as an empty source — every ${secret:KEY}
+// reference then fails as missing rather than resolving to another env's value.
+func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInstance, secrets map[string]dockerd.SecretSource) []Report {
 	reports := make([]Report, 0, len(desired))
 	wanted := map[string]bool{} // container name → desired
 	envs := map[string]bool{}
@@ -60,7 +62,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInsta
 		name := containerName(di)
 		wanted[name] = true
 		envs[di.Env8] = true
-		reports = append(reports, r.ensure(ctx, di, name))
+		reports = append(reports, r.ensure(ctx, di, name, secrets[di.Env8]))
 	}
 
 	// GC: any managed container in a touched env whose name is not wanted, and
@@ -80,7 +82,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInsta
 	return reports
 }
 
-func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name string) Report {
+func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name string, secrets dockerd.SecretSource) Report {
 	rep := Report{InstanceID: di.InstanceID}
 	fail := func(err error) Report {
 		rep.State = store.InstanceFailed
@@ -96,9 +98,7 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 	}
 
 	cs := containerSpec(di, name)
-	// TODO(Task 7): pass the environment's SecretSource instead of nil once
-	// the reconciler is wired to per-environment secrets.
-	id, _, err := r.drv.EnsureContainer(ctx, cs, nil)
+	id, _, err := r.drv.EnsureContainer(ctx, cs, secrets)
 	if err != nil {
 		return fail(err)
 	}
