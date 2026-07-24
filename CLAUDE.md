@@ -22,14 +22,16 @@ Go + Postgres. Terminal-first. Craig's project.
 ## Quickstart
 
 ```bash
-make tidy        # only after changing deps — go.sum is committed
-make up          # postgres + migrations + control plane
+make tidy         # only after changing deps — go.sum is committed
+make up           # postgres + migrations + control plane + node agent
 make health
-make validate    # parse examples/webapp, see classification
-make demo        # full loop: catalog -> version -> deploy -> promote
-make psql        # database shell
-make logs        # tail control plane
-make nuke        # down + delete volumes
+make validate     # parse examples/webapp, see classification
+make demo         # agent-driven rollout to healthy, over HTTP, real containers
+make demo-failure # bad image → failed, prior deployment untouched
+make agent-logs   # tail the node agent
+make psql         # database shell
+make logs         # tail control plane
+make nuke         # down + delete volumes
 ```
 
 ---
@@ -37,26 +39,42 @@ make nuke        # down + delete volumes
 ## Architecture: the boundaries are load-bearing
 
 ```
-cmd/controlplane   API server entrypoint
-cmd/agent          (empty — Sprint 2)
-internal/spec      normalized DeploymentSpec — the platform's vocabulary
-internal/parser    the ONLY package importing compose-go
-internal/store     the ONLY package importing pgx
-internal/api       thin handlers: decode, delegate, encode
-internal/config    env-var config
-migrations/        golang-migrate SQL
+cmd/controlplane      API server + scheduler/controller loops
+cmd/agent             node agent binary (Sprint 2)
+internal/spec         normalized DeploymentSpec — the platform's vocabulary
+internal/parser       the ONLY package importing compose-go
+internal/store        the ONLY package importing pgx
+internal/api          thin handlers: decode, delegate, encode
+internal/rollout      scheduler + rollout controller (control-plane loops)
+internal/agent        node reconciliation loop (imports neither pgx nor compose-go)
+internal/agent/dockerd the ONLY package importing the Docker SDK
+internal/config       env-var config (control plane only)
+migrations/           golang-migrate SQL
 ```
 
 **Do not violate these boundaries.** They're the main design decision in
 the codebase:
 
 - Only `internal/parser` imports compose-go. Everything downstream speaks
-  `spec.DeploymentSpec`. This means the compose implementation can be
-  swapped, or another input format accepted, without touching the
-  scheduler or agent.
+  `spec.DeploymentSpec`.
 - Only `internal/store` imports pgx. Handlers never build SQL.
+- Only `internal/agent/dockerd` imports the Docker SDK. Everything above it
+  speaks `dockerd.ContainerSpec` and the `Driver` methods, so the container
+  runtime could be swapped without touching reconcile logic.
 - Handlers decode, delegate, encode. Business logic belongs in store or
   parser, not in `internal/api`.
+
+**The boundaries hold across binaries, not just packages:**
+
+- **The agent never imports pgx.** It speaks only the control plane's HTTP
+  API (register / desired-state / report / heartbeat). This is why the
+  Sprint 2 agent *polls* rather than consuming the `node_{id}` NOTIFY — a
+  `LISTEN` would drag pgx into the agent binary.
+- **The agent's config loader lives in package `agent`, NOT `internal/config`.**
+  If it lived in `internal/config`, the control plane (which imports that
+  package) would transitively link the Docker SDK via `agent → dockerd`.
+  Guard command: `go list -deps ./cmd/controlplane | grep docker/docker`
+  must return nothing.
 
 If a change seems to require crossing one of these lines, that's a signal
 the abstraction is wrong — raise it rather than routing around it.
@@ -163,6 +181,19 @@ pending → scheduling → starting → healthy → live → superseded
  failed ←─────┴───────────┴──────────┘              stopped
 ```
 
+Two Postgres gotchas around these enum columns, both real bugs already hit:
+
+- **pgx cannot encode a `[]DeploymentState` against the enum array.** Query
+  `state = ANY($n)` with a named-string slice fails at runtime (`unknown
+  type OID`). Pass `[]string` and cast the column: `state::text = ANY($n)`
+  (see `statesToText`). `UpdateDeploymentState` had this latent from Sprint
+  1 — untested because the old demo drove states with raw SQL.
+- **`service_instances.node_id → nodes` and `deployments.stack_version_id
+  → stack_versions` lack `ON DELETE CASCADE`.** An org-delete cascade can
+  drop a parent before its referrer. Test cleanup deletes bottom-up
+  (instances → deployments → nodes → org); any real org/node delete path
+  must too.
+
 **Promotion is atomic.** `PromoteDeployment` supersedes the old revision,
 marks the new one live, and repoints the environment in one transaction.
 A partial promotion leaves the router pointing at a deployment the
@@ -221,86 +252,84 @@ mounted" — an error pointing at the wrong line. `driveLetterMount`
 distinguishes the two so each gets an accurate message, and
 `misparsedVolumeNames` suppresses the misleading second error.
 
-**Agents are woken by `LISTEN`/`NOTIFY`, not polling.** The
+**The agent polls; it is NOT woken by NOTIFY (Slice A).** The
 `service_instances_notify` trigger fires on insert/update and emits
-`pg_notify('node_' || node_id-without-dashes, '')`. The Sprint 2 agent must
-subscribe to exactly that channel name.
+`pg_notify('node_' || node_id-without-dashes, '')`, but nothing consumes it
+yet: the agent can't `LISTEN` without importing pgx and breaking the
+across-binaries boundary. It polls `GET /desired-state` on a ticker
+(`COMPOSECTL_POLL_SECONDS`, default 2). The trigger stays for a future
+control-plane push endpoint (Sprint 5).
+
+**Reconcile converges to the instance rows; teardown is row deletion.**
+Desired state = the `service_instances` rows for a node (only for
+deployments in `scheduling|starting|healthy|live` — `DesiredStateForNode`
+excludes terminal ones). The agent removes any container labelled for the
+env with no backing desired row. So tearing down a superseded revision is
+just deleting its rows (`DeleteInstances`) — the agent GCs the orphaned
+**swappable** containers next tick. The pinned container survives because
+the now-live deployment still holds its own row for it (adoption by the
+stable name `cc-{env8}-pinned-{service}`). Pinned containers are never GC'd
+here.
+
+**Naming is fixed and load-bearing** (the agent and router both compute
+these, so don't drift them): swappable container
+`cc-{env8}-r{rev}-{slot}-{service}`, pinned container
+`cc-{env8}-pinned-{service}`, revision network `cc-{env8}-r{rev}-{slot}`,
+named volume `cc-{env8}-{volume}`. Labels: `cc.env`, `cc.deployment`,
+`cc.service`, `cc.swappable`. `env8` = `store.shortID(environmentID)`.
 
 ---
 
 ## Sprint status
 
-**Sprint 1 (current) — control plane foundation**
+**Sprint 1 — control plane foundation. DONE.** Schema, parser, constraint
+validation, catalog + deployment endpoints, dev stack. Parser (16 cases)
+and store (now ~27 cases) tested against real Postgres.
 
-- [x] Postgres schema
-- [x] compose-go parser → `DeploymentSpec`
-- [x] Constraint validation
-- [x] API skeleton + `/v1/validate`
-- [x] Deployment create/get/list/promote
-- [x] Dev stack via Compose
-- [x] `go mod tidy` — `go.sum` committed; `go build ./...` and `go vet ./...` clean
-- [x] `-healthcheck` probe so the container healthcheck can pass
-- [x] Parser unit tests — 16 cases in `internal/parser/parser_test.go`
-- [x] Catalog handlers — org → app → stack → version → env, the chain that
-      makes the deployment endpoints reachable over HTTP
-- [x] Store tests — 20 cases in `internal/store`, against real Postgres
-- [ ] Tests for `internal/api` overlay precedence and `internal/spec`
-      digest stability — still zero coverage in those packages, and the
-      overlay rules are the ones with a history of real bugs.
-- [ ] Node endpoints + rollback (Sprint 2; no store methods behind them yet)
+**Sprint 2 — node agent + rollouts. Slice A DONE; B and C next.**
 
-`make demo` walks the whole loop end to end — catalog, stack version,
-deployment, promotion — and asserts on the way through. It is the fastest
-proof the control plane still works after a change.
+The design and per-slice plan live in `docs/superpowers/`:
+`specs/2026-07-23-sprint2-agent-rollouts-design.md` and
+`plans/2026-07-23-sprint2-slice-a-reconciliation-spine.md`.
 
-Store methods (`internal/store`):
+- **Slice A (done)** — the reconciliation spine. The agent drives a real
+  Docker daemon; the control-plane scheduler places pending deployments and
+  writes desired instances; the controller aggregates instance health and
+  drives `scheduling → starting → healthy`, failing the deployment (blue
+  untouched) if an instance fails. `make demo` is now agent-driven end to
+  end — **no SQL fakery** — and shows blue/green coexistence with one shared
+  pinned db. `make demo-failure` shows a bad image → `failed`.
+- **Slice B (next)** — Traefik as a real compose service, an
+  `internal/router` config generator, and the controller *auto-promoting*
+  on healthy (rewrite Traefik → `PromoteDeployment` → tear down old
+  swappable). The controller currently stops at `healthy`; promotion is
+  still the manual `POST /promote`.
+- **Slice C (next)** — `POST /v1/envs/{env}/rollback` = re-deploy an older
+  stack version as a new revision through the same spine. `handleRollback`
+  is still 501.
 
-`CreateOrganization`, `ListOrganizations`, `CreateApplication`,
-`ListApplications`, `CreateStack`, `CreateEnvironment`, `ListEnvironments`,
-`GetEnvironment`, `CreateStackVersion`, `GetStackVersion`,
-`LatestStackVersion`, `ListStackVersions`, `CreateDeployment`,
-`GetDeployment`, `ListDeployments`, `UpdateDeploymentState`,
-`PromoteDeployment`
+**Placement/agent model:** the scheduler owns placement (writes desired
+`service_instances`); the agent is a dumb reconciler. Nodes are org-scoped,
+so the agent registers into a stable **`dev` org** (bootstrapped at
+control-plane startup via `BootstrapDevOrg`); `make demo` deploys into it.
+Multi-org node pools are Sprint 4. The dev secret source is a static map
+from `COMPOSECTL_DEV_SECRETS` (`k=v,k=v`); the encrypted store is Sprint 3.
 
-`UpdateDeploymentState` still has no HTTP caller — it is the seam the
-Sprint 2 agent will drive. `make demo` fakes those transitions with SQL,
-which is the one part of the loop that is not yet a real API call.
+**Store methods** now also include, beyond the Sprint 1 catalog set:
+`RegisterNode`, `Heartbeat`, `ListNodes`, `ListReadyNodes`,
+`GetOrganizationBySlug`, `CreateServiceInstances`, `DesiredStateForNode`,
+`ReportInstance`, `InstanceStates`, `DeleteInstances`,
+`ListPendingDeployments`, `ListRolloutsInState`. All node/deployment
+endpoints are wired; only `rollback` is still 501 (Slice C). Handler files
+in `internal/api`: `catalog.go`, `deployments.go`, `validate.go`,
+`nodes.go`.
 
-Route table (all registered in `internal/api/server.go:routes`):
+`POST /v1/orgs` is self-serve (orgs are the root; a seeded migration UUID
+would be permanent). `POST /v1/stacks/{stack}/versions` takes the compose
+file as the **raw body** (`curl --data-binary @compose.yaml`), authorship
+via `?created_by=`.
 
-| Route | Status |
-|---|---|
-| `GET /healthz` | implemented |
-| `POST /v1/validate` | implemented |
-| `POST\|GET /v1/orgs` | implemented |
-| `POST\|GET /v1/orgs/{org}/apps` | implemented |
-| `POST /v1/apps/{app}/stacks` | implemented |
-| `POST\|GET /v1/stacks/{stack}/versions` | implemented |
-| `POST\|GET /v1/stacks/{stack}/envs` | implemented |
-| `POST\|GET /v1/envs/{env}/deployments` | implemented |
-| `GET /v1/deployments/{id}` | implemented |
-| `POST /v1/deployments/{id}/promote` | implemented |
-| `POST /v1/envs/{env}/rollback` | 501 |
-| `POST /v1/nodes/register`, `/{id}/heartbeat`, `/{id}/report` | 501 |
-| `GET /v1/nodes`, `/v1/nodes/{id}/desired-state` | 501 |
-
-There is no `POST /v1/orgs/{org}` style nesting for organizations because
-they are the root: `POST /v1/orgs` is self-serve on purpose. Seeding an org
-in a migration was the alternative and was rejected — migrations are
-immutable here, so a seeded UUID would be permanent.
-
-`POST /v1/stacks/{stack}/versions` takes the compose file as the **raw
-body**, like `/v1/validate`, so `curl --data-binary @compose.yaml` works.
-Authorship rides along as `?created_by=`.
-
-Files in `internal/api` now match the route groups: `catalog.go`,
-`deployments.go`, `validate.go`, `nodes.go` (the remaining stubs).
-
-**Sprint 2 — node agent + rollouts.** Agent reconciliation loop, health
-gating, Traefik dynamic config, traffic flip, rollback. This is where
-blue/green stops being a data model and becomes real.
-
-**Sprint 3** — environments, secret injection, preview envs
+**Sprint 3** — environments, secret injection (encrypted store), preview envs
 **Sprint 4** — multi-node, WireGuard mesh, placement scoring
 **Sprint 5** — Bubble Tea TUI, log aggregation, metrics
 
@@ -308,7 +337,8 @@ blue/green stops being a data model and becomes real.
 
 ## Conventions
 
-- Go 1.23. Method-and-wildcard routes (`POST /v1/x/{id}`) — no router dep.
+- Go 1.25 (bumped from 1.23 in Slice A — see loose ends). Method-and-wildcard
+  routes (`POST /v1/x/{id}`) — no router dep.
 - `log/slog` for logging. Structured, no `fmt.Println`.
 - Errors wrap with `%w`. Store exposes `ErrNotFound` / `ErrConflict` /
   `ErrInvalid`; `writeStoreError` maps them to 404 / 409 / 400 so handlers
@@ -328,43 +358,49 @@ blue/green stops being a data model and becomes real.
 
 ## Known loose ends
 
-- `store.uuidOrNil` is dead code — no caller. Either wire it into the
-  handlers that parse path UUIDs or delete it; right now it duplicates the
-  `uuid.Parse` + 400 dance the handlers already do inline.
-- `cmd/agent` is referenced in the layout above but does not exist on disk
-  yet. Sprint 2 creates it.
-- **Do not let `go mod tidy` raise the `go` directive.** The Dockerfile
-  builds on `golang:1.23-alpine` with `GOTOOLCHAIN=local`, so a `go.mod`
-  requiring anything above 1.23 fails the image build at `go mod download`
-  — and only there, never locally. A modern local toolchain will happily
-  bump the directive to satisfy a *test-only* transitive dep: specifically
-  `github.com/rogpeppe/go-internal`, which reaches the graph via
-  yaml.v3 → check.v1 → kr/pretty and whose v1.15.0 demands go 1.25. It is
-  pinned to **v1.14.1** (needs exactly 1.23) for that reason. If you tidy
-  and `grep '^go ' go.mod` no longer says 1.23, you've broken `make up`;
-  either re-pin or bump the builder image deliberately.
-
+- **Toolchain is go 1.25** (go.mod directive + `golang:1.25-alpine` builder,
+  kept in step). Slice A bumped it from 1.23 because the Docker Engine SDK
+  pulls an OpenTelemetry/grpc stack that requires 1.25 — a real runtime
+  dependency, bumped deliberately. This supersedes the old "keep 1.23 / pin
+  go-internal" rule; `go mod tidy` raising the directive is no longer the
+  hazard it was, though the Dockerfile builder and go.mod must still move
+  together. `go mod tidy` overshot the OTel stack to the latest (1.25-needing)
+  versions rather than the older ones Docker minimally requires — fine, since
+  we're at 1.25 anyway.
+- `internal/api`, `internal/spec`, `internal/config` still have **no tests**.
+  The overlay-precedence rules (`internal/api/overlay.go`) and digest
+  stability (`internal/spec`) are the untested spots with a history of real
+  bugs — worth covering.
 - The example stack's comment claims `cache` is "swappable (tmpfs only)",
   but `cache` declares no mount at all. Harmless — it is swappable either
   way — but the comment describes a case the example never exercises.
+- `examples/webapp/compose.yaml` uses placeholder images that don't pull;
+  it's for parsing/classification only. The **runnable** demo stack is
+  `examples/hello/compose.yaml` (real images), which `make demo` uses.
 
 ## Verification
 
-`go build ./...` before claiming anything compiles. `make test` is
-meaningful for `internal/parser` (16 cases) and `internal/store` (20), both
-under `-race`; `internal/api`, `internal/spec` and `internal/config` still
-have none, so a green suite says nothing about them. Run a single case with
-`go test ./internal/parser/ -run TestSingleCharacterVolumeName -v`.
+`go build ./...` before claiming anything compiles. Tested packages:
+`internal/parser` (16, pure), `internal/store` (~27), `internal/rollout`
+(scheduler + controller), `internal/api` (node handler), `internal/agent`
+(reconcile logic, fake driver — pure), `internal/agent/dockerd` (against a
+real daemon). `internal/spec`, `internal/config`, and most of
+`internal/api` still have none.
 
-**Store tests need a live Postgres** — no SQLite fallback, by design. They
-use the dev stack on `5473` by default, or `COMPOSECTL_TEST_DATABASE_URL`.
-Without one they **skip**, so a green run with the stack down proves
-nothing; check for `--- SKIP` before trusting it. Each test creates its own
-org with a unique slug and deletes it (and everything cascading) on
-cleanup, so runs don't pollute the dev database.
+**Two live dependencies, both skip loudly when absent** — no fallbacks, by
+design. `store`/`rollout`/`api` tests need Postgres (dev stack on `5473`, or
+`COMPOSECTL_TEST_DATABASE_URL`); `dockerd` tests need a reachable Docker
+daemon. A green run with either down proves nothing — **check for
+`--- SKIP`** before trusting it. Test fixtures create a unique-slug org and
+delete it (and children, bottom-up) on cleanup.
 
-`make validate` exercises the full parse path against the example stack —
-fastest end-to-end check that parser changes didn't break classification.
+**Boundary guard:** `go list -deps ./cmd/controlplane | grep docker/docker`
+must return nothing — the control-plane binary must not link the Docker SDK.
+
+`make demo` is the real end-to-end check now: it brings a stack up through
+the agent and asserts it reaches `healthy` unaided. `make validate`
+exercises the parse path (fastest check that parser changes didn't break
+classification). Both need `make up` first.
 
 Worth testing against: dependency cycles, bind mounts, published ports,
 `privileged`, pinned ingress services, read-only volumes (must stay
