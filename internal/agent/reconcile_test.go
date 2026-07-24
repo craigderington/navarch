@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -124,5 +125,22 @@ func TestHealthMappingExitedFails(t *testing.T) {
 	reports := r.Reconcile(context.Background(), []store.DesiredInstance{desired("api", true, dockerd.Health{})})
 	if reports[0].State != store.InstanceFailed {
 		t.Fatalf("exited container must map to failed, got %s", reports[0].State)
+	}
+}
+
+func TestReconcileAttachesIngressToSharedNetwork(t *testing.T) {
+	f := &fakeDriver{health: map[string]dockerd.Health{}}
+	r := NewReconciler(f)
+	d := desired("api", true, dockerd.Health{})
+	d.Service.Ingress = &spec.Ingress{Port: 80}
+	r.Reconcile(context.Background(), []store.DesiredInstance{d})
+	var attached bool
+	for _, a := range f.attached {
+		if strings.HasSuffix(a, "->cc-ingress") {
+			attached = true
+		}
+	}
+	if !attached {
+		t.Fatalf("ingress container must join cc-ingress, got attaches=%v", f.attached)
 	}
 }

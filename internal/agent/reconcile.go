@@ -104,6 +104,18 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 			return fail(err)
 		}
 	}
+	// An ingress service also joins the shared cc-ingress network so Traefik
+	// (permanently on it) can reach this revision's ingress container by its
+	// unique name. Blue and green never collide because the name carries the
+	// revision + slot.
+	if di.Service.Ingress != nil {
+		if _, err := r.drv.EnsureNetwork(ctx, "cc-ingress", map[string]string{"cc.shared": "ingress"}); err != nil {
+			return fail(err)
+		}
+		if err := r.drv.AttachNetwork(ctx, id, "cc-ingress", name); err != nil {
+			return fail(err)
+		}
+	}
 
 	rep.ContainerID = id
 	rep.SetStarted = true
