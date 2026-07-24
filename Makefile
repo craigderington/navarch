@@ -70,6 +70,10 @@ demo-failure: ## Show a failed rollout leaving any live deployment untouched
 demo-rollback: ## Deploy two versions, then roll back to the first
 	API=$(API) ./scripts/demo-rollback.sh
 
+.PHONY: demo-secrets
+demo-secrets: ## Set + deploy a secret end to end: ciphertext at rest, plaintext through Traefik, 422 when unset
+	API=$(API) DB_URL=$(DB_URL) ./scripts/demo-secrets.sh
+
 .PHONY: agent-logs
 agent-logs: ## Tail the node agent logs
 	docker compose logs -f agent

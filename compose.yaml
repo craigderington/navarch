@@ -108,10 +108,12 @@ services:
       COMPOSECTL_ORG: dev
       COMPOSECTL_NODE_HOSTNAME: dev-node-1
       COMPOSECTL_AGENT_TOKEN: dev-token-change-me
-      # Dev secret source — Sprint 3 replaces this with the encrypted store.
-      COMPOSECTL_DEV_SECRETS: db_password=devpassword
+      COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Identity must persist across restarts — a fresh keypair each boot
+      # would make every existing secret's ciphertext undecryptable.
+      - age-identity:/identity
 
 # cc-ingress is created by `make up` before compose comes up (external), so both
 # Traefik and the agent-created ingress containers can share it.
@@ -122,3 +124,4 @@ networks:
 volumes:
   pgdata:
   traefik-dynamic:
+  age-identity:

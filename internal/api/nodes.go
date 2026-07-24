@@ -82,7 +82,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 // handleDesiredState returns the instances this node must run, each with its
 // resolved Service spec inline so the agent needs no second call to build
-// containers.
+// containers, plus the ciphertext for every env with instances on this node
+// so the agent can decrypt and inject secrets without a separate round trip.
 func (s *Server) handleDesiredState(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := contextWithTimeout(r, 5*time.Second)
 	defer cancel()
@@ -95,7 +96,12 @@ func (s *Server) handleDesiredState(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"instances": desired})
+	secretsByEnv, err := s.st.EncryptedSecretsForNode(ctx, id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"instances": desired, "secrets": secretsByEnv})
 }
 
 type reportRequest struct {

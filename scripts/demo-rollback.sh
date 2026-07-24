@@ -37,6 +37,9 @@ APP=$(api POST "/v1/orgs/$ORG/apps" "{\"slug\":\"rb-$SUFFIX\",\"name\":\"RB\"}" 
 STACK=$(api POST "/v1/apps/$APP/stacks" "{\"slug\":\"s-$SUFFIX\"}" | jq -r .id)
 ENV_ID=$(api POST "/v1/stacks/$STACK/envs" "{\"slug\":\"prod\",\"hostname\":\"$HOST\"}" | jq -r .id)
 
+step "Set the secret examples/hello references — deploy now 422s without it"
+api POST "/v1/envs/$ENV_ID/secrets" '{"key":"db_password","value":"devpassword"}' | jq -e .key >/dev/null
+
 step "Version 1 → revision 1 (live)"
 curl -sS -X POST "$API/v1/stacks/$STACK/versions" --data-binary @examples/hello/compose.yaml | jq -e .id >/dev/null
 D1=$(api POST "/v1/envs/$ENV_ID/deployments" '{}' | jq -r .id)

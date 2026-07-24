@@ -65,6 +65,10 @@ curl -sS -X POST "$API/v1/stacks/$STACK/versions?created_by=demo" --data-binary 
 ENV_ID=$(api POST "/v1/stacks/$STACK/envs" "{\"slug\":\"prod\",\"hostname\":\"$HOST\"}" | jq -r .id)
 note "org=$ORG env=$ENV_ID host=$HOST"
 
+step "Set the secret examples/hello references — deploy now 422s without it"
+api POST "/v1/envs/$ENV_ID/secrets" '{"key":"db_password","value":"devpassword"}' | jq -e .key >/dev/null
+note "set secret 'db_password'"
+
 step "Deploy revision 1 — the agent + controller take it to live on their own"
 DEP1=$(api POST "/v1/envs/$ENV_ID/deployments" '{"created_by":"demo"}' | jq -r .id)
 wait_state "$DEP1" live
