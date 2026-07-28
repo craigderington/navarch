@@ -105,9 +105,11 @@ func run(log *slog.Logger) error {
 	srvHandler.BootstrapDevOrg(bootCtx)
 	bootCancel()
 
-	// Scheduler + rollout controller: two loops over the deployment lifecycle.
-	// They are what turn a pending deployment into running, health-gated
-	// containers once an agent is reconciling.
+	// Scheduler + rollout controller + reaper: three loops over the deployment
+	// lifecycle. Scheduler and controller turn a pending deployment into
+	// running, health-gated containers once an agent is reconciling; the
+	// reaper is what ends an environment's life, expiring previews and
+	// sweeping stale teardown instructions.
 	// Routing is opt-in: with COMPOSECTL_ROUTER_DIR set, the controller writes
 	// Traefik dynamic config there on each tick. Without it, rollouts still work
 	// (up to healthy + auto-promote); only external traffic steering is off.
@@ -118,8 +120,10 @@ func run(log *slog.Logger) error {
 	}
 	sched := rollout.NewScheduler(st, log)
 	ctrl := rollout.NewController(st, log, rtr)
+	reaper := rollout.NewReaper(st, log)
 	go runLoop(ctx, cfg.TickInterval, log, "scheduler", sched.ScheduleOnce)
 	go runLoop(ctx, cfg.TickInterval, log, "controller", ctrl.ReconcileOnce)
+	go runLoop(ctx, cfg.TickInterval, log, "reaper", reaper.ReapOnce)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
