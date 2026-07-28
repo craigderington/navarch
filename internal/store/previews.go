@@ -37,6 +37,9 @@ func (s *Store) CreatePreview(ctx context.Context, p CreatePreviewParams) (*Envi
 
 	err := s.tx(ctx, func(tx pgx.Tx) error {
 		var config []byte
+		// TTL.String() (e.g. "1h0m0s") is passed as the interval literal
+		// directly -- Postgres's interval parser accepts Go's duration
+		// rendering as-is, so no reformatting is needed here.
 		err := tx.QueryRow(ctx, `
 			INSERT INTO environments (stack_id, slug, hostname, config, ephemeral, expires_at)
 			VALUES ($1, $2, NULLIF($3,''), '{}'::jsonb, true, now() + $4::interval)

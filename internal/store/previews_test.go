@@ -1,8 +1,11 @@
 package store
 
 import (
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // The CHECK constraint is the whole safety story for expiry: an ephemeral
@@ -111,6 +114,35 @@ func TestCreatePreviewCopiesLatestSecretsOnly(t *testing.T) {
 	}
 	if string(ct) != "ct-v2" {
 		t.Errorf("must copy the latest version, got %q", ct)
+	}
+}
+
+// Atomicity is the point of this task: a preview that existed with a
+// hostname but no deployment would be an environment the reaper eventually
+// collects and the user never sees work. A StackVersionID that doesn't
+// exist makes the deployment insert's foreign key fail inside
+// createDeploymentTx -- after the environment insert and the secret copy
+// have already run in the same transaction -- so this exercises the
+// rollback, not just an early bail-out.
+func TestCreatePreviewRollsBackOnDeploymentFailure(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	sv := newStackVersion(t, st, stack.ID)
+
+	slug := "pr-rollback"
+	_, _, err := st.CreatePreview(ctx, CreatePreviewParams{
+		StackID: stack.ID, Slug: slug, Hostname: "pr-rollback-x.preview.localhost",
+		TTL: time.Hour, StackVersionID: uuid.New(), ResolvedSpec: sv.Spec,
+	})
+	if err == nil {
+		t.Fatal("CreatePreview must fail when the stack version does not exist")
+	}
+
+	if _, err := st.GetEnvironmentBySlug(ctx, stack.ID, slug); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("environment must not survive a rolled-back deployment insert, got %v", err)
 	}
 }
 
