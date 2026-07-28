@@ -122,6 +122,37 @@ func (s *Store) LatestStackVersion(ctx context.Context, stackID uuid.UUID) (*Sta
 	return &sv, nil
 }
 
+func (s *Store) GetStack(ctx context.Context, id uuid.UUID) (*Stack, error) {
+	var st Stack
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, app_id, slug, created_at FROM stacks WHERE id = $1
+	`, id).Scan(&st.ID, &st.AppID, &st.Slug, &st.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &st, nil
+}
+
+// GetEnvironmentBySlug resolves the secret-inheritance source, which callers
+// name by slug ("staging") rather than by id.
+func (s *Store) GetEnvironmentBySlug(ctx context.Context, stackID uuid.UUID, slug string) (*Environment, error) {
+	var e Environment
+	var config []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, stack_id, slug, strategy, COALESCE(hostname,''),
+		       config, live_deployment_id, ephemeral, expires_at, created_at
+		FROM environments WHERE stack_id = $1 AND slug = $2
+	`, stackID, slug).Scan(&e.ID, &e.StackID, &e.Slug, &e.Strategy, &e.Hostname,
+		&config, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt, &e.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if err := json.Unmarshal(config, &e.Config); err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
 func (s *Store) GetEnvironment(ctx context.Context, id uuid.UUID) (*Environment, error) {
 	var e Environment
 	var configJSON []byte

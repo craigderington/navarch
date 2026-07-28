@@ -29,61 +29,77 @@ type CreateDeploymentParams struct {
 // a second active deployment for the environment — that surfaces as
 // ErrConflict, which the API maps to 409.
 func (s *Store) CreateDeployment(ctx context.Context, p CreateDeploymentParams) (*Deployment, error) {
-	var d Deployment
-
+	var d *Deployment
 	err := s.tx(ctx, func(tx pgx.Tx) error {
-		// Lock the environment row for the duration. Serializes rollouts
-		// per environment without a global lock.
-		var liveSlot *string
-		err := tx.QueryRow(ctx, `
-			SELECT d.slot
-			FROM environments e
-			LEFT JOIN deployments d ON d.id = e.live_deployment_id
-			WHERE e.id = $1
-			FOR UPDATE OF e
-		`, p.EnvironmentID).Scan(&liveSlot)
-		if err != nil {
-			return err
-		}
-
-		// Next revision.
-		var revision int
-		err = tx.QueryRow(ctx, `
-			SELECT COALESCE(MAX(revision), 0) + 1
-			FROM deployments WHERE environment_id = $1
-		`, p.EnvironmentID).Scan(&revision)
-		if err != nil {
-			return err
-		}
-
-		// Alternate slot. First ever deploy goes blue.
-		slot := "blue"
-		if liveSlot != nil && *liveSlot == "blue" {
-			slot = "green"
-		}
-
-		projectName := fmt.Sprintf("cc-%s-r%d-%s",
-			shortID(p.EnvironmentID), revision, slot)
-
-		specJSON, err := json.Marshal(p.ResolvedSpec)
-		if err != nil {
-			return err
-		}
-
-		return tx.QueryRow(ctx, `
-			INSERT INTO deployments (
-				environment_id, stack_version_id, revision, slot,
-				project_name, state, resolved_spec, created_by
-			) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7)
-			RETURNING id, environment_id, stack_version_id, revision, slot,
-			          project_name, state, created_at, updated_at
-		`, p.EnvironmentID, p.StackVersionID, revision, slot,
-			projectName, specJSON, p.CreatedBy,
-		).Scan(&d.ID, &d.EnvironmentID, &d.StackVersionID, &d.Revision,
-			&d.Slot, &d.ProjectName, &d.State, &d.CreatedAt, &d.UpdatedAt)
+		var err error
+		d, err = s.createDeploymentTx(ctx, tx, p)
+		return err
 	})
 	if err != nil {
 		return nil, mapErr(err)
+	}
+	return d, nil
+}
+
+// createDeploymentTx holds the revision/slot allocation so a caller already
+// inside a transaction -- CreatePreview -- can create an environment and its
+// first deployment atomically. A preview that existed with a hostname but no
+// deployment would be an env the reaper eventually collects and the user never
+// sees work.
+func (s *Store) createDeploymentTx(ctx context.Context, tx pgx.Tx, p CreateDeploymentParams) (*Deployment, error) {
+	var d Deployment
+
+	// Lock the environment row for the duration. Serializes rollouts
+	// per environment without a global lock.
+	var liveSlot *string
+	err := tx.QueryRow(ctx, `
+		SELECT d.slot
+		FROM environments e
+		LEFT JOIN deployments d ON d.id = e.live_deployment_id
+		WHERE e.id = $1
+		FOR UPDATE OF e
+	`, p.EnvironmentID).Scan(&liveSlot)
+	if err != nil {
+		return nil, err
+	}
+
+	// Next revision.
+	var revision int
+	err = tx.QueryRow(ctx, `
+		SELECT COALESCE(MAX(revision), 0) + 1
+		FROM deployments WHERE environment_id = $1
+	`, p.EnvironmentID).Scan(&revision)
+	if err != nil {
+		return nil, err
+	}
+
+	// Alternate slot. First ever deploy goes blue.
+	slot := "blue"
+	if liveSlot != nil && *liveSlot == "blue" {
+		slot = "green"
+	}
+
+	projectName := fmt.Sprintf("cc-%s-r%d-%s",
+		shortID(p.EnvironmentID), revision, slot)
+
+	specJSON, err := json.Marshal(p.ResolvedSpec)
+	if err != nil {
+		return nil, err
+	}
+
+	err = tx.QueryRow(ctx, `
+		INSERT INTO deployments (
+			environment_id, stack_version_id, revision, slot,
+			project_name, state, resolved_spec, created_by
+		) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7)
+		RETURNING id, environment_id, stack_version_id, revision, slot,
+		          project_name, state, created_at, updated_at
+	`, p.EnvironmentID, p.StackVersionID, revision, slot,
+		projectName, specJSON, p.CreatedBy,
+	).Scan(&d.ID, &d.EnvironmentID, &d.StackVersionID, &d.Revision,
+		&d.Slot, &d.ProjectName, &d.State, &d.CreatedAt, &d.UpdatedAt)
+	if err != nil {
+		return nil, err
 	}
 	d.ResolvedSpec = p.ResolvedSpec
 	return &d, nil

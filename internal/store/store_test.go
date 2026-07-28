@@ -127,3 +127,24 @@ func newStack(t *testing.T, st *Store, appID uuid.UUID) *Stack {
 	}
 	return stack
 }
+
+// newStackVersion pushes a minimal one-service spec so deployment-creating
+// tests have something valid to resolve.
+func newStackVersion(t *testing.T, st *Store, stackID uuid.UUID) *StackVersion {
+	t.Helper()
+	ctx := testCtx(t)
+	dspec := &spec.DeploymentSpec{
+		SpecVersion: spec.SpecVersion,
+		Services: map[string]spec.Service{
+			"web": {
+				Name: "web", Image: "nginx:alpine", Swappable: true,
+				Limits: spec.ResourceLimit{CPUMillis: 250, MemoryBytes: 256 << 20},
+			},
+		},
+	}
+	sv, err := st.CreateStackVersion(ctx, stackID, "services:\n  web:\n    image: nginx:alpine\n", dspec, "test")
+	if err != nil {
+		t.Fatalf("CreateStackVersion: %v", err)
+	}
+	return sv
+}
