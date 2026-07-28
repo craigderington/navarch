@@ -86,3 +86,116 @@ func (s *Store) CreatePreview(ctx context.Context, p CreatePreviewParams) (*Envi
 	}
 	return &env, dep, nil
 }
+
+// ExpireEnvironments deletes every expired preview and returns the env8 of
+// each. Deleting the environment cascades its deployments, instances, volumes
+// and secrets, which is how the agent GCs the swappable containers; the
+// tombstone written here is what later tells the agent to destroy the pinned
+// container and named volumes too.
+//
+// The tombstone is written before the delete and in the same transaction: the
+// instruction to destroy durable state must be durable before the state
+// describing it is gone. If the transaction aborts the environment survives and
+// is retried next tick, which is the safe direction to fail.
+func (s *Store) ExpireEnvironments(ctx context.Context) ([]string, error) {
+	var reaped []string
+	err := s.tx(ctx, func(tx pgx.Tx) error {
+		// SKIP LOCKED because Sprint 4 runs more than one control plane and two
+		// reapers racing the same environment would double-tombstone.
+		rows, err := tx.Query(ctx, `
+			SELECT e.id, a.org_id
+			FROM environments e
+			JOIN stacks       s ON s.id = e.stack_id
+			JOIN applications a ON a.id = s.app_id
+			WHERE e.ephemeral AND e.expires_at < now()
+			FOR UPDATE OF e SKIP LOCKED
+		`)
+		if err != nil {
+			return err
+		}
+		type victim struct {
+			id    uuid.UUID
+			orgID uuid.UUID
+		}
+		var victims []victim
+		for rows.Next() {
+			var v victim
+			if err := rows.Scan(&v.id, &v.orgID); err != nil {
+				rows.Close()
+				return err
+			}
+			victims = append(victims, v)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		for _, v := range victims {
+			env8 := shortID(v.id)
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO environment_tombstones (env8, org_id) VALUES ($1, $2)
+				ON CONFLICT (env8) DO NOTHING
+			`, env8, v.orgID); err != nil {
+				return err
+			}
+			// environments.live_deployment_id is deferrable but still checked at
+			// commit, so clear it before the cascade removes the deployment it
+			// points at.
+			if _, err := tx.Exec(ctx,
+				`UPDATE environments SET live_deployment_id = NULL WHERE id = $1`, v.id); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `DELETE FROM environments WHERE id = $1`, v.id); err != nil {
+				return err
+			}
+			reaped = append(reaped, env8)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return reaped, nil
+}
+
+// TombstonesForNode returns the environments this node should destroy: recent
+// tombstones in the node's own org. Nodes are org-scoped, so a node must never
+// be handed a teardown for an environment it could not have been running.
+//
+// maxAge goes through make_interval(secs => ...) rather than maxAge.String()
+// cast to ::interval: Go renders sub-second durations with a "ns" suffix
+// (e.g. "1ns" for the retention-window test below), a unit Postgres's
+// interval literal parser does not recognize at all.
+func (s *Store) TombstonesForNode(ctx context.Context, nodeID uuid.UUID, maxAge time.Duration) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT t.env8
+		FROM environment_tombstones t
+		JOIN nodes n ON n.org_id = t.org_id
+		WHERE n.id = $1 AND t.created_at > now() - make_interval(secs => $2)
+		ORDER BY t.created_at DESC
+	`, nodeID, maxAge.Seconds())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var env8 string
+		if err := rows.Scan(&env8); err != nil {
+			return nil, err
+		}
+		out = append(out, env8)
+	}
+	return out, rows.Err()
+}
+
+// SweepTombstones drops instructions no agent will act on any more. Past this
+// window an offline node's containers and volumes leak and need manual removal
+// -- the window is how long a node may be down and still clean up after itself.
+func (s *Store) SweepTombstones(ctx context.Context, maxAge time.Duration) error {
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM environment_tombstones WHERE created_at < now() - make_interval(secs => $1)`,
+		maxAge.Seconds())
+	return mapErr(err)
+}

@@ -169,3 +169,120 @@ func TestCreatePreviewWithoutInheritanceHasNoSecrets(t *testing.T) {
 		t.Errorf("want no secrets without inheritance, got %+v", keys)
 	}
 }
+
+func TestExpireEnvironmentsReapsOnlyExpiredEphemerals(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	sv := newStackVersion(t, st, stack.ID)
+
+	prod, err := st.CreateEnvironment(ctx, CreateEnvironmentParams{StackID: stack.ID, Slug: "prod"})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	fresh, _, err := st.CreatePreview(ctx, CreatePreviewParams{
+		StackID: stack.ID, Slug: "pr-fresh", Hostname: "a.preview.localhost",
+		TTL: time.Hour, StackVersionID: sv.ID, ResolvedSpec: sv.Spec,
+	})
+	if err != nil {
+		t.Fatalf("CreatePreview fresh: %v", err)
+	}
+	stale, _, err := st.CreatePreview(ctx, CreatePreviewParams{
+		StackID: stack.ID, Slug: "pr-stale", Hostname: "b.preview.localhost",
+		TTL: time.Hour, StackVersionID: sv.ID, ResolvedSpec: sv.Spec,
+	})
+	if err != nil {
+		t.Fatalf("CreatePreview stale: %v", err)
+	}
+	// Reach past the TTL rather than sleeping through it.
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE environments SET expires_at = now() - interval '1 minute' WHERE id = $1`,
+		stale.ID); err != nil {
+		t.Fatalf("age the preview: %v", err)
+	}
+
+	reaped, err := st.ExpireEnvironments(ctx)
+	if err != nil {
+		t.Fatalf("ExpireEnvironments: %v", err)
+	}
+	if len(reaped) != 1 || reaped[0] != shortID(stale.ID) {
+		t.Fatalf("want only the stale preview reaped, got %v", reaped)
+	}
+
+	if _, err := st.GetEnvironment(ctx, stale.ID); err == nil {
+		t.Error("expired preview must be deleted")
+	}
+	if _, err := st.GetEnvironment(ctx, fresh.ID); err != nil {
+		t.Errorf("unexpired preview must survive: %v", err)
+	}
+	if _, err := st.GetEnvironment(ctx, prod.ID); err != nil {
+		t.Errorf("non-ephemeral environment must survive: %v", err)
+	}
+
+	// The deployment created with the preview must have gone with it.
+	var deps int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM deployments WHERE environment_id = $1`, stale.ID).Scan(&deps); err != nil {
+		t.Fatalf("count deployments: %v", err)
+	}
+	if deps != 0 {
+		t.Errorf("deleting the env must cascade its deployments, %d left", deps)
+	}
+}
+
+// The tombstone must outlive the row it describes -- it is the only thing that
+// will ever tell an agent to destroy that environment's durable state.
+func TestTombstoneSurvivesTheEnvironmentAndExpires(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	sv := newStackVersion(t, st, stack.ID)
+	node := newNode(t, st, org.ID)
+
+	env, _, err := st.CreatePreview(ctx, CreatePreviewParams{
+		StackID: stack.ID, Slug: "pr-tomb", Hostname: "c.preview.localhost",
+		TTL: time.Hour, StackVersionID: sv.ID, ResolvedSpec: sv.Spec,
+	})
+	if err != nil {
+		t.Fatalf("CreatePreview: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx,
+		`UPDATE environments SET expires_at = now() - interval '1 minute' WHERE id = $1`,
+		env.ID); err != nil {
+		t.Fatalf("age the preview: %v", err)
+	}
+	if _, err := st.ExpireEnvironments(ctx); err != nil {
+		t.Fatalf("ExpireEnvironments: %v", err)
+	}
+
+	got, err := st.TombstonesForNode(ctx, node.ID, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("TombstonesForNode: %v", err)
+	}
+	if !contains(got, shortID(env.ID)) {
+		t.Fatalf("want tombstone %s for this org's node, got %v", shortID(env.ID), got)
+	}
+
+	// Past the retention window it must disappear, so dead rows do not
+	// accumulate forever.
+	older, err := st.TombstonesForNode(ctx, node.ID, time.Nanosecond)
+	if err != nil {
+		t.Fatalf("TombstonesForNode (narrow window): %v", err)
+	}
+	if contains(older, shortID(env.ID)) {
+		t.Error("tombstone outside the retention window must not be returned")
+	}
+}
+
+func contains(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}

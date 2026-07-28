@@ -128,6 +128,22 @@ func newStack(t *testing.T, st *Store, appID uuid.UUID) *Stack {
 	return stack
 }
 
+// newNode registers a throwaway node in the given org. Nodes are org-scoped,
+// so tests that check org isolation (e.g. tombstone delivery) need one tied
+// to a specific org rather than a global fixture.
+func newNode(t *testing.T, st *Store, orgID uuid.UUID) *Node {
+	t.Helper()
+	ctx := testCtx(t)
+	n, err := st.RegisterNode(ctx, RegisterNodeParams{
+		OrgID: orgID, Hostname: uniq("node"), AdvertiseAddr: "127.0.0.1",
+		CPUMillis: 4000, MemoryBytes: 8 << 30,
+	})
+	if err != nil {
+		t.Fatalf("RegisterNode: %v", err)
+	}
+	return n
+}
+
 // newStackVersion pushes a minimal one-service spec so deployment-creating
 // tests have something valid to resolve.
 func newStackVersion(t *testing.T, st *Store, stackID uuid.UUID) *StackVersion {
