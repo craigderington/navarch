@@ -57,7 +57,11 @@ type Environment struct {
 	Hostname         string            `json:"hostname,omitempty"`
 	Config           map[string]string `json:"config"`
 	LiveDeploymentID *uuid.UUID        `json:"live_deployment_id,omitempty"`
-	CreatedAt        time.Time         `json:"created_at"`
+	// Ephemeral marks a preview environment; the reaper deletes it once
+	// ExpiresAt passes. Non-ephemeral environments never expire.
+	Ephemeral bool       `json:"ephemeral"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 type DeploymentState string

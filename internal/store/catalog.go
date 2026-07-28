@@ -146,10 +146,10 @@ func (s *Store) CreateEnvironment(ctx context.Context, p CreateEnvironmentParams
 			$5
 		)
 		RETURNING id, stack_id, slug, strategy, COALESCE(hostname,''),
-		          config, live_deployment_id, created_at
+		          config, live_deployment_id, ephemeral, expires_at, created_at
 	`, p.StackID, p.Slug, strategy, p.Hostname, configJSON).
 		Scan(&e.ID, &e.StackID, &e.Slug, &e.Strategy, &e.Hostname,
-			&config, &e.LiveDeploymentID, &e.CreatedAt)
+			&config, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt, &e.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -162,7 +162,7 @@ func (s *Store) CreateEnvironment(ctx context.Context, p CreateEnvironmentParams
 func (s *Store) ListEnvironments(ctx context.Context, stackID uuid.UUID) ([]Environment, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, stack_id, slug, strategy, COALESCE(hostname,''),
-		       config, live_deployment_id, created_at
+		       config, live_deployment_id, ephemeral, expires_at, created_at
 		FROM environments WHERE stack_id = $1 ORDER BY slug
 	`, stackID)
 	if err != nil {
@@ -175,7 +175,7 @@ func (s *Store) ListEnvironments(ctx context.Context, stackID uuid.UUID) ([]Envi
 		var e Environment
 		var config []byte
 		if err := rows.Scan(&e.ID, &e.StackID, &e.Slug, &e.Strategy, &e.Hostname,
-			&config, &e.LiveDeploymentID, &e.CreatedAt); err != nil {
+			&config, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(config, &e.Config); err != nil {

@@ -127,10 +127,10 @@ func (s *Store) GetEnvironment(ctx context.Context, id uuid.UUID) (*Environment,
 	var configJSON []byte
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, stack_id, slug, strategy, COALESCE(hostname,''),
-		       config, live_deployment_id, created_at
+		       config, live_deployment_id, ephemeral, expires_at, created_at
 		FROM environments WHERE id = $1
 	`, id).Scan(&e.ID, &e.StackID, &e.Slug, &e.Strategy, &e.Hostname,
-		&configJSON, &e.LiveDeploymentID, &e.CreatedAt)
+		&configJSON, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt, &e.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
