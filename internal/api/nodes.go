@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -141,11 +142,23 @@ func (s *Server) handleInstanceReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, in := range req.Instances {
-		if err := s.st.ReportInstance(ctx, in.InstanceID, store.ObservedInstance{
+		err := s.st.ReportInstance(ctx, in.InstanceID, store.ObservedInstance{
 			State: store.InstanceState(in.State), ContainerID: in.ContainerID,
 			HealthStatus: in.HealthStatus, LastError: in.LastError,
 			RestartCount: in.RestartCount, SetStarted: in.SetStarted,
-		}); err != nil {
+		})
+		// A vanished row is not a failure, and it is routine: the agent
+		// reconciles at the top of its tick and reports at the bottom, so a
+		// preview reap or a supersede's DeleteInstances in between leaves it
+		// holding reports for rows that no longer exist. That is information
+		// the control plane no longer needs. Aborting here would 404 the whole
+		// request, which makes reconcileTick return early — dropping the
+		// reports for every other environment on this node and skipping the
+		// heartbeat — and log "reconcile tick failed" when nothing failed.
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
