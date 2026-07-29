@@ -137,7 +137,7 @@ stores it rather than the UUID because it is what the agent matches on.
 201 Created
 {
   "environment_id": "…",
-  "hostname": "pr-142-hello.preview.localhost",
+  "hostname": "pr-142-hello-93fa144e.preview.localhost",
   "deployment_id": "…",
   "expires_at": "2026-07-29T14:02:11Z"
 }
@@ -149,10 +149,21 @@ preview starts with no secrets. `ttl_hours` optional, default 24, capped at 168
 (one week); above the cap is a 400 rather than a silent clamp.
 
 **Hostname** is generated, never client-supplied:
-`{slug}-{stack}.{COMPOSECTL_PREVIEW_DOMAIN}`, default domain `preview.localhost`.
-The generated left-most DNS label must be ≤63 characters or the request is a 400 —
-a truncated hostname routes to nothing, and failing at creation beats failing at
+`{slug}-{stack}-{env8}.{COMPOSECTL_PREVIEW_DOMAIN}`, default domain
+`preview.localhost`. The generated left-most DNS label must be ≤63 characters
+— counted with the `-{env8}` suffix included — or the request is a 400: a
+truncated hostname routes to nothing, and failing at creation beats failing at
 first request.
+
+`env8` is required for uniqueness, not cosmetics. `stacks.slug` is only
+`UNIQUE (app_id, slug)` and `environments.hostname` has no unique constraint, so
+`{slug}-{stack}` collides across two applications that each own a stack `main`
+with a preview `pr-1` — the router would then emit two Traefik routers with the
+same `Host` rule and pick between them arbitrarily, which is a cross-tenant
+misroute into a preview holding inherited secrets. Because `env8` comes from the
+environment's own UUID, the handler generates that UUID itself and passes it to
+`CreatePreview` rather than letting the column default win: the hostname has to
+exist before the row does.
 
 **Error mapping.** Unknown stack or unknown `inherit_secrets_from` env → 404
 (consistent with the existing FK-violation → `ErrNotFound` rule). Duplicate slug
@@ -243,6 +254,19 @@ Tombstones for the requesting node's org, younger than 24h. The field is additiv
 so an older agent that does not decode it simply never reaps — it degrades to the
 current leak rather than to an error.
 
+The store method is `TombstonesForNode(nodeID, maxAge)`, not the `TombstonesForOrg`
+this document originally named. Deliberate: taking the node id and joining
+`nodes n ON n.org_id = t.org_id` derives the org scope from the row the request is
+already authenticated against, instead of trusting a caller-supplied org id. This
+endpoint hands out destructive instructions, so a caller that could name the org
+could name someone else's.
+
+The agent also keeps an in-memory set of env8s whose `RemoveEnv` already
+succeeded, since the same tombstone is re-offered on every tick for the whole
+24h window. It is not persisted: a restart re-running an idempotent teardown is
+harmless, whereas persisting the set could permanently skip one that never
+actually completed.
+
 ### Driver gains one method
 
 ```go
@@ -284,7 +308,7 @@ Unchanged boundaries — this slice adds no imports to any package.
 
 | Package | Change |
 |---|---|
-| `internal/store` | `CreatePreview`, `ExpireEnvironments`, `TombstonesForOrg`, `SweepTombstones`; `Environment` gains `Ephemeral`, `ExpiresAt` |
+| `internal/store` | `CreatePreview`, `ExpireEnvironments`, `TombstonesForNode`, `SweepTombstones`; `Environment` gains `Ephemeral`, `ExpiresAt` |
 | `internal/api` | `previews.go` — one handler; `nodes.go` — `teardown_envs` in the desired-state response |
 | `internal/rollout` | `reaper.go` — `ReapOnce` |
 | `internal/agent` | `DockerDriver` gains `RemoveEnv`/`EnsureVolume`; reconcile calls `RemoveEnv` per teardown env |
@@ -330,7 +354,7 @@ removes a pinned container and its labelled volume.
 2. `POST /previews` with `inherit_secrets_from=staging`, `ttl_hours` short enough
    to observe
 3. assert the returned deployment reaches `live` unaided
-4. `curl -H "Host: pr-142-hello.preview.localhost"` through Traefik and assert the
+4. `curl -H "Host: pr-142-hello-93fa144e.preview.localhost"` through Traefik and assert the
    inherited secret is visible in the response — proving inheritance end to end
 5. wait for expiry, then assert: env gone from `GET /envs`, containers gone
    (including the pinned one), and the named volume gone from `docker volume ls`

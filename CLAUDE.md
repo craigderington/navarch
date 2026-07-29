@@ -174,6 +174,58 @@ also already fixed.
 
 ---
 
+## Preview environments
+
+`POST /v1/stacks/{stack}/previews` creates an ephemeral environment, copies
+another environment's secret **ciphertext** into it, and deploys — one call,
+one URL back, so CI doesn't orchestrate three requests.
+
+**Hostname is generated, never client-supplied:**
+
+```
+{slug}-{stackSlug}-{env8}.{COMPOSECTL_PREVIEW_DOMAIN}
+pr-1-main-93fa144e.preview.localhost
+```
+
+`env8` is load-bearing, not decoration. `stacks.slug` is only
+`UNIQUE (app_id, slug)` and `environments.hostname` has no unique constraint,
+so `{slug}-{stack}` alone collides between two apps — same org or different
+ones — that each own a stack `main` with a preview `pr-1`. `ListLiveRoutes`
+returns both, Traefik gets two routers with the same `Host` rule, and the
+winner is arbitrary: a cross-tenant misroute into someone else's branch with
+its inherited secrets. `env8` comes from the environment's own UUID, so it is
+unique by construction — which is also why `handleCreatePreview` generates
+that UUID itself and inserts it explicitly rather than letting the column
+default win. The generated left-most label must be ≤63 characters, checked
+**including** the `-{env8}` suffix; over that is a 400.
+
+**`COMPOSECTL_PREVIEW_DOMAIN`** (control plane, default `preview.localhost`)
+is the wildcard domain those hostnames are generated under. The default works
+on a dev box with no DNS at all, because Traefik routes on the `Host` header:
+`curl -H "Host: pr-1-main-93fa144e.preview.localhost"` reaches it.
+
+**TTL is the only lifecycle control.** There is no `DELETE /v1/envs/{env}`
+and no extend endpoint — don't go looking for one. `ttl_hours` defaults to 24
+and is capped at 168 (one week); above the cap is a 400, not a silent clamp,
+because storing a different TTL than the one asked for makes the API lie.
+Everything else is the reaper's job.
+
+**Teardown runs on a tombstone, never on inference.** The reaper writes an
+`environment_tombstones` row *before* deleting the environment, in the same
+transaction — the instruction to destroy durable state must be durable before
+the state describing it is gone. `TombstonesForNode` hands each node only its
+own org's tombstones, and the agent's `RemoveEnv` is the ONLY path that
+destroys pinned containers or named volumes. An empty desired-state is a
+control-plane outage, not "drop the database"; `internal/agent/reconcile_test.go`
+guards that non-vacuously.
+
+The agent keeps an in-memory set of env8s it has already torn down, because
+the same tombstone is re-offered every tick for its full 24h retention. It is
+deliberately not persisted: a restart re-running an idempotent teardown is
+fine, permanently skipping one that never completed is not.
+
+---
+
 ## Invariants
 
 **`deployments` is append-only.** Rollback = promote an older revision,
@@ -349,8 +401,11 @@ The design and per-slice plan live in `docs/superpowers/`:
   reaper loop expires previews past `expires_at`, writes a tombstone before
   deleting the environment row, and the agent acts on that tombstone to
   destroy the pinned container and named volumes an ordinary reconcile tick
-  would never touch. `make demo-preview` exercises the full lifecycle:
-  inherited secret served through Traefik, then complete teardown.
+  would never touch. Hostnames are generated as
+  `{slug}-{stack}-{env8}.{COMPOSECTL_PREVIEW_DOMAIN}` and TTL is the only
+  lifecycle control — see **Preview environments** above. `make demo-preview`
+  exercises the full lifecycle: inherited secret served through Traefik, then
+  complete teardown.
 
 **Placement/agent model:** the scheduler owns placement (writes desired
 `service_instances`); the agent is a dumb reconciler. Nodes are org-scoped,
@@ -410,10 +465,11 @@ via `?created_by=`.
   together. `go mod tidy` overshot the OTel stack to the latest (1.25-needing)
   versions rather than the older ones Docker minimally requires — fine, since
   we're at 1.25 anyway.
-- `internal/api`, `internal/spec`, `internal/config` still have **no tests**.
-  The overlay-precedence rules (`internal/api/overlay.go`) and digest
-  stability (`internal/spec`) are the untested spots with a history of real
-  bugs — worth covering.
+- `internal/spec` and `internal/config` still have **no tests**, and
+  `internal/api` covers only nodes, secrets and previews. The
+  overlay-precedence rules (`internal/api/overlay.go`) and digest stability
+  (`internal/spec`) are the untested spots with a history of real bugs —
+  worth covering.
 - The example stack's comment claims `cache` is "swappable (tmpfs only)",
   but `cache` declares no mount at all. Harmless — it is swappable either
   way — but the comment describes a case the example never exercises.
@@ -432,10 +488,11 @@ via `?created_by=`.
 
 `go build ./...` before claiming anything compiles. Tested packages:
 `internal/parser` (16, pure), `internal/store` (~27), `internal/rollout`
-(scheduler + controller), `internal/api` (node handler), `internal/agent`
-(reconcile logic, fake driver — pure), `internal/agent/dockerd` (against a
-real daemon). `internal/spec`, `internal/config`, and most of
-`internal/api` still have none.
+(scheduler + controller + reaper), `internal/api` (node, secret and preview
+handlers), `internal/agent` (reconcile logic, fake driver — pure),
+`internal/agent/dockerd` (against a real daemon). `internal/spec`,
+`internal/config`, and the catalog/deployment half of `internal/api` still
+have none.
 
 **Two live dependencies, both skip loudly when absent** — no fallbacks, by
 design. `store`/`rollout`/`api` tests need Postgres (dev stack on `5473`, or
@@ -452,13 +509,12 @@ test fixtures mid-run, and `go test ./...` fails on unrelated tests as a
 result. Restart the control plane (`docker compose start controlplane
 agent`, or `make up`) before running demos again.
 
-**Postgres interval casts:** `time.Duration.String()` renders a sub-second
-value as e.g. `"1ns"`, which Postgres's interval parser rejects outright.
-Use `make_interval(secs => $n)` with `Duration.Seconds()` for any duration
-that could be sub-second. `internal/store/previews.go` uses both forms:
-`CreatePreview`'s TTL is hour-scale and safe as a `.String()` cast, but
-`TombstonesForNode`/`SweepTombstones` take a retention window a test can
-shrink to milliseconds, so they go through `make_interval`.
+**Postgres interval casts:** `make_interval(secs => $n)` with
+`Duration.Seconds()` is the house pattern for every `time.Duration` → interval
+conversion. `Duration.String()` cast to `::interval` renders a sub-second value
+as e.g. `"1ns"`, which Postgres's interval parser rejects outright — and a
+store method whose duration is hour-scale today is one test away from being
+handed a millisecond. Don't reintroduce the `.String()` form.
 
 **Boundary guard:** `go list -deps ./cmd/controlplane | grep docker/docker`
 must return nothing — the control-plane binary must not link the Docker SDK.
