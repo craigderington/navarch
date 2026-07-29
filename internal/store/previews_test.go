@@ -234,8 +234,30 @@ func TestExpireEnvironmentsReapsOnlyExpiredEphemerals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExpireEnvironments: %v", err)
 	}
-	if len(reaped) != 1 || reaped[0] != shortID(stale.ID) {
-		t.Fatalf("want only the stale preview reaped, got %v", reaped)
+	// Containment and exclusion, not cardinality. ExpireEnvironments is
+	// unscoped -- it reaps every expired ephemeral in the database -- and
+	// three packages call it against the same DSN while `go test` runs their
+	// binaries in parallel: this test, internal/rollout via ReapOnce, and
+	// internal/api via newNodeWithReapedPreview. len(reaped)==1 therefore
+	// fails whenever another package's victim was expired at the same moment.
+	if !contains(reaped, shortID(stale.ID)) {
+		// The race runs the other way too: another package's reaper can take
+		// this victim in the window between the backdating UPDATE above and
+		// this call. That is the same outcome reached by a different caller,
+		// so accept it only on proof the environment really is gone -- a
+		// genuine failure to reap still fails the test here.
+		if _, err := st.GetEnvironment(ctx, stale.ID); err == nil {
+			t.Fatalf("stale preview %s was neither reaped nor deleted, got %v", shortID(stale.ID), reaped)
+		}
+	}
+	// Exclusion is race-free in both directions: no concurrent caller will
+	// ever expire an environment whose TTL has not elapsed, or one that is
+	// not ephemeral at all.
+	if contains(reaped, shortID(fresh.ID)) {
+		t.Fatalf("unexpired preview %s must not be reaped, got %v", shortID(fresh.ID), reaped)
+	}
+	if contains(reaped, shortID(prod.ID)) {
+		t.Fatalf("non-ephemeral environment %s must not be reaped, got %v", shortID(prod.ID), reaped)
 	}
 
 	if _, err := st.GetEnvironment(ctx, stale.ID); err == nil {
