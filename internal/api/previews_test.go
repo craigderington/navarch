@@ -223,3 +223,87 @@ func TestDesiredStateIncludesTeardownEnvs(t *testing.T) {
 		t.Errorf("want %s in teardown_envs, got %v", env8, resp.TeardownEnvs)
 	}
 }
+
+// newNodeInFreshOrg registers a node in its own org with no stack and no
+// preview -- just enough to prove a node with no relationship to org A's
+// tombstone can call desired-state at all.
+func newNodeInFreshOrg(t *testing.T, srv *Server) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	slug := "teardown-b-" + uuid.NewString()[:8]
+	org, err := srv.st.CreateOrganization(ctx, slug, "Teardown Test Org B")
+	if err != nil {
+		t.Fatalf("CreateOrganization: %v", err)
+	}
+	node, err := srv.st.RegisterNode(ctx, store.RegisterNodeParams{
+		OrgID: org.ID, Hostname: "teardown-b-" + uuid.NewString()[:8],
+		AdvertiseAddr: "10.1.2.4", CPUMillis: 2000, MemoryBytes: 1 << 31,
+	})
+	if err != nil {
+		t.Fatalf("RegisterNode: %v", err)
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// No stack/environments here, so node then org is already bottom-up.
+		srv.st.Pool().Exec(c, `DELETE FROM nodes WHERE id=$1`, node.ID)
+		srv.st.Pool().Exec(c, `DELETE FROM organizations WHERE id=$1`, org.ID)
+	})
+	return node.ID.String()
+}
+
+// TestDesiredStateExcludesOtherOrgsTeardownEnvs pins the org-scoping join in
+// TombstonesForNode: a node must only ever be told to destroy environments
+// its own org could have been running. The endpoint hands out destructive
+// instructions (tear down pinned containers and named volumes), so a
+// cross-org leak here is a tenant-isolation bug, not an ordinary miss.
+func TestDesiredStateExcludesOtherOrgsTeardownEnvs(t *testing.T) {
+	srv := testServer(t)
+	nodeA, env8 := newNodeWithReapedPreview(t, srv)
+	nodeB := newNodeInFreshOrg(t, srv)
+
+	// Confirm org A's own node still sees the tombstone first. Without this,
+	// a passing assertion below could mean either "scoping works" or
+	// "the tombstone doesn't exist" -- and only the first is what this test
+	// claims to prove.
+	recA := httptest.NewRecorder()
+	srv.ServeHTTP(recA, httptest.NewRequest(http.MethodGet, "/v1/nodes/"+nodeA+"/desired-state", nil))
+	if recA.Code != http.StatusOK {
+		t.Fatalf("org A desired-state: want 200, got %d: %s", recA.Code, recA.Body)
+	}
+	var respA struct {
+		TeardownEnvs []string `json:"teardown_envs"`
+	}
+	if err := json.Unmarshal(recA.Body.Bytes(), &respA); err != nil {
+		t.Fatalf("decode org A response: %v", err)
+	}
+	orgASeesIt := false
+	for _, e := range respA.TeardownEnvs {
+		if e == env8 {
+			orgASeesIt = true
+		}
+	}
+	if !orgASeesIt {
+		t.Fatalf("org A's own node must still see tombstone %s (got %v); "+
+			"otherwise the negative assertion below is vacuous", env8, respA.TeardownEnvs)
+	}
+
+	recB := httptest.NewRecorder()
+	srv.ServeHTTP(recB, httptest.NewRequest(http.MethodGet, "/v1/nodes/"+nodeB+"/desired-state", nil))
+	if recB.Code != http.StatusOK {
+		t.Fatalf("org B desired-state: want 200, got %d: %s", recB.Code, recB.Body)
+	}
+	var respB struct {
+		TeardownEnvs []string `json:"teardown_envs"`
+	}
+	if err := json.Unmarshal(recB.Body.Bytes(), &respB); err != nil {
+		t.Fatalf("decode org B response: %v", err)
+	}
+	for _, e := range respB.TeardownEnvs {
+		if e == env8 {
+			t.Errorf("org B's node must not see org A's tombstone %s, got %v", env8, respB.TeardownEnvs)
+		}
+	}
+}

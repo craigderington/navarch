@@ -85,7 +85,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 // resolved Service spec inline so the agent needs no second call to build
 // containers, plus the ciphertext for every env with instances on this node
 // so the agent can decrypt and inject secrets without a separate round trip,
-// plus the envs this node must tear down outright (see teardown, below).
+// plus the envs (by env8) this node's own org has torn down and must now
+// destroy outright — pinned containers and named volumes included.
 func (s *Server) handleDesiredState(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := contextWithTimeout(r, 5*time.Second)
 	defer cancel()
