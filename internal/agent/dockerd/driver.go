@@ -14,7 +14,9 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
 
 	"github.com/craig/composectl/internal/spec"
 )
@@ -99,6 +101,17 @@ func (d *Driver) EnsureNetwork(ctx context.Context, name string, labels map[stri
 		return "", fmt.Errorf("create network %s: %w", name, err)
 	}
 	return created.ID, nil
+}
+
+// EnsureVolume creates a named volume with labels, idempotently — Docker
+// returns the existing volume rather than erroring when the name already
+// exists. Docker creates named volumes implicitly when a container mounts
+// them, but implicit volumes carry no labels — and teardown matches on the
+// label, because a volume is the one object in this system whose deletion
+// cannot be undone and a name-substring filter is not an exact match.
+func (d *Driver) EnsureVolume(ctx context.Context, name string, labels map[string]string) error {
+	_, err := d.cli.VolumeCreate(ctx, volume.CreateOptions{Name: name, Labels: labels})
+	return err
 }
 
 func (d *Driver) removeNetwork(ctx context.Context, name string) error {
@@ -256,6 +269,52 @@ func (d *Driver) ListManaged(ctx context.Context, env8 string) ([]Managed, error
 		})
 	}
 	return out, nil
+}
+
+// RemoveEnv destroys everything belonging to one environment: containers
+// (including pinned ones), the revision networks, and the named volumes. It is
+// the only path that removes durable state, and the reconciler calls it only
+// for an environment the control plane has explicitly tombstoned.
+//
+// Order matters: a network in use cannot be removed while a container is
+// attached, and a volume in use cannot be removed at all.
+//
+// Idempotent by design, not by acknowledgement: a tombstone is re-offered on
+// every tick for its whole retention window, so a second (or tenth) call
+// against an already-gone environment must not error.
+func (d *Driver) RemoveEnv(ctx context.Context, env8 string) error {
+	f := filters.NewArgs(filters.Arg("label", "cc.env="+env8))
+
+	containers, err := d.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
+	if err != nil {
+		return err
+	}
+	for _, c := range containers {
+		if err := d.StopRemove(ctx, c.ID); err != nil {
+			return fmt.Errorf("remove container %s: %w", c.ID, err)
+		}
+	}
+
+	nets, err := d.cli.NetworkList(ctx, network.ListOptions{Filters: f})
+	if err != nil {
+		return err
+	}
+	for _, n := range nets {
+		if err := d.cli.NetworkRemove(ctx, n.ID); err != nil && !errdefs.IsNotFound(err) {
+			return fmt.Errorf("remove network %s: %w", n.Name, err)
+		}
+	}
+
+	vols, err := d.cli.VolumeList(ctx, volume.ListOptions{Filters: f})
+	if err != nil {
+		return err
+	}
+	for _, v := range vols.Volumes {
+		if err := d.cli.VolumeRemove(ctx, v.Name, false); err != nil && !errdefs.IsNotFound(err) {
+			return fmt.Errorf("remove volume %s: %w", v.Name, err)
+		}
+	}
+	return nil
 }
 
 func (d *Driver) findByName(ctx context.Context, name string) (string, error) {

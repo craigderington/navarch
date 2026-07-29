@@ -4,6 +4,10 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/volume"
+	"github.com/google/uuid"
 )
 
 type staticSecrets map[string]string
@@ -133,5 +137,39 @@ func TestSecretExpansionNilSourceTreatsReferencesAsMissing(t *testing.T) {
 	}
 	if env["LOG_LEVEL"] != "info" {
 		t.Fatalf("plain env lost: %q", env["LOG_LEVEL"])
+	}
+}
+
+func TestEnsureVolumeAndRemoveEnv(t *testing.T) {
+	d := testDriver(t) // existing helper: skips loudly without a daemon
+	ctx := context.Background()
+	env8 := "test" + uuid.NewString()[:4]
+	vol := "cc-" + env8 + "-data"
+
+	if err := d.EnsureVolume(ctx, vol, map[string]string{"cc.env": env8}); err != nil {
+		t.Fatalf("EnsureVolume: %v", err)
+	}
+	// Idempotent: reconcile calls this on every tick.
+	if err := d.EnsureVolume(ctx, vol, map[string]string{"cc.env": env8}); err != nil {
+		t.Fatalf("EnsureVolume (second call): %v", err)
+	}
+
+	if err := d.RemoveEnv(ctx, env8); err != nil {
+		t.Fatalf("RemoveEnv: %v", err)
+	}
+	vols, err := d.cli.VolumeList(ctx, volume.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("label", "cc.env="+env8)),
+	})
+	if err != nil {
+		t.Fatalf("VolumeList: %v", err)
+	}
+	if len(vols.Volumes) != 0 {
+		t.Errorf("RemoveEnv must delete the env's volumes, %d left", len(vols.Volumes))
+	}
+
+	// Idempotent: a tombstone is re-offered every tick for its whole retention
+	// window, so removing an already-gone environment must not error.
+	if err := d.RemoveEnv(ctx, env8); err != nil {
+		t.Errorf("RemoveEnv must be idempotent: %v", err)
 	}
 }
