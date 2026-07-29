@@ -25,6 +25,11 @@ type fakeDriver struct {
 	removedEnvs     []string
 	removeEnvErrs   map[string]error // env8 -> error RemoveEnv should return for it
 
+	// removeEnvCalls records every RemoveEnv invocation including the failing
+	// ones, which removedEnvs (successes only) cannot distinguish from a call
+	// that never happened.
+	removeEnvCalls []string
+
 	// volumesAtCreate captures len(volumes) at the moment EnsureContainer runs,
 	// so tests can assert EnsureVolume happened first without adding a shared
 	// call-order log just for one assertion.
@@ -65,6 +70,7 @@ func (f *fakeDriver) EnsureVolume(ctx context.Context, name string, l map[string
 	return nil
 }
 func (f *fakeDriver) RemoveEnv(ctx context.Context, env8 string) error {
+	f.removeEnvCalls = append(f.removeEnvCalls, env8)
 	if err, ok := f.removeEnvErrs[env8]; ok {
 		return err
 	}
@@ -193,6 +199,82 @@ func TestReconcileTearsDownTombstonedEnv(t *testing.T) {
 	}
 	if len(failed) != 0 {
 		t.Fatalf("a successful teardown must not be reported as failed, got %v", failed)
+	}
+}
+
+// A tombstone stays on offer for its whole 24h retention window, so without a
+// skip set every tick re-runs RemoveEnv for every environment reaped in the
+// last day — three Docker list calls each, at the default 2s poll, forever
+// no-ops after the first.
+func TestReconcileSkipsAlreadyTornDownEnv(t *testing.T) {
+	f := &fakeDriver{}
+	r := NewReconciler(f)
+
+	for i := 0; i < 3; i++ {
+		r.Reconcile(context.Background(), nil, nil, []string{"deadbeef"})
+	}
+
+	if len(f.removeEnvCalls) != 1 || f.removeEnvCalls[0] != "deadbeef" {
+		t.Fatalf("a tombstone already acted on must not be re-run every tick, got %v", f.removeEnvCalls)
+	}
+}
+
+// The skip set records successes only. A teardown that failed has not
+// happened, so the tombstone's next offer must still be acted on — that
+// retry is the only thing standing between a transient failure and leaked
+// pinned containers and volumes.
+func TestReconcileRetriesFailedTeardownOnTheNextTick(t *testing.T) {
+	f := &fakeDriver{removeEnvErrs: map[string]error{"deadbeef": errors.New("volume busy")}}
+	r := NewReconciler(f)
+
+	for i := 0; i < 3; i++ {
+		_, failed := r.Reconcile(context.Background(), nil, nil, []string{"deadbeef"})
+		if len(failed) != 1 || failed[0] != "deadbeef" {
+			t.Fatalf("tick %d: want deadbeef reported failed, got %v", i, failed)
+		}
+	}
+
+	if len(f.removeEnvCalls) != 3 {
+		t.Fatalf("a failed teardown must be retried on every subsequent tick, got %v", f.removeEnvCalls)
+	}
+}
+
+// The skip set is bounded by what the control plane is currently offering, so
+// an env8 it has stopped offering (its tombstone swept past retention) is
+// forgotten rather than remembered for the life of the process. Re-offering it
+// costs one idempotent RemoveEnv, the same as a restart would.
+func TestReconcileForgetsEnvsNoLongerOffered(t *testing.T) {
+	f := &fakeDriver{}
+	r := NewReconciler(f)
+
+	r.Reconcile(context.Background(), nil, nil, []string{"deadbeef"})
+	r.Reconcile(context.Background(), nil, nil, []string{"cafef00d"})
+	r.Reconcile(context.Background(), nil, nil, []string{"deadbeef"})
+
+	want := []string{"deadbeef", "cafef00d", "deadbeef"}
+	if len(f.removeEnvCalls) != len(want) {
+		t.Fatalf("want %v, got %v", want, f.removeEnvCalls)
+	}
+	for i := range want {
+		if f.removeEnvCalls[i] != want[i] {
+			t.Fatalf("want %v, got %v", want, f.removeEnvCalls)
+		}
+	}
+}
+
+// The skip set is per-Reconciler and in memory, so a restarted agent re-runs
+// teardowns it already completed. That is deliberate — RemoveEnv is
+// idempotent and the tombstone is still being offered — and this test exists
+// so a future reader who "fixes" it by persisting the set has to argue with a
+// red bar first.
+func TestReconcileSkipSetDoesNotSurviveAgentRestart(t *testing.T) {
+	f := &fakeDriver{}
+
+	NewReconciler(f).Reconcile(context.Background(), nil, nil, []string{"deadbeef"})
+	NewReconciler(f).Reconcile(context.Background(), nil, nil, []string{"deadbeef"})
+
+	if len(f.removeEnvCalls) != 2 {
+		t.Fatalf("a fresh Reconciler must re-run the teardown, got %v", f.removeEnvCalls)
 	}
 }
 

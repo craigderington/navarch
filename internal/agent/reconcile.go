@@ -48,10 +48,30 @@ type Report struct {
 type Reconciler struct {
 	drv      DockerDriver
 	debounce time.Duration
+
+	// tornDown records env8s whose RemoveEnv already returned nil. A tombstone
+	// stays on offer for its full retention window (24h), so without this every
+	// tick would re-run RemoveEnv — three Docker list calls — for every
+	// environment reaped in the last day, multiplied by the poll rate and, in a
+	// multi-node org, by the node count. All of it no-ops after the first.
+	//
+	// Deliberately in memory only: a restarted agent re-runs teardowns it has
+	// already done, which is what we want. The tombstone is still being
+	// offered, RemoveEnv is idempotent, and the restart may well be the thing
+	// that fixed whatever left state behind. Persisting this set would trade a
+	// harmless repeat for a way to permanently skip a teardown that never
+	// actually completed — don't.
+	//
+	// No mutex: Run drives a single ticker loop in one goroutine and the
+	// Reconciler it builds is not shared with anything else, so Reconcile is
+	// never concurrent. Anything that changes that — a push endpoint waking a
+	// second reconcile, per-env parallelism — has to guard this map, and the
+	// reports/GC bookkeeping below with it.
+	tornDown map[string]bool
 }
 
 func NewReconciler(drv DockerDriver) *Reconciler {
-	return &Reconciler{drv: drv, debounce: 5 * time.Second}
+	return &Reconciler{drv: drv, debounce: 5 * time.Second, tornDown: map[string]bool{}}
 }
 
 // Reconcile converges Docker to the desired instance set and returns a report
@@ -68,6 +88,10 @@ func NewReconciler(drv DockerDriver) *Reconciler {
 // durable state this node must destroy. It is never inferred from desired
 // being empty — an empty desired-state means "nothing to tell you", not
 // "destroy everything", and a control-plane outage must not read as the latter.
+//
+// A teardown that has already succeeded on this Reconciler is skipped — see
+// the tornDown field — because the same tombstone is offered on every tick for
+// its whole retention window.
 //
 // The second return value is the env8s whose RemoveEnv call failed. Reconcile
 // itself is pure and carries no logger, so it cannot log the failure — the
@@ -107,9 +131,31 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInsta
 	// costs one wasted create rather than leaving a half-removed env behind.
 	var failedTeardowns []string
 	for _, env8 := range teardownEnvs {
+		if r.tornDown[env8] {
+			continue
+		}
 		if err := r.drv.RemoveEnv(ctx, env8); err != nil {
+			// Not recorded: a teardown that failed has not happened, so the
+			// tombstone's next offer must still be acted on.
 			failedTeardowns = append(failedTeardowns, env8)
 			continue
+		}
+		r.tornDown[env8] = true
+	}
+	// Forget env8s the control plane has stopped offering — their tombstones
+	// were swept, and an env8 comes from a UUID so it never comes back. This
+	// bounds the set by the live tombstone count instead of letting it grow
+	// for the life of the process. Losing an entry early is harmless: it costs
+	// one repeated idempotent RemoveEnv, the same as an agent restart.
+	if len(r.tornDown) > len(teardownEnvs) {
+		offered := make(map[string]bool, len(teardownEnvs))
+		for _, env8 := range teardownEnvs {
+			offered[env8] = true
+		}
+		for env8 := range r.tornDown {
+			if !offered[env8] {
+				delete(r.tornDown, env8)
+			}
 		}
 	}
 	return reports, failedTeardowns
