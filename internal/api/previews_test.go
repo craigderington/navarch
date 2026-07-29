@@ -182,6 +182,122 @@ func newTestStack(t *testing.T, srv *Server) string {
 	return stack.ID.String()
 }
 
+// newTestStackNeedingSecret is newTestStack's counterpart for the 422
+// fail-fast: its spec references ${secret:name}, so a preview of it is only
+// viable if that key is actually inherited. It also creates a "staging"
+// environment to inherit from, deliberately holding a *different* key, so a
+// source that exists but lacks the required secret can be exercised too.
+func newTestStackNeedingSecret(t *testing.T, srv *Server) (stackID uuid.UUID) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	slug := "needsecret-" + uuid.NewString()[:8]
+	org, err := srv.st.CreateOrganization(ctx, slug, "Preview Secret Test")
+	if err != nil {
+		t.Fatalf("CreateOrganization: %v", err)
+	}
+	app, err := srv.st.CreateApplication(ctx, org.ID, slug, "app")
+	if err != nil {
+		t.Fatalf("CreateApplication: %v", err)
+	}
+	stack, err := srv.st.CreateStack(ctx, app.ID, slug)
+	if err != nil {
+		t.Fatalf("CreateStack: %v", err)
+	}
+	dspec := &spec.DeploymentSpec{
+		SpecVersion: spec.SpecVersion,
+		Services: map[string]spec.Service{
+			"web": {Name: "web", Image: "nginx:alpine", Swappable: true,
+				SecretEnv: map[string]string{"WHOAMI_NAME": "${secret:name}"},
+				Limits:    spec.ResourceLimit{CPUMillis: 250, MemoryBytes: 256 << 20}},
+		},
+	}
+	if _, err := srv.st.CreateStackVersion(ctx, stack.ID, "raw", dspec, "t"); err != nil {
+		t.Fatalf("CreateStackVersion: %v", err)
+	}
+	staging, err := srv.st.CreateEnvironment(ctx, store.CreateEnvironmentParams{
+		StackID: stack.ID, Slug: "staging"})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	// Some other key, so the source is a real environment with real secrets
+	// and the 422 is about the missing one, not about an empty source.
+	if err := srv.st.SetSecret(ctx, staging.ID, "unrelated", []byte("ct"), "age1x"); err != nil {
+		t.Fatalf("SetSecret: %v", err)
+	}
+
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.st.Pool().Exec(c, `DELETE FROM environments WHERE stack_id=$1`, stack.ID)
+		srv.st.Pool().Exec(c, `DELETE FROM organizations WHERE id=$1`, org.ID)
+	})
+	return stack.ID
+}
+
+// countEnvs reads the catalog through the public surface, which is what the
+// user would see -- a half-built preview left behind is only a problem
+// because it shows up here and in the reaper's queue.
+func countEnvs(t *testing.T, srv *Server, stackID uuid.UUID) int {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/stacks/"+stackID.String()+"/envs", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list envs: want 200, got %d: %s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Environments []struct {
+			ID string `json:"id"`
+		} `json:"environments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode env list: %v", err)
+	}
+	return len(resp.Environments)
+}
+
+// The 422 is a stated design guarantee of this slice, not just an error code:
+// the check runs *before* CreatePreview, so a preview whose secrets could
+// never resolve is never built at all. Checking after creation would leave a
+// half-built environment behind for the reaper to collect and the user to
+// wonder about -- so asserting on the status alone would miss the half of
+// this that matters.
+func TestCreatePreviewMissingSecretIs422AndCreatesNothing(t *testing.T) {
+	srv := testServer(t)
+	stackID := newTestStackNeedingSecret(t, srv)
+	before := countEnvs(t, srv, stackID)
+
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		// No inheritance at all: the preview would start with no secrets.
+		{"no source", map[string]any{"slug": "pr-nosrc"}},
+		// A source that exists but never set the key the spec needs.
+		{"source lacking the key", map[string]any{
+			"slug": "pr-wrongsrc", "inherit_secrets_from": "staging"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := json.Marshal(tc.body)
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost,
+				"/v1/stacks/"+stackID.String()+"/previews", strings.NewReader(string(body))))
+
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("want 422, got %d: %s", rec.Code, rec.Body)
+			}
+			if !strings.Contains(rec.Body.String(), `"name"`) {
+				t.Errorf("the response must name the missing secret, got %s", rec.Body)
+			}
+			if got := countEnvs(t, srv, stackID); got != before {
+				t.Errorf("a rejected preview must create no environment: %d before, %d after", before, got)
+			}
+		})
+	}
+}
+
 // newNodeWithReapedPreview builds a fresh org with a stack, registers a node
 // in it, creates a preview, ages the preview past its TTL, and reaps it --
 // leaving a tombstone in that org for the node to pick up. TombstonesForNode
