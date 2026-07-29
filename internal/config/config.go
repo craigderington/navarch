@@ -31,15 +31,20 @@ type Config struct {
 	// routing (the controller runs without a router), which keeps the control
 	// plane usable without Traefik in the stack.
 	RouterDir string
+	// PreviewDomain is the wildcard domain preview hostnames are generated under
+	// (pr-142-hello.<domain>). The default resolves on a dev box without DNS
+	// because Traefik routes on the Host header alone.
+	PreviewDomain string
 }
 
 func Load() (*Config, error) {
 	c := &Config{
-		DatabaseURL:  os.Getenv("COMPOSECTL_DATABASE_URL"),
-		ListenAddr:   ListenAddr(),
-		AgentToken:   os.Getenv("COMPOSECTL_AGENT_TOKEN"),
-		TickInterval: time.Duration(intEnv("COMPOSECTL_TICK_SECONDS", 1)) * time.Second,
-		RouterDir:    os.Getenv("COMPOSECTL_ROUTER_DIR"),
+		DatabaseURL:   os.Getenv("COMPOSECTL_DATABASE_URL"),
+		ListenAddr:    ListenAddr(),
+		AgentToken:    os.Getenv("COMPOSECTL_AGENT_TOKEN"),
+		TickInterval:  time.Duration(intEnv("COMPOSECTL_TICK_SECONDS", 1)) * time.Second,
+		RouterDir:     os.Getenv("COMPOSECTL_ROUTER_DIR"),
+		PreviewDomain: envOr("COMPOSECTL_PREVIEW_DOMAIN", "preview.localhost"),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("COMPOSECTL_DATABASE_URL is required")

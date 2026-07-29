@@ -14,13 +14,28 @@ import (
 )
 
 type Server struct {
-	st  *store.Store
-	log *slog.Logger
-	mux *http.ServeMux
+	st            *store.Store
+	log           *slog.Logger
+	mux           *http.ServeMux
+	previewDomain string
 }
 
-func NewServer(st *store.Store, log *slog.Logger) *Server {
-	s := &Server{st: st, log: log, mux: http.NewServeMux()}
+// ServerOption keeps NewServer's existing two-argument form working; only the
+// control plane binary passes options, so tests and callers stay unchanged.
+type ServerOption func(*Server)
+
+// WithPreviewDomain sets the wildcard domain preview hostnames are generated
+// under. Preview hostnames are always generated, never client-supplied, so a
+// caller cannot claim another environment's hostname.
+func WithPreviewDomain(domain string) ServerOption {
+	return func(s *Server) { s.previewDomain = domain }
+}
+
+func NewServer(st *store.Store, log *slog.Logger, opts ...ServerOption) *Server {
+	s := &Server{st: st, log: log, mux: http.NewServeMux(), previewDomain: DefaultPreviewDomain}
+	for _, o := range opts {
+		o(s)
+	}
 	s.routes()
 	return s
 }
@@ -65,6 +80,7 @@ func (s *Server) routes() {
 	// Environments
 	s.mux.HandleFunc("POST /v1/stacks/{stack}/envs", s.handleCreateEnv)
 	s.mux.HandleFunc("GET /v1/stacks/{stack}/envs", s.handleListEnvs)
+	s.mux.HandleFunc("POST /v1/stacks/{stack}/previews", s.handleCreatePreview)
 
 	// Deployments
 	s.mux.HandleFunc("POST /v1/envs/{env}/deployments", s.handleCreateDeployment)

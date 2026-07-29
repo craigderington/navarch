@@ -98,7 +98,7 @@ func run(log *slog.Logger) error {
 	}
 	defer st.Close()
 
-	srvHandler := api.NewServer(st, log)
+	srvHandler := api.NewServer(st, log, api.WithPreviewDomain(cfg.PreviewDomain))
 
 	// Bootstrap the dev org the local agent registers into.
 	bootCtx, bootCancel := context.WithTimeout(ctx, 5*time.Second)
