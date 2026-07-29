@@ -170,6 +170,33 @@ func TestCreatePreviewWithoutInheritanceHasNoSecrets(t *testing.T) {
 	}
 }
 
+// The handler generates the environment id so it can build a hostname
+// containing env8 before the row exists. If the insert ignored the supplied id
+// and let the column default win, the hostname would name an environment that
+// does not exist and Traefik would route a name no container's labels match.
+func TestCreatePreviewHonoursAnExplicitEnvironmentID(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	sv := newStackVersion(t, st, stack.ID)
+
+	want := uuid.New()
+	env, _, err := st.CreatePreview(ctx, CreatePreviewParams{
+		EnvironmentID: want,
+		StackID:       stack.ID, Slug: "pr-explicit-id",
+		Hostname: "pr-explicit-id-x-" + shortID(want) + ".preview.localhost",
+		TTL:      time.Hour, StackVersionID: sv.ID, ResolvedSpec: sv.Spec,
+	})
+	if err != nil {
+		t.Fatalf("CreatePreview: %v", err)
+	}
+	if env.ID != want {
+		t.Fatalf("want environment id %s, got %s", want, env.ID)
+	}
+}
+
 func TestExpireEnvironmentsReapsOnlyExpiredEphemerals(t *testing.T) {
 	st := testStore(t)
 	ctx := testCtx(t)

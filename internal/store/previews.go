@@ -12,10 +12,15 @@ import (
 )
 
 type CreatePreviewParams struct {
-	StackID  uuid.UUID
-	Slug     string
-	Hostname string
-	TTL      time.Duration
+	// EnvironmentID is supplied by the caller rather than defaulted by the
+	// column, because the generated hostname embeds env8 and therefore needs
+	// the id before the row exists. Zero means "let the store pick one" for
+	// callers with no such need.
+	EnvironmentID uuid.UUID
+	StackID       uuid.UUID
+	Slug          string
+	Hostname      string
+	TTL           time.Duration
 	// InheritSecretsFrom copies that environment's latest ciphertext. Nil
 	// means the preview starts with no secrets.
 	InheritSecretsFrom *uuid.UUID
@@ -32,6 +37,11 @@ func (s *Store) CreatePreview(ctx context.Context, p CreatePreviewParams) (*Envi
 		return nil, nil, err
 	}
 
+	envID := p.EnvironmentID
+	if envID == uuid.Nil {
+		envID = uuid.New()
+	}
+
 	var env Environment
 	var dep *Deployment
 
@@ -41,11 +51,11 @@ func (s *Store) CreatePreview(ctx context.Context, p CreatePreviewParams) (*Envi
 		// directly -- Postgres's interval parser accepts Go's duration
 		// rendering as-is, so no reformatting is needed here.
 		err := tx.QueryRow(ctx, `
-			INSERT INTO environments (stack_id, slug, hostname, config, ephemeral, expires_at)
-			VALUES ($1, $2, NULLIF($3,''), '{}'::jsonb, true, now() + $4::interval)
+			INSERT INTO environments (id, stack_id, slug, hostname, config, ephemeral, expires_at)
+			VALUES ($1, $2, $3, NULLIF($4,''), '{}'::jsonb, true, now() + $5::interval)
 			RETURNING id, stack_id, slug, strategy, COALESCE(hostname,''),
 			          config, live_deployment_id, ephemeral, expires_at, created_at
-		`, p.StackID, p.Slug, p.Hostname, p.TTL.String()).
+		`, envID, p.StackID, p.Slug, p.Hostname, p.TTL.String()).
 			Scan(&env.ID, &env.StackID, &env.Slug, &env.Strategy, &env.Hostname,
 				&config, &env.LiveDeploymentID, &env.Ephemeral, &env.ExpiresAt, &env.CreatedAt)
 		if err != nil {

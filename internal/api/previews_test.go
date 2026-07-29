@@ -15,10 +15,26 @@ import (
 	"github.com/craig/composectl/internal/store"
 )
 
+// env8 is part of the generated hostname because {slug}-{stack} alone is not
+// unique: stacks.slug is only UNIQUE (app_id, slug), so two apps — in the same
+// org or different ones — each with a stack "main" and a preview "pr-1" would
+// generate the same hostname, and the router would pick between them
+// arbitrarily. That is a cross-tenant misroute into someone else's branch with
+// inherited secrets, so the environment's own id has to be in the name.
 func TestPreviewHostnameGeneration(t *testing.T) {
-	got := previewHostname("pr-142", "hello", "preview.localhost")
-	if got != "pr-142-hello.preview.localhost" {
+	got := previewHostname("pr-142", "hello", "93fa144e", "preview.localhost")
+	if got != "pr-142-hello-93fa144e.preview.localhost" {
 		t.Errorf("got %q", got)
+	}
+}
+
+// Two previews that agree on slug and stack slug must still differ, or the
+// collision this format exists to prevent is back.
+func TestPreviewHostnameDisambiguatesIdenticalSlugs(t *testing.T) {
+	a := previewHostname("pr-1", "main", "93fa144e", "preview.localhost")
+	b := previewHostname("pr-1", "main", "0b17c3d2", "preview.localhost")
+	if a == b {
+		t.Fatalf("identical slug+stack in different environments must not collide, both %q", a)
 	}
 }
 
@@ -32,6 +48,53 @@ func TestPreviewHostnameLabelTooLong(t *testing.T) {
 	}
 	if err := validatePreviewLabel("pr-1", "hello"); err != nil {
 		t.Errorf("a short label must be accepted: %v", err)
+	}
+}
+
+// The check must measure what the label actually becomes, env8 suffix
+// included. Counting only slug+stack is wrong in the lenient direction: it
+// admits names that resolvers then truncate, which is exactly the failure
+// mode the limit exists to catch.
+//
+// 48 + 1 + len("hello") + 1 + 8 == 63 exactly, so 48 is the last accepted
+// slug length and 49 must be refused.
+func TestPreviewHostnameLabelAccountsForEnv8(t *testing.T) {
+	if err := validatePreviewLabel(strings.Repeat("a", 48), "hello"); err != nil {
+		t.Errorf("a label that is exactly 63 characters with env8 must be accepted: %v", err)
+	}
+	if err := validatePreviewLabel(strings.Repeat("a", 49), "hello"); err == nil {
+		t.Fatal("a label that only exceeds 63 characters once env8 is appended must be rejected")
+	}
+}
+
+// The hostname the API reports must be the one env8 was derived from — the
+// handler generates the environment id itself so it can build the hostname
+// before the row exists, and a mismatch there would mean Traefik routes a
+// name no container's labels agree with.
+func TestCreatePreviewHostnameCarriesItsOwnEnv8(t *testing.T) {
+	srv := testServer(t)
+	stackID := newTestStack(t, srv)
+
+	body, _ := json.Marshal(map[string]any{"slug": "pr-env8"})
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/stacks/"+stackID+"/previews", strings.NewReader(string(body))))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d: %s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		EnvironmentID string `json:"environment_id"`
+		Hostname      string `json:"hostname"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	env8 := resp.EnvironmentID[:8]
+	if !strings.HasPrefix(resp.Hostname, "pr-env8-") {
+		t.Errorf("hostname %q must start with the preview slug", resp.Hostname)
+	}
+	if !strings.Contains(resp.Hostname, "-"+env8+".") {
+		t.Errorf("hostname %q must carry env8 %q of the environment it created", resp.Hostname, env8)
 	}
 }
 
