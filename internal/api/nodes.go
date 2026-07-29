@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/craig/composectl/internal/rollout"
 	"github.com/craig/composectl/internal/store"
 )
 
@@ -83,7 +84,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 // handleDesiredState returns the instances this node must run, each with its
 // resolved Service spec inline so the agent needs no second call to build
 // containers, plus the ciphertext for every env with instances on this node
-// so the agent can decrypt and inject secrets without a separate round trip.
+// so the agent can decrypt and inject secrets without a separate round trip,
+// plus the envs this node must tear down outright (see teardown, below).
 func (s *Server) handleDesiredState(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := contextWithTimeout(r, 5*time.Second)
 	defer cancel()
@@ -101,7 +103,17 @@ func (s *Server) handleDesiredState(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"instances": desired, "secrets": secretsByEnv})
+	// Environments this node must destroy outright. Explicit intent, never
+	// inferred from an instance row's absence: an empty desired-state must
+	// never be read as "delete the database".
+	teardown, err := s.st.TombstonesForNode(ctx, id, rollout.TombstoneRetention)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"instances": desired, "secrets": secretsByEnv, "teardown_envs": teardown,
+	})
 }
 
 type reportRequest struct {
