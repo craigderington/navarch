@@ -47,15 +47,18 @@ func (s *Store) CreatePreview(ctx context.Context, p CreatePreviewParams) (*Envi
 
 	err := s.tx(ctx, func(tx pgx.Tx) error {
 		var config []byte
-		// TTL.String() (e.g. "1h0m0s") is passed as the interval literal
-		// directly -- Postgres's interval parser accepts Go's duration
-		// rendering as-is, so no reformatting is needed here.
+		// make_interval(secs => ...) is the house pattern for every
+		// Duration→interval conversion in this package. Duration.String()
+		// renders a sub-second value as e.g. "1ns", which Postgres's interval
+		// literal parser rejects outright. This TTL is hour-scale and would
+		// survive the literal form, but keeping one idiom means the next store
+		// method added here has nothing wrong to copy.
 		err := tx.QueryRow(ctx, `
 			INSERT INTO environments (id, stack_id, slug, hostname, config, ephemeral, expires_at)
-			VALUES ($1, $2, $3, NULLIF($4,''), '{}'::jsonb, true, now() + $5::interval)
+			VALUES ($1, $2, $3, NULLIF($4,''), '{}'::jsonb, true, now() + make_interval(secs => $5))
 			RETURNING id, stack_id, slug, strategy, COALESCE(hostname,''),
 			          config, live_deployment_id, ephemeral, expires_at, created_at
-		`, envID, p.StackID, p.Slug, p.Hostname, p.TTL.String()).
+		`, envID, p.StackID, p.Slug, p.Hostname, p.TTL.Seconds()).
 			Scan(&env.ID, &env.StackID, &env.Slug, &env.Strategy, &env.Hostname,
 				&config, &env.LiveDeploymentID, &env.Ephemeral, &env.ExpiresAt, &env.CreatedAt)
 		if err != nil {
@@ -141,6 +144,13 @@ func (s *Store) ExpireEnvironments(ctx context.Context) ([]string, error) {
 			return err
 		}
 
+		// The whole batch shares one transaction, so a failure on the Nth
+		// victim rolls back the tombstones and deletes already done for
+		// 1..N-1. That is the safe direction to fail: those environments
+		// simply survive with their expiry still in the past, and the next
+		// tick picks them up again. Committing per victim would trade that
+		// free retry for a half-reaped batch, and no failure mode here is
+		// worth that.
 		for _, v := range victims {
 			env8 := shortID(v.id)
 			if _, err := tx.Exec(ctx, `
