@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/google/uuid"
 )
@@ -140,31 +142,82 @@ func TestSecretExpansionNilSourceTreatsReferencesAsMissing(t *testing.T) {
 	}
 }
 
+// TestEnsureVolumeAndRemoveEnv exercises all three object kinds RemoveEnv
+// tears down — container, network, volume — so that a wrong not-found symbol
+// or a changed error shape for any one of them would fail this test, not
+// just silently no-op it. A volume-only version doesn't exercise container
+// or network removal at all, since an empty ContainerList/NetworkList never
+// reaches the errdefs.IsNotFound branch either.
 func TestEnsureVolumeAndRemoveEnv(t *testing.T) {
 	d := testDriver(t) // existing helper: skips loudly without a daemon
 	ctx := context.Background()
 	env8 := "test" + uuid.NewString()[:4]
+	labels := map[string]string{"cc.env": env8}
 	vol := "cc-" + env8 + "-data"
+	netName := "cc-" + env8 + "-net"
+	ctrName := "cc-" + env8 + "-c1"
 
-	if err := d.EnsureVolume(ctx, vol, map[string]string{"cc.env": env8}); err != nil {
+	// Registered before anything is created, so a mid-test Fatalf still
+	// cleans up: RemoveEnv is idempotent, so a best-effort call here is safe
+	// whether the happy path already removed everything or not.
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = d.RemoveEnv(cctx, env8)
+	})
+
+	if err := d.EnsureVolume(ctx, vol, labels); err != nil {
 		t.Fatalf("EnsureVolume: %v", err)
 	}
 	// Idempotent: reconcile calls this on every tick.
-	if err := d.EnsureVolume(ctx, vol, map[string]string{"cc.env": env8}); err != nil {
+	if err := d.EnsureVolume(ctx, vol, labels); err != nil {
 		t.Fatalf("EnsureVolume (second call): %v", err)
+	}
+
+	if _, err := d.EnsureNetwork(ctx, netName, labels); err != nil {
+		t.Fatalf("EnsureNetwork: %v", err)
+	}
+
+	// busybox:latest is already pulled by TestEnsureContainerCreatesAndAdopts
+	// in this file, and EnsureImage only pulls when absent — this does not
+	// add a network dependency to the test path.
+	if err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
+	}
+	cs := ContainerSpec{
+		Name: ctrName, Image: "busybox:latest",
+		Cmd:    []string{"sh", "-c", "sleep 30"},
+		Labels: labels, Network: netName, MemoryBytes: 64 << 20,
+	}
+	if _, _, err := d.EnsureContainer(ctx, cs, nil); err != nil {
+		t.Fatalf("EnsureContainer: %v", err)
 	}
 
 	if err := d.RemoveEnv(ctx, env8); err != nil {
 		t.Fatalf("RemoveEnv: %v", err)
 	}
-	vols, err := d.cli.VolumeList(ctx, volume.ListOptions{
-		Filters: filters.NewArgs(filters.Arg("label", "cc.env="+env8)),
-	})
+
+	f := filters.NewArgs(filters.Arg("label", "cc.env="+env8))
+	vols, err := d.cli.VolumeList(ctx, volume.ListOptions{Filters: f})
 	if err != nil {
 		t.Fatalf("VolumeList: %v", err)
 	}
 	if len(vols.Volumes) != 0 {
 		t.Errorf("RemoveEnv must delete the env's volumes, %d left", len(vols.Volumes))
+	}
+	containers, err := d.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
+	if err != nil {
+		t.Fatalf("ContainerList: %v", err)
+	}
+	if len(containers) != 0 {
+		t.Errorf("RemoveEnv must delete the env's containers, %d left", len(containers))
+	}
+	nets, err := d.cli.NetworkList(ctx, network.ListOptions{Filters: f})
+	if err != nil {
+		t.Fatalf("NetworkList: %v", err)
+	}
+	if len(nets) != 0 {
+		t.Errorf("RemoveEnv must delete the env's networks, %d left", len(nets))
 	}
 
 	// Idempotent: a tombstone is re-offered every tick for its whole retention
