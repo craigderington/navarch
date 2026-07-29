@@ -68,7 +68,14 @@ func NewReconciler(drv DockerDriver) *Reconciler {
 // durable state this node must destroy. It is never inferred from desired
 // being empty — an empty desired-state means "nothing to tell you", not
 // "destroy everything", and a control-plane outage must not read as the latter.
-func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInstance, secrets map[string]dockerd.SecretSource, teardownEnvs []string) []Report {
+//
+// The second return value is the env8s whose RemoveEnv call failed. Reconcile
+// itself is pure and carries no logger, so it cannot log the failure — the
+// caller, which does, is responsible for surfacing it. A failure is not
+// retried within this call; the tombstone stays in teardownEnvs for its full
+// retention window, so the next tick tries again regardless of whether this
+// one's failure got logged.
+func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInstance, secrets map[string]dockerd.SecretSource, teardownEnvs []string) ([]Report, []string) {
 	reports := make([]Report, 0, len(desired))
 	wanted := map[string]bool{} // container name → desired
 	envs := map[string]bool{}
@@ -98,14 +105,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInsta
 	// Teardown runs last: an environment being destroyed may also appear in
 	// desired (a tick straddling the reap), and destroying it after converging
 	// costs one wasted create rather than leaving a half-removed env behind.
+	var failedTeardowns []string
 	for _, env8 := range teardownEnvs {
 		if err := r.drv.RemoveEnv(ctx, env8); err != nil {
-			// Logged by the caller; a failed teardown is retried while the
-			// tombstone is still inside its retention window.
+			failedTeardowns = append(failedTeardowns, env8)
 			continue
 		}
 	}
-	return reports
+	return reports, failedTeardowns
 }
 
 func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name string, secrets dockerd.SecretSource) Report {
