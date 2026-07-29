@@ -1,0 +1,34 @@
+# Runnable stack for the preview-environment demo (scripts/demo-preview.sh).
+#
+# api echoes WHOAMI_NAME in its HTTP response — same technique as
+# examples/secret — so curling through Traefik proves a preview actually
+# received its inherited secret's plaintext, not just that a ciphertext row
+# got copied.
+#
+# db is PINNED (named volume): a preview built entirely from swappable
+# services would tear down via ordinary GC on an empty desired-state, which
+# exercises none of what Task 7/8 added. A pinned service forces expiry down
+# the explicit-tombstone path — RemoveEnv destroying a container GC never
+# would, plus the named volume.
+services:
+  api:
+    image: traefik/whoami
+    environment:
+      WHOAMI_NAME: ${secret:name}
+    depends_on:
+      - db
+    x-composectl:
+      ingress:
+        port: 80
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_DB: app
+      POSTGRES_PASSWORD: ${secret:name}
+    volumes:
+      - previewdata:/var/lib/postgresql/data
+
+volumes:
+  previewdata:

@@ -64,6 +64,13 @@ the codebase:
 - Handlers decode, delegate, encode. Business logic belongs in store or
   parser, not in `internal/api`.
 
+Named volumes are created explicitly (`EnsureVolume`, with a `cc.env` label)
+rather than left to Docker's implicit creation on first mount. An implicit
+volume carries no label, and teardown (`RemoveEnv`) matches on that label
+because it has to be exact — a name-substring match risks catching a volume
+that outlived its environment for an unrelated reason. Volumes created before
+this landed carry no label and will not be reaped; they need manual cleanup.
+
 **The boundaries hold across binaries, not just packages:**
 
 - **The agent never imports pgx.** It speaks only the control plane's HTTP
@@ -271,6 +278,19 @@ the now-live deployment still holds its own row for it (adoption by the
 stable name `cc-{env8}-pinned-{service}`). Pinned containers are never GC'd
 here.
 
+**Teardown of durable state requires an explicit tombstone; an absent row is
+never enough.** The reconcile rule above (superseded revision → row deleted →
+swappable containers GC'd) never touches a pinned container or a named
+volume — GC only ever removes swappable orphans. Destroying the pinned
+container and its volumes happens exactly once, in `RemoveEnv`, and only when
+the control plane hands the agent that env8 in `teardown_envs`. This is
+deliberate: an empty desired-state can be produced by a control-plane outage
+(the agent just sees nothing to do) and must never be read as "drop the
+database" — only a tombstone, written durably before the environment row is
+deleted, means that. `TombstoneRetention` is 24h; past it an offline node
+never sees the tombstone again, and its containers and volumes leak until
+someone removes them by hand.
+
 **Naming is fixed and load-bearing** (the agent and router both compute
 these, so don't drift them): swappable container
 `cc-{env8}-r{rev}-{slot}-{service}`, pinned container
@@ -286,50 +306,73 @@ named volume `cc-{env8}-{volume}`. Labels: `cc.env`, `cc.deployment`,
 validation, catalog + deployment endpoints, dev stack. Parser (16 cases)
 and store (now ~27 cases) tested against real Postgres.
 
-**Sprint 2 — node agent + rollouts. Slice A DONE; B and C next.**
+**Sprint 2 — node agent + rollouts. DONE.**
 
 The design and per-slice plan live in `docs/superpowers/`:
 `specs/2026-07-23-sprint2-agent-rollouts-design.md` and
 `plans/2026-07-23-sprint2-slice-a-reconciliation-spine.md`.
 
-- **Slice A (done)** — the reconciliation spine. The agent drives a real
-  Docker daemon; the control-plane scheduler places pending deployments and
-  writes desired instances; the controller aggregates instance health and
-  drives `scheduling → starting → healthy`, failing the deployment (blue
-  untouched) if an instance fails. `make demo` is now agent-driven end to
-  end — **no SQL fakery** — and shows blue/green coexistence with one shared
-  pinned db. `make demo-failure` shows a bad image → `failed`.
-- **Slice B (next)** — Traefik as a real compose service, an
-  `internal/router` config generator, and the controller *auto-promoting*
-  on healthy (rewrite Traefik → `PromoteDeployment` → tear down old
-  swappable). The controller currently stops at `healthy`; promotion is
-  still the manual `POST /promote`.
-- **Slice C (next)** — `POST /v1/envs/{env}/rollback` = re-deploy an older
-  stack version as a new revision through the same spine. `handleRollback`
-  is still 501.
+- **Slice A** — the reconciliation spine. The agent drives a real Docker
+  daemon; the control-plane scheduler places pending deployments and writes
+  desired instances; the controller aggregates instance health and drives
+  `scheduling → starting → healthy`, failing the deployment (blue untouched)
+  if an instance fails. `make demo` is agent-driven end to end — **no SQL
+  fakery** — and shows blue/green coexistence with one shared pinned db.
+  `make demo-failure` shows a bad image → `failed`.
+- **Slice B** — Traefik as a real compose service, `internal/router`
+  generating its file-provider config, and the controller *auto-promoting*
+  on healthy (`PromoteDeployment` → router resync → old swappable torn
+  down). `make demo`'s traffic-flip step exercises this: revision 2 goes
+  live and Traefik moves traffic to it with zero downtime, no manual
+  `POST /promote` involved.
+- **Slice C** — `POST /v1/envs/{env}/rollback` re-deploys an older stack
+  version as a new revision through the same spine (append-only: rollback is
+  a new row, never a mutation of the old one). `make demo-rollback` exercises
+  it.
+
+**Sprint 3 — secrets + preview environments. DONE.**
+
+- **Slice A (secrets)** — `POST /v1/envs/{env}/secrets` stores age
+  ciphertext, sealed to every ready node's recipient at write time; the
+  control plane never holds a decryption key. The agent decrypts
+  per-environment at container start using an identity that persists across
+  restarts (`COMPOSECTL_AGE_IDENTITY_FILE`, on the `age-identity` volume) and
+  injects into `${secret:KEY}` references. A deployment whose resolved spec
+  needs a secret the target environment never set is rejected with 422
+  before it reaches a node. This retired the Sprint 2 dev stand-in
+  (`COMPOSECTL_DEV_SECRETS`, a static `k=v` map baked into the agent's
+  environment) entirely. `make demo-secrets` exercises ciphertext-at-rest,
+  decrypt+inject, and the 422 fail-fast.
+- **Slice B (previews)** — `POST /v1/stacks/{stack}/previews` creates an
+  ephemeral environment, its first deployment, and (optionally) a copy of
+  another environment's secret ciphertext, all in one transaction. The
+  reaper loop expires previews past `expires_at`, writes a tombstone before
+  deleting the environment row, and the agent acts on that tombstone to
+  destroy the pinned container and named volumes an ordinary reconcile tick
+  would never touch. `make demo-preview` exercises the full lifecycle:
+  inherited secret served through Traefik, then complete teardown.
 
 **Placement/agent model:** the scheduler owns placement (writes desired
 `service_instances`); the agent is a dumb reconciler. Nodes are org-scoped,
 so the agent registers into a stable **`dev` org** (bootstrapped at
 control-plane startup via `BootstrapDevOrg`); `make demo` deploys into it.
-Multi-org node pools are Sprint 4. The dev secret source is a static map
-from `COMPOSECTL_DEV_SECRETS` (`k=v,k=v`); the encrypted store is Sprint 3.
+Multi-org node pools are Sprint 4.
 
 **Store methods** now also include, beyond the Sprint 1 catalog set:
 `RegisterNode`, `Heartbeat`, `ListNodes`, `ListReadyNodes`,
 `GetOrganizationBySlug`, `CreateServiceInstances`, `DesiredStateForNode`,
 `ReportInstance`, `InstanceStates`, `DeleteInstances`,
-`ListPendingDeployments`, `ListRolloutsInState`. All node/deployment
-endpoints are wired; only `rollback` is still 501 (Slice C). Handler files
-in `internal/api`: `catalog.go`, `deployments.go`, `validate.go`,
-`nodes.go`.
+`ListPendingDeployments`, `ListRolloutsInState`, `CreatePreview`,
+`ExpireEnvironments`, `TombstonesForNode`, `SweepTombstones`, `GetStack`,
+`GetEnvironmentBySlug`. All node/deployment/preview endpoints are wired.
+Handler files in `internal/api`: `catalog.go`, `deployments.go`,
+`validate.go`, `nodes.go`, `previews.go`.
 
 `POST /v1/orgs` is self-serve (orgs are the root; a seeded migration UUID
 would be permanent). `POST /v1/stacks/{stack}/versions` takes the compose
 file as the **raw body** (`curl --data-binary @compose.yaml`), authorship
 via `?created_by=`.
 
-**Sprint 3** — environments, secret injection (encrypted store), preview envs
 **Sprint 4** — multi-node, WireGuard mesh, placement scoring
 **Sprint 5** — Bubble Tea TUI, log aggregation, metrics
 
@@ -377,6 +420,13 @@ via `?created_by=`.
 - `examples/webapp/compose.yaml` uses placeholder images that don't pull;
   it's for parsing/classification only. The **runnable** demo stack is
   `examples/hello/compose.yaml` (real images), which `make demo` uses.
+  `examples/secret/compose.yaml` (`make demo-secrets`) and
+  `examples/preview/compose.yaml` (`make demo-preview`) are runnable too,
+  each shaped for what its demo has to assert: `secret` echoes an injected
+  value into its HTTP response (`hello`'s services don't echo anything, so
+  it can't prove secret content that way); `preview` pairs that same
+  echoing service with a pinned db, so an expiring preview has a pinned
+  container and a named volume actually worth destroying.
 
 ## Verification
 
@@ -394,13 +444,32 @@ daemon. A green run with either down proves nothing — **check for
 `--- SKIP`** before trusting it. Test fixtures create a unique-slug org and
 delete it (and children, bottom-up) on cleanup.
 
+**Tests must run with the dev-stack control plane stopped**
+(`docker compose stop controlplane agent`; leave Postgres up). Its
+scheduler/controller/reaper loops mutate the same database the tests use,
+and the reaper now DELETEs environments — a running control plane corrupts
+test fixtures mid-run, and `go test ./...` fails on unrelated tests as a
+result. Restart the control plane (`docker compose start controlplane
+agent`, or `make up`) before running demos again.
+
+**Postgres interval casts:** `time.Duration.String()` renders a sub-second
+value as e.g. `"1ns"`, which Postgres's interval parser rejects outright.
+Use `make_interval(secs => $n)` with `Duration.Seconds()` for any duration
+that could be sub-second. `internal/store/previews.go` uses both forms:
+`CreatePreview`'s TTL is hour-scale and safe as a `.String()` cast, but
+`TombstonesForNode`/`SweepTombstones` take a retention window a test can
+shrink to milliseconds, so they go through `make_interval`.
+
 **Boundary guard:** `go list -deps ./cmd/controlplane | grep docker/docker`
 must return nothing — the control-plane binary must not link the Docker SDK.
 
 `make demo` is the real end-to-end check now: it brings a stack up through
-the agent and asserts it reaches `healthy` unaided. `make validate`
+the agent and asserts it reaches `healthy` unaided. `make demo-preview`
+covers the other half of the deployment lifecycle: a preview environment
+served through Traefik with an inherited secret, then expired and reaped —
+containers, pinned container, and named volumes all gone. `make validate`
 exercises the parse path (fastest check that parser changes didn't break
-classification). Both need `make up` first.
+classification). All three need `make up` first.
 
 Worth testing against: dependency cycles, bind mounts, published ports,
 `privileged`, pinned ingress services, read-only volumes (must stay
