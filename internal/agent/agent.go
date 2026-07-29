@@ -91,8 +91,9 @@ func (c *cpClient) register(ctx context.Context, cfg Config) (uuid.UUID, error) 
 
 func (c *cpClient) reconcileTick(ctx context.Context, nodeID uuid.UUID, rec *Reconciler, log *slog.Logger) error {
 	var desired struct {
-		Instances []store.DesiredInstance            `json:"instances"`
-		Secrets   map[string][]store.EncryptedSecret `json:"secrets"`
+		Instances    []store.DesiredInstance            `json:"instances"`
+		Secrets      map[string][]store.EncryptedSecret `json:"secrets"`
+		TeardownEnvs []string                           `json:"teardown_envs"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/v1/nodes/"+nodeID.String()+"/desired-state", nil, &desired); err != nil {
 		return err
@@ -117,7 +118,7 @@ func (c *cpClient) reconcileTick(ctx context.Context, nodeID uuid.UUID, rec *Rec
 		sources[env8] = m
 	}
 
-	reports := rec.Reconcile(ctx, desired.Instances, sources)
+	reports := rec.Reconcile(ctx, desired.Instances, sources, desired.TeardownEnvs)
 	if len(reports) > 0 {
 		if err := c.do(ctx, http.MethodPost, "/v1/nodes/"+nodeID.String()+"/report",
 			map[string]any{"instances": toReportDTO(reports)}, nil); err != nil {

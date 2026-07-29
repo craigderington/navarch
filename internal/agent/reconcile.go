@@ -23,6 +23,16 @@ type DockerDriver interface {
 	InspectHealth(ctx context.Context, containerID string) (dockerd.Health, error)
 	StopRemove(ctx context.Context, containerID string) error
 	ListManaged(ctx context.Context, env8 string) ([]dockerd.Managed, error)
+	// EnsureVolume creates a named volume with labels. Docker would create it
+	// implicitly on first mount, but implicit volumes carry no labels, and
+	// teardown must match volumes exactly — a volume is the one object here
+	// whose deletion cannot be undone.
+	EnsureVolume(ctx context.Context, name string, labels map[string]string) error
+	// RemoveEnv destroys everything belonging to an environment: containers
+	// (including pinned), networks and named volumes. This is the ONLY path
+	// that removes pinned containers or volumes, and it fires only on an
+	// explicit tombstone.
+	RemoveEnv(ctx context.Context, env8 string) error
 }
 
 type Report struct {
@@ -53,7 +63,12 @@ func NewReconciler(drv DockerDriver) *Reconciler {
 // containers in that environment. A missing entry (env8 not in the map) is
 // nil, which the driver treats as an empty source — every ${secret:KEY}
 // reference then fails as missing rather than resolving to another env's value.
-func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInstance, secrets map[string]dockerd.SecretSource) []Report {
+//
+// teardownEnvs is the explicit, control-plane-issued list of env8s whose
+// durable state this node must destroy. It is never inferred from desired
+// being empty — an empty desired-state means "nothing to tell you", not
+// "destroy everything", and a control-plane outage must not read as the latter.
+func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInstance, secrets map[string]dockerd.SecretSource, teardownEnvs []string) []Report {
 	reports := make([]Report, 0, len(desired))
 	wanted := map[string]bool{} // container name → desired
 	envs := map[string]bool{}
@@ -79,6 +94,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInsta
 			}
 		}
 	}
+
+	// Teardown runs last: an environment being destroyed may also appear in
+	// desired (a tick straddling the reap), and destroying it after converging
+	// costs one wasted create rather than leaving a half-removed env behind.
+	for _, env8 := range teardownEnvs {
+		if err := r.drv.RemoveEnv(ctx, env8); err != nil {
+			// Logged by the caller; a failed teardown is retried while the
+			// tombstone is still inside its retention window.
+			continue
+		}
+	}
 	return reports
 }
 
@@ -98,6 +124,11 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 	}
 
 	cs := containerSpec(di, name)
+	for _, m := range cs.Mounts {
+		if err := r.drv.EnsureVolume(ctx, m.Volume, map[string]string{"cc.env": di.Env8}); err != nil {
+			return fail(err)
+		}
+	}
 	id, _, err := r.drv.EnsureContainer(ctx, cs, secrets)
 	if err != nil {
 		return fail(err)

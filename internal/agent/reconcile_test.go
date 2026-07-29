@@ -20,6 +20,8 @@ type fakeDriver struct {
 	managed         []dockerd.Managed
 	health          map[string]dockerd.Health
 	lastSecretValue string
+	volumes         []string
+	removedEnvs     []string
 }
 
 func (f *fakeDriver) EnsureImage(ctx context.Context, ref string) error { return nil }
@@ -50,6 +52,14 @@ func (f *fakeDriver) StopRemove(ctx context.Context, id string) error {
 func (f *fakeDriver) ListManaged(ctx context.Context, env8 string) ([]dockerd.Managed, error) {
 	return f.managed, nil
 }
+func (f *fakeDriver) EnsureVolume(ctx context.Context, name string, l map[string]string) error {
+	f.volumes = append(f.volumes, name)
+	return nil
+}
+func (f *fakeDriver) RemoveEnv(ctx context.Context, env8 string) error {
+	f.removedEnvs = append(f.removedEnvs, env8)
+	return nil
+}
 
 func desired(service string, swappable bool, health dockerd.Health) store.DesiredInstance {
 	return store.DesiredInstance{
@@ -67,7 +77,7 @@ func TestReconcileCreatesSwappableAndPinned(t *testing.T) {
 	reports := r.Reconcile(context.Background(), []store.DesiredInstance{
 		desired("api", true, dockerd.Health{}),
 		desired("db", false, dockerd.Health{}),
-	}, nil)
+	}, nil, nil)
 	if len(f.created) != 2 {
 		t.Fatalf("expected 2 containers created, got %v", f.created)
 	}
@@ -98,7 +108,7 @@ func TestReconcileGCsOrphanSwappable(t *testing.T) {
 	}
 	r := NewReconciler(f)
 	// Desired set no longer includes the r0-green api, but still includes db.
-	r.Reconcile(context.Background(), []store.DesiredInstance{desired("db", false, dockerd.Health{})}, nil)
+	r.Reconcile(context.Background(), []store.DesiredInstance{desired("db", false, dockerd.Health{})}, nil, nil)
 	if len(f.removed) != 1 || f.removed[0] != "id-old" {
 		t.Fatalf("expected only the orphan swappable removed, got %v", f.removed)
 	}
@@ -115,7 +125,7 @@ func TestHealthMappingHealthchecked(t *testing.T) {
 			d.Service.Health = &spec.HealthCheck{Test: []string{"CMD", "true"}, Retries: 3}
 			return d
 		}(),
-	}, nil)
+	}, nil, nil)
 	if reports[0].State != store.InstanceRunning {
 		t.Fatalf("healthy container must map to running, got %s", reports[0].State)
 	}
@@ -126,7 +136,7 @@ func TestHealthMappingExitedFails(t *testing.T) {
 		"id-cc-env12345-r1-blue-api": {Running: false, ExitCode: 1},
 	}}
 	r := NewReconciler(f)
-	reports := r.Reconcile(context.Background(), []store.DesiredInstance{desired("api", true, dockerd.Health{})}, nil)
+	reports := r.Reconcile(context.Background(), []store.DesiredInstance{desired("api", true, dockerd.Health{})}, nil, nil)
 	if reports[0].State != store.InstanceFailed {
 		t.Fatalf("exited container must map to failed, got %s", reports[0].State)
 	}
@@ -137,7 +147,7 @@ func TestReconcileAttachesIngressToSharedNetwork(t *testing.T) {
 	r := NewReconciler(f)
 	d := desired("api", true, dockerd.Health{})
 	d.Service.Ingress = &spec.Ingress{Port: 80}
-	r.Reconcile(context.Background(), []store.DesiredInstance{d}, nil)
+	r.Reconcile(context.Background(), []store.DesiredInstance{d}, nil, nil)
 	var attached bool
 	for _, a := range f.attached {
 		if strings.HasSuffix(a, "->cc-ingress") {
@@ -155,8 +165,41 @@ func TestReconcilePassesPerEnvSecrets(t *testing.T) {
 	d := desired("api", true, dockerd.Health{})
 	d.Service.SecretEnv = map[string]string{"WHOAMI_NAME": "${secret:name}"}
 	sources := map[string]dockerd.SecretSource{d.Env8: EnvSecrets{"name": "revealed"}}
-	r.Reconcile(context.Background(), []store.DesiredInstance{d}, sources)
+	r.Reconcile(context.Background(), []store.DesiredInstance{d}, sources, nil)
 	if f.lastSecretValue != "revealed" {
 		t.Fatalf("expected the env's secret source to reach the driver, got %q", f.lastSecretValue)
+	}
+}
+
+func TestReconcileTearsDownTombstonedEnv(t *testing.T) {
+	f := &fakeDriver{}
+	r := NewReconciler(f)
+
+	r.Reconcile(context.Background(), nil, nil, []string{"deadbeef"})
+
+	if len(f.removedEnvs) != 1 || f.removedEnvs[0] != "deadbeef" {
+		t.Fatalf("want RemoveEnv(deadbeef), got %v", f.removedEnvs)
+	}
+}
+
+// The invariant this whole slice comes closest to breaking. An empty
+// desired-state means "I have nothing to tell you", not "destroy everything":
+// a control-plane outage, a failed migration, or an auth error can all produce
+// one, and none of them should drop a production database.
+func TestReconcileEmptyDesiredStateNeverRemovesAnEnv(t *testing.T) {
+	f := &fakeDriver{
+		managed: []dockerd.Managed{
+			{ID: "id-pinned", Name: "cc-env12345-pinned-db", Service: "db", Swappable: false},
+		},
+	}
+	r := NewReconciler(f)
+
+	r.Reconcile(context.Background(), nil, nil, nil)
+
+	if len(f.removedEnvs) != 0 {
+		t.Fatalf("empty desired-state must never trigger RemoveEnv, got %v", f.removedEnvs)
+	}
+	if len(f.removed) != 0 {
+		t.Fatalf("empty desired-state must not stop any container, got %v", f.removed)
 	}
 }
