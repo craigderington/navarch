@@ -100,7 +100,7 @@ func TestReportInstanceAndAggregate(t *testing.T) {
 	_ = st.UpdateDeploymentState(testCtx(t), dep.ID, DeployScheduling, "")
 
 	desired, _ := st.DesiredStateForNode(testCtx(t), node.ID)
-	if err := st.ReportInstance(testCtx(t), desired[0].InstanceID, ObservedInstance{
+	if err := st.ReportInstance(testCtx(t), node.ID, desired[0].InstanceID, ObservedInstance{
 		State: InstanceRunning, ContainerID: "deadbeef", HealthStatus: "healthy", SetStarted: true,
 	}); err != nil {
 		t.Fatalf("ReportInstance: %v", err)
@@ -126,6 +126,31 @@ func TestDeleteInstances(t *testing.T) {
 	states, _ := st.InstanceStates(testCtx(t), dep.ID)
 	if len(states) != 0 {
 		t.Fatalf("expected no instances after delete, got %v", states)
+	}
+}
+
+func TestRejectPinnedDrift(t *testing.T) {
+	live := &spec.DeploymentSpec{Services: map[string]spec.Service{
+		"db":  {Name: "db", Image: "postgres:16", Swappable: false},
+		"web": {Name: "web", Image: "nginx:1", Swappable: true},
+	}}
+	unchanged := &spec.DeploymentSpec{Services: map[string]spec.Service{
+		"db":  {Name: "db", Image: "postgres:16", Swappable: false},
+		"web": {Name: "web", Image: "nginx:2", Swappable: true},
+	}}
+	if err := rejectPinnedDrift(live, unchanged); err != nil {
+		t.Fatalf("swappable change rejected: %v", err)
+	}
+
+	for name, next := range map[string]*spec.DeploymentSpec{
+		"changed": {Services: map[string]spec.Service{"db": {Name: "db", Image: "postgres:17", Swappable: false}}},
+		"removed": {Services: map[string]spec.Service{"web": {Name: "web", Image: "nginx:2", Swappable: true}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := rejectPinnedDrift(live, next); !errors.Is(err, ErrConflict) {
+				t.Fatalf("got %v, want ErrConflict", err)
+			}
+		})
 	}
 }
 
@@ -204,7 +229,7 @@ func driveToLive(t *testing.T, st *Store, dep *Deployment, node *Node) {
 	desired, _ := st.DesiredStateForNode(testCtx(t), node.ID)
 	for _, d := range desired {
 		if d.DeploymentID == dep.ID {
-			_ = st.ReportInstance(testCtx(t), d.InstanceID, ObservedInstance{State: InstanceRunning, ContainerID: "c", SetStarted: true})
+			_ = st.ReportInstance(testCtx(t), node.ID, d.InstanceID, ObservedInstance{State: InstanceRunning, ContainerID: "c", SetStarted: true})
 		}
 	}
 	for _, s := range []DeploymentState{DeployStarting, DeployHealthy} {

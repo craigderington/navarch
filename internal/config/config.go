@@ -22,8 +22,8 @@ func ListenAddr() string {
 type Config struct {
 	DatabaseURL string
 	ListenAddr  string
-	// AgentToken authenticates node agents. Sprint 1 uses a shared token;
-	// replace with per-node mTLS or signed JWTs before multi-tenant use.
+	// AgentToken is the shared bearer token protecting the HTTP API. Replace
+	// it with user identities plus per-node credentials before multi-tenant use.
 	AgentToken string
 	// TickInterval paces the scheduler and rollout controller loops.
 	TickInterval time.Duration
@@ -48,6 +48,9 @@ func Load() (*Config, error) {
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("COMPOSECTL_DATABASE_URL is required")
+	}
+	if c.AgentToken == "" {
+		return nil, fmt.Errorf("COMPOSECTL_AGENT_TOKEN is required")
 	}
 	return c, nil
 }

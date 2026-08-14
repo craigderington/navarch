@@ -8,6 +8,8 @@
 set -euo pipefail
 
 API=${API:-http://localhost:8417}
+API_TOKEN=${API_TOKEN:-dev-token-change-me}
+CURL_AUTH=(-H "Authorization: Bearer $API_TOKEN")
 GW=${GW:-http://localhost:8095}
 DB_URL=${DB_URL:-postgres://composectl:composectl@localhost:5473/composectl?sslmode=disable}
 COMPOSE=${COMPOSE:-examples/secret/compose.yaml}
@@ -23,9 +25,9 @@ note() { printf '  \033[90m%s\033[0m\n' "$1"; }
 api() {
   local method=$1 path=$2 body=${3-} out code
   if [ -n "$body" ]; then
-    out=$(curl -sS -X "$method" "$API$path" -H 'Content-Type: application/json' -d "$body" -w '\n%{http_code}')
+    out=$(curl -sS "${CURL_AUTH[@]}" -X "$method" "$API$path" -H 'Content-Type: application/json' -d "$body" -w '\n%{http_code}')
   else
-    out=$(curl -sS -X "$method" "$API$path" -w '\n%{http_code}')
+    out=$(curl -sS "${CURL_AUTH[@]}" -X "$method" "$API$path" -w '\n%{http_code}')
   fi
   code=$(tail -n1 <<<"$out"); out=$(sed '$d' <<<"$out")
   if [[ ! $code =~ ^2 ]]; then
@@ -38,7 +40,7 @@ api() {
 # failure — used to assert the 422 fail-fast, which is an expected failure.
 api_status() {
   local method=$1 path=$2 body=${3-}
-  curl -sS -o /dev/null -w '%{http_code}' -X "$method" "$API$path" \
+  curl -sS "${CURL_AUTH[@]}" -o /dev/null -w '%{http_code}' -X "$method" "$API$path" \
     -H 'Content-Type: application/json' -d "$body"
 }
 
@@ -62,7 +64,7 @@ ORG=$(api GET /v1/orgs | jq -r '.organizations[]|select(.slug=="dev")|.id')
 step "Environment 1: set the secret before deploying"
 APP=$(api POST "/v1/orgs/$ORG/apps" "{\"slug\":\"sec-$SUFFIX\",\"name\":\"Secret\"}" | jq -r .id)
 STACK=$(api POST "/v1/apps/$APP/stacks" "{\"slug\":\"main-$SUFFIX\"}" | jq -r .id)
-curl -sS -X POST "$API/v1/stacks/$STACK/versions?created_by=demo" --data-binary "@$COMPOSE" | jq -e .id >/dev/null
+curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/stacks/$STACK/versions?created_by=demo" --data-binary "@$COMPOSE" | jq -e .id >/dev/null
 ENV_ID=$(api POST "/v1/stacks/$STACK/envs" "{\"slug\":\"prod\",\"hostname\":\"$HOST\"}" | jq -r .id)
 note "org=$ORG env=$ENV_ID host=$HOST"
 
@@ -101,7 +103,7 @@ note "confirmed: Traefik response carries the decrypted secret"
 step "Environment 2: same stack, secret UNSET — deploy must fail fast (422)"
 APP2=$(api POST "/v1/orgs/$ORG/apps" "{\"slug\":\"sec2-$SUFFIX\",\"name\":\"Secret2\"}" | jq -r .id)
 STACK2=$(api POST "/v1/apps/$APP2/stacks" "{\"slug\":\"main2-$SUFFIX\"}" | jq -r .id)
-curl -sS -X POST "$API/v1/stacks/$STACK2/versions?created_by=demo" --data-binary "@$COMPOSE" | jq -e .id >/dev/null
+curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/stacks/$STACK2/versions?created_by=demo" --data-binary "@$COMPOSE" | jq -e .id >/dev/null
 ENV2_ID=$(api POST "/v1/stacks/$STACK2/envs" "{\"slug\":\"prod\",\"hostname\":\"sec2-$SUFFIX.example.com\"}" | jq -r .id)
 CODE=$(api_status POST "/v1/envs/$ENV2_ID/deployments" '{"created_by":"demo"}')
 [ "$CODE" = "422" ] || { echo "expected 422 for a deploy with an unset required secret, got $CODE" >&2; exit 1; }

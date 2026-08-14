@@ -16,6 +16,7 @@ import (
 
 	"github.com/craig/composectl/internal/api"
 	"github.com/craig/composectl/internal/config"
+	"github.com/craig/composectl/internal/metrics"
 	"github.com/craig/composectl/internal/rollout"
 	"github.com/craig/composectl/internal/router"
 	"github.com/craig/composectl/internal/store"
@@ -98,7 +99,12 @@ func run(log *slog.Logger) error {
 	}
 	defer st.Close()
 
-	srvHandler := api.NewServer(st, log, api.WithPreviewDomain(cfg.PreviewDomain))
+	metricsRegistry := metrics.New()
+	srvHandler := api.NewServer(st, log,
+		api.WithPreviewDomain(cfg.PreviewDomain),
+		api.WithBearerToken(cfg.AgentToken),
+		api.WithMetrics(metricsRegistry),
+	)
 
 	// Bootstrap the dev org the local agent registers into.
 	bootCtx, bootCancel := context.WithTimeout(ctx, 5*time.Second)
@@ -121,9 +127,9 @@ func run(log *slog.Logger) error {
 	sched := rollout.NewScheduler(st, log)
 	ctrl := rollout.NewController(st, log, rtr)
 	reaper := rollout.NewReaper(st, log)
-	go runLoop(ctx, cfg.TickInterval, log, "scheduler", sched.ScheduleOnce)
-	go runLoop(ctx, cfg.TickInterval, log, "controller", ctrl.ReconcileOnce)
-	go runLoop(ctx, cfg.TickInterval, log, "reaper", reaper.ReapOnce)
+	go runLoop(ctx, cfg.TickInterval, log, metricsRegistry, "scheduler", sched.ScheduleOnce)
+	go runLoop(ctx, cfg.TickInterval, log, metricsRegistry, "controller", ctrl.ReconcileOnce)
+	go runLoop(ctx, cfg.TickInterval, log, metricsRegistry, "reaper", reaper.ReapOnce)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -157,7 +163,7 @@ func run(log *slog.Logger) error {
 
 // runLoop invokes tick every interval until ctx is cancelled, bounding each
 // tick with its own timeout so a slow database can't wedge the loop.
-func runLoop(ctx context.Context, every time.Duration, log *slog.Logger, name string, tick func(context.Context) error) {
+func runLoop(ctx context.Context, every time.Duration, log *slog.Logger, reg *metrics.Registry, name string, tick func(context.Context) error) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -165,8 +171,11 @@ func runLoop(ctx context.Context, every time.Duration, log *slog.Logger, name st
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			started := time.Now()
 			c, cancel := context.WithTimeout(ctx, 30*time.Second)
-			if err := tick(c); err != nil {
+			err := tick(c)
+			reg.ObserveLoop(name, started, err)
+			if err != nil {
 				log.Warn("loop tick failed", "loop", name, "err", err)
 			}
 			cancel()

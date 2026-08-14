@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
 )
@@ -121,6 +122,9 @@ type CreateEnvironmentParams struct {
 func (s *Store) CreateEnvironment(ctx context.Context, p CreateEnvironmentParams) (*Environment, error) {
 	if err := validateSlug("slug", p.Slug); err != nil {
 		return nil, err
+	}
+	if p.Strategy != "" && p.Strategy != StrategyBlueGreen {
+		return nil, fmt.Errorf("%w: rollout strategy %q is not supported; use %q", ErrInvalid, p.Strategy, StrategyBlueGreen)
 	}
 	configJSON, err := json.Marshal(orEmpty(p.Config))
 	if err != nil {

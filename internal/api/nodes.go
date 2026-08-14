@@ -133,7 +133,8 @@ type reportRequest struct {
 func (s *Server) handleInstanceReport(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := contextWithTimeout(r, 10*time.Second)
 	defer cancel()
-	if _, ok := pathUUID(w, r, "id"); !ok {
+	nodeID, ok := pathUUID(w, r, "id")
+	if !ok {
 		return
 	}
 	var req reportRequest
@@ -142,7 +143,7 @@ func (s *Server) handleInstanceReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, in := range req.Instances {
-		err := s.st.ReportInstance(ctx, in.InstanceID, store.ObservedInstance{
+		err := s.st.ReportInstance(ctx, nodeID, in.InstanceID, store.ObservedInstance{
 			State: store.InstanceState(in.State), ContainerID: in.ContainerID,
 			HealthStatus: in.HealthStatus, LastError: in.LastError,
 			RestartCount: in.RestartCount, SetStarted: in.SetStarted,

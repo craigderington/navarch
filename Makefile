@@ -1,6 +1,7 @@
 .DEFAULT_GOAL := help
 DB_URL ?= postgres://composectl:composectl@localhost:5473/composectl?sslmode=disable
 API    ?= http://localhost:8417
+API_TOKEN ?= dev-token-change-me
 
 .PHONY: help
 help: ## Show this help
@@ -51,32 +52,36 @@ migrate-down: ## Roll back one migration
 
 .PHONY: validate
 validate: ## Validate the example stack against the running API
-	curl -sS -X POST $(API)/v1/validate \
+	curl -sS -H "Authorization: Bearer $(API_TOKEN)" -X POST $(API)/v1/validate \
 		--data-binary @examples/webapp/compose.yaml | jq .
 
 .PHONY: health
 health: ## Check control plane health
 	curl -sS $(API)/healthz | jq .
 
+.PHONY: metrics
+metrics: ## Show Prometheus-compatible control-plane metrics
+	curl -sS -H "Authorization: Bearer $(API_TOKEN)" $(API)/metrics
+
 .PHONY: demo
 demo: ## Walk the full loop: catalog -> version -> agent-driven rollout -> promote
-	API=$(API) ./scripts/demo.sh
+	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo.sh
 
 .PHONY: demo-failure
 demo-failure: ## Show a failed rollout leaving any live deployment untouched
-	API=$(API) ./scripts/demo-failure.sh
+	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-failure.sh
 
 .PHONY: demo-rollback
 demo-rollback: ## Deploy two versions, then roll back to the first
-	API=$(API) ./scripts/demo-rollback.sh
+	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-rollback.sh
 
 .PHONY: demo-secrets
 demo-secrets: ## Set + deploy a secret end to end: ciphertext at rest, plaintext through Traefik, 422 when unset
-	API=$(API) DB_URL=$(DB_URL) ./scripts/demo-secrets.sh
+	API=$(API) API_TOKEN=$(API_TOKEN) DB_URL=$(DB_URL) ./scripts/demo-secrets.sh
 
 .PHONY: demo-preview
 demo-preview: ## Create a preview env with inherited secrets, then watch it expire and get reaped
-	@./scripts/demo-preview.sh
+	@API_TOKEN=$(API_TOKEN) ./scripts/demo-preview.sh
 
 .PHONY: agent-logs
 agent-logs: ## Tail the node agent logs

@@ -162,6 +162,32 @@ func TestInstanceReportSkipsVanishedRowsAndKeepsTheBatch(t *testing.T) {
 	}
 }
 
+func TestInstanceReportCannotUpdateAnotherNodesInstance(t *testing.T) {
+	srv := testServer(t)
+	_, instanceID := newReportableInstance(t, srv)
+
+	body, _ := json.Marshal(map[string]any{"instances": []map[string]any{
+		{"instance_id": instanceID, "state": "running", "health_status": "healthy"},
+	}})
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/nodes/"+uuid.NewString()+"/report", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stale or foreign reports are ignored, got %d: %s", rec.Code, rec.Body)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var state string
+	if err := srv.st.Pool().QueryRow(ctx,
+		`SELECT state::text FROM service_instances WHERE id=$1`, instanceID).Scan(&state); err != nil {
+		t.Fatalf("read instance: %v", err)
+	}
+	if state != "pending" {
+		t.Fatalf("foreign node changed instance state to %q", state)
+	}
+}
+
 func TestRollbackUnknownEnvIsNotFound(t *testing.T) {
 	srv := testServer(t)
 	body := bytes.NewReader([]byte(`{"to_revision":1}`))

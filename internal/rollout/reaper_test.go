@@ -75,11 +75,24 @@ func newLivePreview(t *testing.T, st *store.Store, ttl time.Duration) *store.Env
 	return env
 }
 
+func previewOrg(t *testing.T, st *store.Store, envID uuid.UUID) uuid.UUID {
+	t.Helper()
+	var orgID uuid.UUID
+	if err := st.Pool().QueryRow(ctx(t), `
+		SELECT a.org_id FROM environments e
+		JOIN stacks s ON s.id=e.stack_id
+		JOIN applications a ON a.id=s.app_id
+		WHERE e.id=$1`, envID).Scan(&orgID); err != nil {
+		t.Fatalf("preview org: %v", err)
+	}
+	return orgID
+}
+
 func TestReapOnceDeletesExpiredPreviewAndTombstonesIt(t *testing.T) {
 	st := testStore(t)
 	env := newExpiredPreview(t, st)
 
-	r := NewReaper(st, discardLog())
+	r := newReaperForOrg(st, discardLog(), previewOrg(t, st, env.ID))
 	if err := r.ReapOnce(ctx(t)); err != nil {
 		t.Fatalf("ReapOnce: %v", err)
 	}
@@ -93,7 +106,7 @@ func TestReapOnceLeavesUnexpiredPreviewAlone(t *testing.T) {
 	st := testStore(t)
 	env := newLivePreview(t, st, time.Hour)
 
-	r := NewReaper(st, discardLog())
+	r := newReaperForOrg(st, discardLog(), previewOrg(t, st, env.ID))
 	if err := r.ReapOnce(ctx(t)); err != nil {
 		t.Fatalf("ReapOnce: %v", err)
 	}

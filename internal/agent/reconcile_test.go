@@ -24,6 +24,8 @@ type fakeDriver struct {
 	volumes         []string
 	removedEnvs     []string
 	removeEnvErrs   map[string]error // env8 -> error RemoveEnv should return for it
+	prunedNetworks  []string
+	pruneErrs       map[string]error
 
 	// removeEnvCalls records every RemoveEnv invocation including the failing
 	// ones, which removedEnvs (successes only) cannot distinguish from a call
@@ -64,6 +66,10 @@ func (f *fakeDriver) StopRemove(ctx context.Context, id string) error {
 }
 func (f *fakeDriver) ListManaged(ctx context.Context, env8 string) ([]dockerd.Managed, error) {
 	return f.managed, nil
+}
+func (f *fakeDriver) PruneRevisionNetworks(ctx context.Context, env8 string, wanted map[string]bool) error {
+	f.prunedNetworks = append(f.prunedNetworks, env8)
+	return f.pruneErrs[env8]
 }
 func (f *fakeDriver) EnsureVolume(ctx context.Context, name string, l map[string]string) error {
 	f.volumes = append(f.volumes, name)
@@ -128,6 +134,38 @@ func TestReconcileGCsOrphanSwappable(t *testing.T) {
 	r.Reconcile(context.Background(), []store.DesiredInstance{desired("db", false, dockerd.Health{})}, nil, nil)
 	if len(f.removed) != 1 || f.removed[0] != "id-old" {
 		t.Fatalf("expected only the orphan swappable removed, got %v", f.removed)
+	}
+	if len(f.prunedNetworks) != 1 || f.prunedNetworks[0] != "env12345" {
+		t.Fatalf("expected obsolete revision networks pruned, got %v", f.prunedNetworks)
+	}
+}
+
+func TestReconcileCleansPreviouslyKnownEnvAfterDesiredDisappears(t *testing.T) {
+	f := &fakeDriver{}
+	r := NewReconciler(f)
+	r.Reconcile(context.Background(), []store.DesiredInstance{desired("api", true, dockerd.Health{})}, nil, nil)
+	f.prunedNetworks = nil
+	f.managed = []dockerd.Managed{{ID: "old", Name: "cc-env12345-r1-blue-api", Swappable: true}}
+
+	r.Reconcile(context.Background(), nil, nil, nil)
+	if len(f.removed) != 1 || f.removed[0] != "old" {
+		t.Fatalf("expected vanished failed rollout container removed, got %v", f.removed)
+	}
+	if len(f.prunedNetworks) != 1 || f.prunedNetworks[0] != "env12345" {
+		t.Fatalf("expected vanished failed rollout network pruned, got %v", f.prunedNetworks)
+	}
+}
+
+func TestReconcileRetriesNetworkPruneFailure(t *testing.T) {
+	f := &fakeDriver{pruneErrs: map[string]error{"env12345": errors.New("network busy")}}
+	r := NewReconciler(f)
+	r.Reconcile(context.Background(), []store.DesiredInstance{desired("api", true, dockerd.Health{})}, nil, nil)
+	f.prunedNetworks = nil
+	r.Reconcile(context.Background(), nil, nil, nil)
+	delete(f.pruneErrs, "env12345")
+	r.Reconcile(context.Background(), nil, nil, nil)
+	if len(f.prunedNetworks) != 2 {
+		t.Fatalf("expected failed prune retried next tick, calls=%v", f.prunedNetworks)
 	}
 }
 

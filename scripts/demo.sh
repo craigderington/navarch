@@ -6,6 +6,8 @@
 set -euo pipefail
 
 API=${API:-http://localhost:8417}
+API_TOKEN=${API_TOKEN:-dev-token-change-me}
+CURL_AUTH=(-H "Authorization: Bearer $API_TOKEN")
 GW=${GW:-http://localhost:8095}          # Traefik web entrypoint
 COMPOSE=${COMPOSE:-examples/hello/compose.yaml}
 SUFFIX=${SUFFIX:-$RANDOM}
@@ -19,9 +21,9 @@ note() { printf '  \033[90m%s\033[0m\n' "$1"; }
 api() {
   local method=$1 path=$2 body=${3-} out code
   if [ -n "$body" ]; then
-    out=$(curl -sS -X "$method" "$API$path" -H 'Content-Type: application/json' -d "$body" -w '\n%{http_code}')
+    out=$(curl -sS "${CURL_AUTH[@]}" -X "$method" "$API$path" -H 'Content-Type: application/json' -d "$body" -w '\n%{http_code}')
   else
-    out=$(curl -sS -X "$method" "$API$path" -w '\n%{http_code}')
+    out=$(curl -sS "${CURL_AUTH[@]}" -X "$method" "$API$path" -w '\n%{http_code}')
   fi
   code=$(tail -n1 <<<"$out"); out=$(sed '$d' <<<"$out")
   if [[ ! $code =~ ^2 ]]; then
@@ -61,7 +63,7 @@ ORG=$(api GET /v1/orgs | jq -r '.organizations[]|select(.slug=="dev")|.id')
 [ -n "$ORG" ] || { echo "dev org not found — is the control plane up?" >&2; exit 1; }
 APP=$(api POST "/v1/orgs/$ORG/apps" "{\"slug\":\"web-$SUFFIX\",\"name\":\"Web\"}" | jq -r .id)
 STACK=$(api POST "/v1/apps/$APP/stacks" "{\"slug\":\"main-$SUFFIX\"}" | jq -r .id)
-curl -sS -X POST "$API/v1/stacks/$STACK/versions?created_by=demo" --data-binary "@$COMPOSE" | jq -e .id >/dev/null
+curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/stacks/$STACK/versions?created_by=demo" --data-binary "@$COMPOSE" | jq -e .id >/dev/null
 ENV_ID=$(api POST "/v1/stacks/$STACK/envs" "{\"slug\":\"prod\",\"hostname\":\"$HOST\"}" | jq -r .id)
 note "org=$ORG env=$ENV_ID host=$HOST"
 

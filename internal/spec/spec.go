@@ -167,6 +167,19 @@ func (s *DeploymentSpec) PeakMemoryBytes() int64 {
 	return total
 }
 
+// PeakCPUMillis is the CPU counterpart to PeakMemoryBytes.
+func (s *DeploymentSpec) PeakCPUMillis() int {
+	var total int
+	for _, svc := range s.Services {
+		if svc.Swappable {
+			total += svc.Limits.CPUMillis * 2
+		} else {
+			total += svc.Limits.CPUMillis
+		}
+	}
+	return total
+}
+
 // SecretRefPattern matches a secret marker inside a SecretEnv template.
 // Exported so the agent expands templates using exactly the same syntax
 // the parser recognized.

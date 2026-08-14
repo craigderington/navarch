@@ -1,85 +1,160 @@
 # composectl
 
 A container platform for **Docker Compose stacks**, not single containers.
-Where Lightsail gives you one image per deployment, composectl treats an
-entire compose stack as the deployable unit, with versioned revisions and
-zero-downtime rollouts across the whole stack.
+composectl treats an entire stack as the deployable unit, with immutable
+versions, health-gated blue/green rollouts, rollback, encrypted secrets, and
+ephemeral preview environments.
 
-## Sprint 1 scope
+The repository is currently being developed under the Quartermaster project
+name; binaries, environment variables, labels, and the Go module still use the
+original `composectl` identity.
 
-- [x] Postgres schema (append-only deployments, slot alternation)
-- [x] compose-go parser → normalized `DeploymentSpec`
-- [x] Platform constraint validation
-- [x] Control plane API skeleton
-- [x] Dev stack via Compose
-- [ ] Node agent reconciliation loop
-- [ ] Traefik dynamic config generation
+## Current status
+
+The single-node platform loop is implemented end to end:
+
+- Compose parsing into a normalized, versioned deployment specification
+- Strict rejection of unsupported Compose behavior
+- Postgres-backed catalog and append-only deployment history
+- Node-agent reconciliation against Docker Engine
+- Health-gated blue/green promotion and rollback
+- Traefik file-provider routing
+- Age-encrypted, per-environment secrets
+- Preview environments with inherited secrets, TTL expiry, and durable teardown
+- Shared bearer authentication for the development API
+
+Only `blue_green` is currently supported. Requests for `rolling` or `recreate`
+are rejected rather than silently receiving different behavior. The current
+security model is a single shared token and is suitable for trusted development
+deployments, not a public multi-tenant control plane.
 
 ## Quickstart
 
+The development token defaults to `dev-token-change-me` in `compose.yaml` and
+the Makefile. Override `API_TOKEN` when using a different
+`COMPOSECTL_AGENT_TOKEN`.
+
 ```bash
-make up          # postgres + migrations + control plane on :8417
-make health
-make validate    # parse the example stack, see the classification
+make up            # Postgres, migrations, control plane, agent, and Traefik
+make health        # public health check
+make metrics       # authenticated Prometheus-compatible metrics
+make validate      # authenticated validation of examples/webapp
+make demo          # two revisions, auto-promotion, and live traffic flip
+make demo-failure  # bad image fails without disturbing the live revision
+make demo-rollback # append-only rollback through the normal rollout path
+make demo-secrets  # encrypted storage and agent-side secret injection
+make demo-preview  # preview creation, routing, expiry, and full teardown
+make test          # race-enabled Go test suite
 ```
+
+Direct API requests require a bearer token:
+
+```bash
+curl -H 'Authorization: Bearer dev-token-change-me' \
+  http://localhost:8417/v1/orgs
+```
+
+`GET /healthz` is deliberately unauthenticated for container and load-balancer
+probes.
+
+## Audit timeline and metrics
+
+Deployment creation, state transitions, promotion, supersession, preview
+expiry, and secret set/delete metadata are appended to the existing `events`
+table in the same transaction as the operation they describe. Audit entries
+survive deployment deletion; secret values and request bodies are never
+recorded.
+
+The authenticated organization timeline is cursor-paginated:
+
+```bash
+curl -H 'Authorization: Bearer dev-token-change-me' \
+  'http://localhost:8417/v1/orgs/<org-uuid>/events?limit=50&before_id=1234'
+```
+
+`GET /metrics` is authenticated and emits Prometheus text format. It includes
+HTTP requests by method/route-pattern/status, scheduler/controller/reaper tick
+results and latest durations, database availability, deployments by state,
+ready nodes, active previews, and recent teardown tombstones. Raw request paths,
+compose content, environment values, and secrets are not metric labels.
 
 ## The core idea: swappable vs pinned
 
-Blue/green means running two copies of a stack at once. Services holding
-durable state cannot be duplicated — two Postgres processes on one volume
-corrupt it. So the parser classifies every service:
+Blue/green runs two revisions at once. Services holding durable state cannot be
+duplicated safely, so the parser classifies every service:
 
 | Classification | Trigger | Rollout behavior |
 |---|---|---|
-| **swappable** | no writable named volume | duplicated blue/green |
-| **pinned** | mounts a writable named volume | runs once, shared across revisions |
+| **swappable** | no writable named volume | duplicated during blue/green |
+| **pinned** | mounts a writable named volume | one container shared across revisions |
 
-`make validate` shows the classification and the peak memory a rollout
-will need — swappable services counted twice, pinned once.
+Read-only named-volume mounts remain swappable. Peak rollout capacity counts
+swappable services twice and pinned services once, for both CPU and memory.
 
-## Rejected compose directives
+Pinned containers are intentionally not recreated automatically. A deployment
+that changes or removes an existing pinned service is rejected. The agent also
+fingerprints resolved runtime configuration—including secret values—and refuses
+to adopt a stale pinned container when that fingerprint changes. Stateful
+migration/recreation needs an explicit operator-controlled workflow.
 
-Rejected loudly rather than dropped silently, so a stack never runs
-differently than its author expects:
+## Compose contract
+
+Unsupported behavior is rejected loudly so a stack never runs differently than
+its author expects. Important rejected directives include:
 
 | Directive | Reason |
 |---|---|
-| `build:` | pre-build and push; the platform does not build |
-| `privileged`, `cap_add` | breaks isolation |
+| `build:` | images must be built and pushed before deployment |
+| `privileged`, `cap_add` | breaks the current isolation contract |
 | `container_name` | collides between revisions |
-| `ports: "8080:80"` | host port collides between revisions; use `x-composectl.ingress` |
-| bind mounts | host paths are not portable across nodes |
-| `network_mode` | each revision gets an isolated network |
-| `deploy.replicas` | scaling is the platform's job |
+| published host ports | collide during blue/green; use `x-composectl.ingress` |
+| bind or anonymous mounts | state is not portable or safely tracked |
+| writable volume shared by services | unsupported ownership semantics |
+| non-default `network_mode` | revisions receive isolated networks |
+| replicas or scale greater than one | scaling is not implemented yet |
+| cyclic or missing `depends_on` targets | invalid service graph |
+| pinned ingress service | cannot participate in traffic switching |
 
-All violations are collected in one pass.
+Validation collects all violations in one pass. Defaults are 250 millicpu and
+256 MiB per service when limits are omitted.
 
 ## Secrets
 
-Values containing `${secret:KEY}` are stored as **templates** in
-`SecretEnv` and expanded by the agent at container start, so plaintext
-never reaches the control plane or the database. Because a secret is
-usually embedded in a larger string, the whole value is retained:
+Values containing `${secret:KEY}` are retained as templates and expanded by the
+agent immediately before container creation:
 
 ```yaml
 DATABASE_URL: postgres://app:${secret:db_password}@db:5432/app
 ```
 
-## Layout
+The control plane encrypts values to the registered node's age recipient and
+stores ciphertext only. Plaintext is decrypted agent-side and never returned by
+the API.
 
+## Architecture
+
+```text
+cmd/controlplane        API server and scheduler/controller/reaper loops
+cmd/agent               node agent
+internal/spec           normalized DeploymentSpec vocabulary
+internal/parser         only package importing compose-go
+internal/store          only package importing pgx
+internal/api            HTTP decode/delegate/encode layer
+internal/rollout        placement, rollout, and preview reaping
+internal/agent           runtime-independent reconciliation
+internal/agent/dockerd   only package importing the Docker SDK
+internal/router          Traefik dynamic configuration
+internal/secrets         age encryption boundary
+migrations              golang-migrate SQL
 ```
-cmd/controlplane   API server entrypoint
-internal/spec      normalized DeploymentSpec — the platform's vocabulary
-internal/parser    the ONLY package importing compose-go
-internal/store     the ONLY package importing pgx
-internal/api       thin handlers: decode, delegate, encode
-migrations/        golang-migrate SQL
-```
 
-The parser boundary matters: everything downstream speaks `DeploymentSpec`,
-so the compose implementation can be swapped without touching the
-scheduler or agent.
+These dependency boundaries are deliberate. In particular, the agent talks to
+the control plane over HTTP and never accesses Postgres directly, while the
+control plane binary does not link the Docker SDK.
 
-## Next
+## Direction
 
-**Sprint 2** — node agent, health gating, traffic flip, rollback.
+The next reliability work is an explicit stateful-service migration workflow
+and alerting/dashboard definitions over the metrics surface. Multi-node
+placement, node draining, per-node credentials, secret re-encryption on
+membership changes, and the WireGuard mesh belong to a later phase.

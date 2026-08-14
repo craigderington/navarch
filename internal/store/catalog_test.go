@@ -171,7 +171,7 @@ func TestCreateEnvironmentRoundTripsConfigAndHostname(t *testing.T) {
 	env, err := st.CreateEnvironment(testCtx(t), CreateEnvironmentParams{
 		StackID:  stack.ID,
 		Slug:     "staging",
-		Strategy: StrategyRecreate,
+		Strategy: StrategyBlueGreen,
 		Hostname: "staging.example.com",
 		Config:   want,
 	})
@@ -186,13 +186,31 @@ func TestCreateEnvironmentRoundTripsConfigAndHostname(t *testing.T) {
 	if got.Hostname != "staging.example.com" {
 		t.Fatalf("hostname not persisted: %q", got.Hostname)
 	}
-	if got.Strategy != StrategyRecreate {
+	if got.Strategy != StrategyBlueGreen {
 		t.Fatalf("strategy not persisted: %q", got.Strategy)
 	}
 	for k, v := range want {
 		if got.Config[k] != v {
 			t.Fatalf("config[%s] = %q, want %q", k, got.Config[k], v)
 		}
+	}
+}
+
+func TestCreateEnvironmentRejectsUnsupportedStrategies(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+
+	for _, strategy := range []RolloutStrategy{StrategyRolling, StrategyRecreate, "surprise"} {
+		t.Run(string(strategy), func(t *testing.T) {
+			_, err := st.CreateEnvironment(testCtx(t), CreateEnvironmentParams{
+				StackID: stack.ID, Slug: "strategy-test", Strategy: strategy,
+			})
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("got %v, want ErrInvalid", err)
+			}
+		})
 	}
 }
 

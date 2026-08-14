@@ -39,6 +39,11 @@ func TestEnsureContainerCreatesAndAdopts(t *testing.T) {
 	name := "cc-" + env8 + "-r1-blue-web"
 	netName := "cc-" + env8 + "-r1-blue"
 	labels := map[string]string{"cc.env": env8, "cc.service": "web", "cc.swappable": "true"}
+	// A prior test process may have been interrupted before Cleanup ran. Start
+	// from an empty, test-owned label namespace so reruns adopt no stale object.
+	if err := d.RemoveEnv(ctx, env8); err != nil {
+		t.Fatalf("remove stale test environment: %v", err)
+	}
 
 	if err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
 		t.Fatalf("EnsureImage: %v", err)
@@ -79,6 +84,34 @@ func TestEnsureContainerCreatesAndAdopts(t *testing.T) {
 		t.Fatalf("expected adoption of %s, got id=%s created=%v", id, id2, created2)
 	}
 
+	changed := cs
+	changed.Cmd = []string{"sh", "-c", "sleep 60"}
+	if _, _, err := d.EnsureContainer(ctx, changed, nil); err == nil {
+		t.Fatal("expected changed runtime configuration to reject adoption")
+	}
+
+	obsoleteNetwork := "cc-" + env8 + "-r0-green"
+	if _, err := d.EnsureNetwork(ctx, obsoleteNetwork, map[string]string{"cc.env": env8}); err != nil {
+		t.Fatalf("create obsolete network: %v", err)
+	}
+	if err := d.AttachNetwork(ctx, id, obsoleteNetwork); err != nil {
+		t.Fatalf("attach obsolete network: %v", err)
+	}
+	if err := d.PruneRevisionNetworks(ctx, env8, map[string]bool{netName: true}); err != nil {
+		t.Fatalf("PruneRevisionNetworks: %v", err)
+	}
+	nets, err := d.cli.NetworkList(ctx, network.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("name", obsoleteNetwork)),
+	})
+	if err != nil {
+		t.Fatalf("list obsolete network: %v", err)
+	}
+	for _, n := range nets {
+		if n.Name == obsoleteNetwork {
+			t.Fatalf("obsolete network %s was not removed", obsoleteNetwork)
+		}
+	}
+
 	managed, err := d.ListManaged(ctx, env8)
 	if err != nil {
 		t.Fatalf("ListManaged: %v", err)
@@ -93,6 +126,21 @@ func TestEnsureContainerCreatesAndAdopts(t *testing.T) {
 	}
 	if !h.Running {
 		t.Fatalf("expected the container to be running, got %+v", h)
+	}
+}
+
+func TestContainerFingerprintIncludesResolvedSecrets(t *testing.T) {
+	cs := ContainerSpec{Image: "app:1", SecretEnv: map[string]string{"PASSWORD": "${secret:password}"}}
+	a, err := containerFingerprint(cs, map[string]string{"PASSWORD": "old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := containerFingerprint(cs, map[string]string{"PASSWORD": "new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("secret rotation must change the runtime fingerprint")
 	}
 }
 

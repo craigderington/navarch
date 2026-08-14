@@ -89,9 +89,9 @@ func fixtureSpec() *spec.DeploymentSpec {
 
 func TestSchedulerPlacesPendingDeployment(t *testing.T) {
 	st := testStore(t)
-	depID, nodeID, _ := fixture(t, st)
+	depID, nodeID, orgID := fixture(t, st)
 
-	sc := NewScheduler(st, discardLog())
+	sc := newSchedulerForOrg(st, discardLog(), orgID)
 	if err := sc.ScheduleOnce(ctx(t)); err != nil {
 		t.Fatalf("ScheduleOnce: %v", err)
 	}
@@ -103,6 +103,21 @@ func TestSchedulerPlacesPendingDeployment(t *testing.T) {
 	desired, _ := st.DesiredStateForNode(ctx(t), nodeID)
 	if len(desired) != 2 {
 		t.Fatalf("expected 2 instances written, got %d", len(desired))
+	}
+}
+
+func TestSchedulerRejectsNodeWithoutPeakCPU(t *testing.T) {
+	st := testStore(t)
+	depID, nodeID, orgID := fixture(t, st)
+	if err := st.Heartbeat(ctx(t), nodeID, store.HeartbeatParams{AllocCPUMillis: 7500}); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if err := newSchedulerForOrg(st, discardLog(), orgID).ScheduleOnce(ctx(t)); err != nil {
+		t.Fatalf("ScheduleOnce: %v", err)
+	}
+	dep, _ := st.GetDeployment(ctx(t), depID)
+	if dep.State != store.DeployFailed {
+		t.Fatalf("expected CPU-constrained deployment to fail, got %s", dep.State)
 	}
 }
 
@@ -119,7 +134,7 @@ func reportAll(t *testing.T, st *store.Store, nodeID uuid.UUID, state store.Inst
 	t.Helper()
 	desired, _ := st.DesiredStateForNode(ctx(t), nodeID)
 	for _, d := range desired {
-		if err := st.ReportInstance(ctx(t), d.InstanceID, store.ObservedInstance{
+		if err := st.ReportInstance(ctx(t), nodeID, d.InstanceID, store.ObservedInstance{
 			State: state, ContainerID: "c-" + d.ServiceName, HealthStatus: health, SetStarted: true,
 		}); err != nil {
 			t.Fatalf("report: %v", err)
@@ -129,11 +144,11 @@ func reportAll(t *testing.T, st *store.Store, nodeID uuid.UUID, state store.Inst
 
 func TestControllerDrivesSchedulingToHealthy(t *testing.T) {
 	st := testStore(t)
-	depID, nodeID, _ := fixture(t, st)
-	if err := NewScheduler(st, discardLog()).ScheduleOnce(ctx(t)); err != nil {
+	depID, nodeID, orgID := fixture(t, st)
+	if err := newSchedulerForOrg(st, discardLog(), orgID).ScheduleOnce(ctx(t)); err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
-	c := NewController(st, discardLog(), nil)
+	c := newControllerForOrg(st, discardLog(), nil, orgID)
 
 	// Instances still pending → controller cannot advance past scheduling.
 	if err := c.ReconcileOnce(ctx(t)); err != nil {
@@ -160,11 +175,11 @@ func TestControllerDrivesSchedulingToHealthy(t *testing.T) {
 
 func TestControllerFailsOnInstanceFailure(t *testing.T) {
 	st := testStore(t)
-	depID, nodeID, _ := fixture(t, st)
-	_ = NewScheduler(st, discardLog()).ScheduleOnce(ctx(t))
+	depID, nodeID, orgID := fixture(t, st)
+	_ = newSchedulerForOrg(st, discardLog(), orgID).ScheduleOnce(ctx(t))
 	reportAll(t, st, nodeID, store.InstanceFailed, "exited")
 
-	if err := NewController(st, discardLog(), nil).ReconcileOnce(ctx(t)); err != nil {
+	if err := newControllerForOrg(st, discardLog(), nil, orgID).ReconcileOnce(ctx(t)); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	dep, _ := st.GetDeployment(ctx(t), depID)
@@ -178,12 +193,12 @@ func TestControllerFailsOnInstanceFailure(t *testing.T) {
 
 func TestControllerTearsDownSuperseded(t *testing.T) {
 	st := testStore(t)
-	depID, nodeID, _ := fixture(t, st)
-	_ = NewScheduler(st, discardLog()).ScheduleOnce(ctx(t))
+	depID, nodeID, orgID := fixture(t, st)
+	_ = newSchedulerForOrg(st, discardLog(), orgID).ScheduleOnce(ctx(t))
 	reportAll(t, st, nodeID, store.InstanceRunning, "healthy")
 	advance(t, st, depID, store.DeployStarting, store.DeployHealthy, store.DeployLive, store.DeploySuperseded)
 
-	if err := NewController(st, discardLog(), nil).ReconcileOnce(ctx(t)); err != nil {
+	if err := newControllerForOrg(st, discardLog(), nil, orgID).ReconcileOnce(ctx(t)); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if states, _ := st.InstanceStates(ctx(t), depID); len(states) != 0 {
@@ -193,11 +208,11 @@ func TestControllerTearsDownSuperseded(t *testing.T) {
 
 func TestControllerAutoPromotes(t *testing.T) {
 	st := testStore(t)
-	depID, nodeID, _ := fixture(t, st)
-	if err := NewScheduler(st, discardLog()).ScheduleOnce(ctx(t)); err != nil {
+	depID, nodeID, orgID := fixture(t, st)
+	if err := newSchedulerForOrg(st, discardLog(), orgID).ScheduleOnce(ctx(t)); err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
-	c := NewController(st, discardLog(), nil)
+	c := newControllerForOrg(st, discardLog(), nil, orgID)
 	reportAll(t, st, nodeID, store.InstanceRunning, "healthy")
 	// One legal transition per tick: scheduling→starting→healthy→live.
 	for i := 0; i < 4; i++ {

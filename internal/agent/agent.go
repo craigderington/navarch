@@ -132,8 +132,26 @@ func (c *cpClient) reconcileTick(ctx context.Context, nodeID uuid.UUID, rec *Rec
 			return err
 		}
 	}
+	allocCPU, allocMemory := desiredAllocations(desired.Instances)
 	return c.do(ctx, http.MethodPost, "/v1/nodes/"+nodeID.String()+"/heartbeat",
-		map[string]any{"alloc_cpu_millis": 0, "alloc_memory_bytes": 0}, nil)
+		map[string]any{"alloc_cpu_millis": allocCPU, "alloc_memory_bytes": allocMemory}, nil)
+}
+
+// desiredAllocations reports the resources reserved by unique containers in
+// desired state. Pinned services have one stable name shared by two revisions
+// during blue/green, so they must be counted once rather than once per row.
+func desiredAllocations(desired []store.DesiredInstance) (cpuMillis int, memoryBytes int64) {
+	seen := make(map[string]bool, len(desired))
+	for _, di := range desired {
+		name := containerName(di)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		cpuMillis += di.Service.Limits.CPUMillis
+		memoryBytes += di.Service.Limits.MemoryBytes
+	}
+	return cpuMillis, memoryBytes
 }
 
 func toReportDTO(reports []Report) []map[string]any {

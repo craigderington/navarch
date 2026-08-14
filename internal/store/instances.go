@@ -105,7 +105,7 @@ type ObservedInstance struct {
 	SetStarted   bool
 }
 
-func (s *Store) ReportInstance(ctx context.Context, instanceID uuid.UUID, o ObservedInstance) error {
+func (s *Store) ReportInstance(ctx context.Context, nodeID, instanceID uuid.UUID, o ObservedInstance) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE service_instances SET
 			state         = $2,
@@ -115,8 +115,8 @@ func (s *Store) ReportInstance(ctx context.Context, instanceID uuid.UUID, o Obse
 			restart_count = $6,
 			started_at    = CASE WHEN $7 AND started_at IS NULL THEN now() ELSE started_at END,
 			updated_at    = now()
-		WHERE id = $1
-	`, instanceID, o.State, o.ContainerID, o.HealthStatus, o.LastError, o.RestartCount, o.SetStarted)
+		WHERE id = $1 AND node_id = $8
+	`, instanceID, o.State, o.ContainerID, o.HealthStatus, o.LastError, o.RestartCount, o.SetStarted, nodeID)
 	if err != nil {
 		return mapErr(err)
 	}

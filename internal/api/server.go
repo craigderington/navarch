@@ -4,12 +4,14 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/craig/composectl/internal/metrics"
 	"github.com/craig/composectl/internal/store"
 )
 
@@ -18,6 +20,8 @@ type Server struct {
 	log           *slog.Logger
 	mux           *http.ServeMux
 	previewDomain string
+	bearerToken   string
+	metrics       *metrics.Registry
 }
 
 // ServerOption keeps NewServer's existing two-argument form working; only the
@@ -31,6 +35,18 @@ func WithPreviewDomain(domain string) ServerOption {
 	return func(s *Server) { s.previewDomain = domain }
 }
 
+// WithBearerToken protects every /v1 endpoint with one shared bearer token.
+// Health remains public so container and load-balancer probes need no secret.
+// An empty token leaves authentication disabled for in-process tests only;
+// the control-plane config rejects an empty token at startup.
+func WithBearerToken(token string) ServerOption {
+	return func(s *Server) { s.bearerToken = token }
+}
+
+func WithMetrics(reg *metrics.Registry) ServerOption {
+	return func(s *Server) { s.metrics = reg }
+}
+
 func NewServer(st *store.Store, log *slog.Logger, opts ...ServerOption) *Server {
 	s := &Server{st: st, log: log, mux: http.NewServeMux(), previewDomain: DefaultPreviewDomain}
 	for _, o := range opts {
@@ -41,7 +57,54 @@ func NewServer(st *store.Store, log *slog.Logger, opts ...ServerOption) *Server 
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+	if r.URL.Path != "/healthz" && s.bearerToken != "" && !validBearerToken(r, s.bearerToken) {
+		rw.Header().Set("WWW-Authenticate", `Bearer realm="composectl"`)
+		writeError(rw, http.StatusUnauthorized, "authentication required", nil)
+		if s.metrics != nil {
+			s.metrics.ObserveHTTP(r.Method, "unauthenticated", rw.status)
+		}
+		return
+	}
+	s.mux.ServeHTTP(rw, r)
+	if s.metrics != nil {
+		route := r.Pattern
+		if route == "" {
+			route = "unmatched"
+		}
+		s.metrics.ObserveHTTP(r.Method, route, rw.status)
+	}
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func validBearerToken(r *http.Request, want string) bool {
+	const prefix = "Bearer "
+	auth := r.Header.Get("Authorization")
+	if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix {
+		return false
+	}
+	got := auth[len(prefix):]
+	return len(got) == len(want) && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 // BootstrapDevOrg ensures the dev org the local agent registers into exists.
@@ -57,6 +120,7 @@ func (s *Server) BootstrapDevOrg(ctx context.Context) {
 // dependency is needed.
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
+	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	// Organizations — the root of the catalog. Without a way to create one
 	// nothing below it is reachable, so this is deliberately self-serve
@@ -64,6 +128,7 @@ func (s *Server) routes() {
 	// would be permanent).
 	s.mux.HandleFunc("POST /v1/orgs", s.handleCreateOrg)
 	s.mux.HandleFunc("GET /v1/orgs", s.handleListOrgs)
+	s.mux.HandleFunc("GET /v1/orgs/{org}/events", s.handleListEvents)
 
 	// Applications
 	s.mux.HandleFunc("POST /v1/orgs/{org}/apps", s.handleCreateApp)
@@ -101,6 +166,21 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/envs/{env}/secrets", s.handleSetSecret)
 	s.mux.HandleFunc("GET /v1/envs/{env}/secrets", s.handleListSecrets)
 	s.mux.HandleFunc("DELETE /v1/envs/{env}/secrets/{key}", s.handleDeleteSecret)
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if s.metrics == nil {
+		http.NotFound(w, r)
+		return
+	}
+	ctx, cancel := contextWithTimeout(r, 3*time.Second)
+	defer cancel()
+	g, err := s.st.OperationalGauges(ctx)
+	if err != nil {
+		g = metrics.Gauges{DatabaseUp: false, Deployments: map[string]int64{}}
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	s.metrics.WritePrometheus(w, g)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

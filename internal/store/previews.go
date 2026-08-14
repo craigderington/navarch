@@ -111,6 +111,16 @@ func (s *Store) CreatePreview(ctx context.Context, p CreatePreviewParams) (*Envi
 // describing it is gone. If the transaction aborts the environment survives and
 // is retried next tick, which is the safe direction to fail.
 func (s *Store) ExpireEnvironments(ctx context.Context) ([]string, error) {
+	return s.expireEnvironments(ctx, nil)
+}
+
+// ExpireEnvironmentsForOrg is the scoped form used by isolated loop tests and
+// future sharded control-plane workers.
+func (s *Store) ExpireEnvironmentsForOrg(ctx context.Context, orgID uuid.UUID) ([]string, error) {
+	return s.expireEnvironments(ctx, &orgID)
+}
+
+func (s *Store) expireEnvironments(ctx context.Context, orgID *uuid.UUID) ([]string, error) {
 	var reaped []string
 	err := s.tx(ctx, func(tx pgx.Tx) error {
 		// SKIP LOCKED because Sprint 4 runs more than one control plane and two
@@ -121,8 +131,9 @@ func (s *Store) ExpireEnvironments(ctx context.Context) ([]string, error) {
 			JOIN stacks       s ON s.id = e.stack_id
 			JOIN applications a ON a.id = s.app_id
 			WHERE e.ephemeral AND e.expires_at < now()
+			  AND ($1::uuid IS NULL OR a.org_id=$1)
 			FOR UPDATE OF e SKIP LOCKED
-		`)
+		`, orgID)
 		if err != nil {
 			return err
 		}
@@ -153,6 +164,11 @@ func (s *Store) ExpireEnvironments(ctx context.Context) ([]string, error) {
 		// worth that.
 		for _, v := range victims {
 			env8 := shortID(v.id)
+			if err := appendEventTx(ctx, tx, v.orgID, nil, nil,
+				"preview.expired", "preview environment expired",
+				map[string]any{"environment_id": v.id, "env8": env8}); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO environment_tombstones (env8, org_id) VALUES ($1, $2)
 				ON CONFLICT (env8) DO NOTHING
@@ -214,8 +230,18 @@ func (s *Store) TombstonesForNode(ctx context.Context, nodeID uuid.UUID, maxAge 
 // window an offline node's containers and volumes leak and need manual removal
 // -- the window is how long a node may be down and still clean up after itself.
 func (s *Store) SweepTombstones(ctx context.Context, maxAge time.Duration) error {
+	return s.sweepTombstones(ctx, nil, maxAge)
+}
+
+func (s *Store) SweepTombstonesForOrg(ctx context.Context, orgID uuid.UUID, maxAge time.Duration) error {
+	return s.sweepTombstones(ctx, &orgID, maxAge)
+}
+
+func (s *Store) sweepTombstones(ctx context.Context, orgID *uuid.UUID, maxAge time.Duration) error {
 	_, err := s.pool.Exec(ctx,
-		`DELETE FROM environment_tombstones WHERE created_at < now() - make_interval(secs => $1)`,
-		maxAge.Seconds())
+		`DELETE FROM environment_tombstones
+		 WHERE created_at < now() - make_interval(secs => $1)
+		   AND ($2::uuid IS NULL OR org_id=$2)`,
+		maxAge.Seconds(), orgID)
 	return mapErr(err)
 }

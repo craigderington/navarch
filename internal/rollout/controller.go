@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/craig/composectl/internal/router"
 	"github.com/craig/composectl/internal/store"
 )
@@ -22,6 +24,18 @@ type Controller struct {
 	log          *slog.Logger
 	rtr          RouterSync
 	startTimeout time.Duration
+	orgID        *uuid.UUID
+}
+
+func newControllerForOrg(st *store.Store, log *slog.Logger, rtr RouterSync, orgID uuid.UUID) *Controller {
+	return &Controller{st: st, log: log, rtr: rtr, startTimeout: 5 * time.Minute, orgID: &orgID}
+}
+
+func (c *Controller) listRollouts(ctx context.Context, states ...store.DeploymentState) ([]store.Deployment, error) {
+	if c.orgID == nil {
+		return c.st.ListRolloutsInState(ctx, states...)
+	}
+	return c.st.ListRolloutsInStateForOrg(ctx, *c.orgID, states...)
 }
 
 func NewController(st *store.Store, log *slog.Logger, rtr RouterSync) *Controller {
@@ -33,7 +47,7 @@ func NewController(st *store.Store, log *slog.Logger, rtr RouterSync) *Controlle
 // deployment state machine (enforced in SQL) rejects any illegal nudge, so this
 // only ever proposes the next legal step.
 func (c *Controller) ReconcileOnce(ctx context.Context) error {
-	active, err := c.st.ListRolloutsInState(ctx,
+	active, err := c.listRollouts(ctx,
 		store.DeployScheduling, store.DeployStarting, store.DeployHealthy)
 	if err != nil {
 		return err
@@ -47,7 +61,7 @@ func (c *Controller) ReconcileOnce(ctx context.Context) error {
 	// Teardown: a superseded or failed deployment's instance rows are deleted;
 	// the agent then GCs their swappable containers. Pinned containers survive
 	// because the now-live deployment still holds its own rows for them.
-	terminal, err := c.st.ListRolloutsInState(ctx, store.DeploySuperseded, store.DeployFailed)
+	terminal, err := c.listRollouts(ctx, store.DeploySuperseded, store.DeployFailed)
 	if err != nil {
 		return err
 	}

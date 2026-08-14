@@ -5,18 +5,20 @@
 # blue/green is the absence of a promotion.
 set -euo pipefail
 API=${API:-http://localhost:8417}
+API_TOKEN=${API_TOKEN:-dev-token-change-me}
+CURL_AUTH=(-H "Authorization: Bearer $API_TOKEN")
 
-ORG=$(curl -sS "$API/v1/orgs" | jq -r '.organizations[]|select(.slug=="dev")|.id')
-APP=$(curl -sS -X POST "$API/v1/orgs/$ORG/apps" -d "{\"slug\":\"fail-$RANDOM\",\"name\":\"f\"}" | jq -r .id)
-STACK=$(curl -sS -X POST "$API/v1/apps/$APP/stacks" -d "{\"slug\":\"s-$RANDOM\"}" | jq -r .id)
+ORG=$(curl -sS "${CURL_AUTH[@]}" "$API/v1/orgs" | jq -r '.organizations[]|select(.slug=="dev")|.id')
+APP=$(curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/orgs/$ORG/apps" -d "{\"slug\":\"fail-$RANDOM\",\"name\":\"f\"}" | jq -r .id)
+STACK=$(curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/apps/$APP/stacks" -d "{\"slug\":\"s-$RANDOM\"}" | jq -r .id)
 printf 'services:\n  api:\n    image: ghcr.io/composectl/does-not-exist:0.0.0\n' \
-  | curl -sS -X POST "$API/v1/stacks/$STACK/versions" --data-binary @- >/dev/null
-ENV=$(curl -sS -X POST "$API/v1/stacks/$STACK/envs" -d '{"slug":"prod"}' | jq -r .id)
-DEP=$(curl -sS -X POST "$API/v1/envs/$ENV/deployments" -d '{}' | jq -r .id)
+  | curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/stacks/$STACK/versions" --data-binary @- >/dev/null
+ENV=$(curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/stacks/$STACK/envs" -d '{"slug":"prod"}' | jq -r .id)
+DEP=$(curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/envs/$ENV/deployments" -d '{}' | jq -r .id)
 
 echo "deployment $DEP — waiting for failure…"
 for _ in $(seq 1 40); do
-  S=$(curl -sS "$API/v1/deployments/$DEP" | jq -r .state)
+  S=$(curl -sS "${CURL_AUTH[@]}" "$API/v1/deployments/$DEP" | jq -r .state)
   echo "  state=$S"
   [ "$S" = failed ] && { echo "✓ reached failed as expected; no prior deployment was disturbed"; exit 0; }
   sleep 3

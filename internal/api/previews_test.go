@@ -355,7 +355,7 @@ func newNodeWithReapedPreview(t *testing.T, srv *Server) (nodeID, env8 string) {
 		env.ID); err != nil {
 		t.Fatalf("age the preview: %v", err)
 	}
-	if _, err := srv.st.ExpireEnvironments(ctx); err != nil {
+	if _, err := srv.st.ExpireEnvironmentsForOrg(ctx, org.ID); err != nil {
 		t.Fatalf("ExpireEnvironments: %v", err)
 	}
 

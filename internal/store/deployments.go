@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -52,15 +54,25 @@ func (s *Store) createDeploymentTx(ctx context.Context, tx pgx.Tx, p CreateDeplo
 	// Lock the environment row for the duration. Serializes rollouts
 	// per environment without a global lock.
 	var liveSlot *string
+	var liveSpecJSON []byte
 	err := tx.QueryRow(ctx, `
-		SELECT d.slot
+		SELECT d.slot, d.resolved_spec
 		FROM environments e
 		LEFT JOIN deployments d ON d.id = e.live_deployment_id
 		WHERE e.id = $1
 		FOR UPDATE OF e
-	`, p.EnvironmentID).Scan(&liveSlot)
+	`, p.EnvironmentID).Scan(&liveSlot, &liveSpecJSON)
 	if err != nil {
 		return nil, err
+	}
+	if len(liveSpecJSON) > 0 {
+		var liveSpec spec.DeploymentSpec
+		if err := json.Unmarshal(liveSpecJSON, &liveSpec); err != nil {
+			return nil, err
+		}
+		if err := rejectPinnedDrift(&liveSpec, p.ResolvedSpec); err != nil {
+			return nil, err
+		}
 	}
 
 	// Next revision.
@@ -102,7 +114,30 @@ func (s *Store) createDeploymentTx(ctx context.Context, tx pgx.Tx, p CreateDeplo
 		return nil, err
 	}
 	d.ResolvedSpec = p.ResolvedSpec
+	if err := appendDeploymentEventTx(ctx, tx, d.ID, "deployment.created",
+		fmt.Sprintf("revision %d created", d.Revision), map[string]any{
+			"revision": d.Revision, "slot": d.Slot, "created_by": p.CreatedBy,
+		}); err != nil {
+		return nil, err
+	}
 	return &d, nil
+}
+
+// rejectPinnedDrift prevents a rollout from pretending it changed a stateful
+// container that the agent deliberately adopts across revisions. New pinned
+// services are allowed; changing or removing an existing one needs a future,
+// operator-approved recreate/migration workflow.
+func rejectPinnedDrift(live, next *spec.DeploymentSpec) error {
+	for name, oldSvc := range live.Services {
+		if oldSvc.Swappable {
+			continue
+		}
+		newSvc, ok := next.Services[name]
+		if !ok || newSvc.Swappable || !reflect.DeepEqual(oldSvc, newSvc) {
+			return fmt.Errorf("%w: pinned service %q changed; stateful recreation is not supported", ErrConflict, name)
+		}
+	}
+	return nil
 }
 
 // RollbackDeployment re-deploys an earlier revision's stack version as a new
@@ -204,19 +239,24 @@ func (s *Store) UpdateDeploymentState(ctx context.Context, id uuid.UUID, to Depl
 	// pgx cannot encode a []DeploymentState against the enum-array type, and
 	// comparing the enum column to a text[] needs an explicit cast. Pass the
 	// allowed states as text and cast the column: state::text = ANY($4).
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE deployments
-		SET state = $2,
-		    failure_reason = NULLIF($3, '')
-		WHERE id = $1 AND state::text = ANY($4)
-	`, id, to, reason, statesToText(allowed))
-	if err != nil {
-		return mapErr(err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: illegal transition to %s", ErrConflict, to)
-	}
-	return nil
+	err := s.tx(ctx, func(tx pgx.Tx) error {
+		var from DeploymentState
+		err := tx.QueryRow(ctx, `
+			UPDATE deployments
+			SET state = $2, failure_reason = NULLIF($3, '')
+			WHERE id = $1 AND state::text = ANY($4)
+			RETURNING state
+		`, id, to, reason, statesToText(allowed)).Scan(&from)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: illegal transition to %s", ErrConflict, to)
+		}
+		if err != nil {
+			return err
+		}
+		return appendDeploymentEventTx(ctx, tx, id, "deployment.state_changed",
+			fmt.Sprintf("deployment entered %s", to), map[string]any{"state": to, "reason": reason})
+	})
+	return mapErr(err)
 }
 
 // statesToText renders deployment states as text for a text[] query parameter,
@@ -274,6 +314,10 @@ func (s *Store) PromoteDeployment(ctx context.Context, id uuid.UUID) (superseded
 				return err
 			}
 			superseded = prev
+			if err := appendDeploymentEventTx(ctx, tx, *prev, "deployment.superseded",
+				"deployment superseded", map[string]any{"replaced_by": id}); err != nil {
+				return err
+			}
 		}
 
 		if _, err := tx.Exec(ctx, `
@@ -285,7 +329,11 @@ func (s *Store) PromoteDeployment(ctx context.Context, id uuid.UUID) (superseded
 		_, err := tx.Exec(ctx, `
 			UPDATE environments SET live_deployment_id = $2 WHERE id = $1
 		`, envID, id)
-		return err
+		if err != nil {
+			return err
+		}
+		return appendDeploymentEventTx(ctx, tx, id, "deployment.promoted",
+			"deployment promoted to live", map[string]any{"superseded_deployment_id": prev})
 	})
 	if err != nil {
 		return nil, mapErr(err)
@@ -353,6 +401,16 @@ type PendingDeployment struct {
 // ListPendingDeployments returns deployments awaiting scheduling, oldest
 // first, each carrying its org id so the scheduler can find eligible nodes.
 func (s *Store) ListPendingDeployments(ctx context.Context) ([]PendingDeployment, error) {
+	return s.listPendingDeployments(ctx, nil)
+}
+
+// ListPendingDeploymentsForOrg is the org-scoped form used by isolated loop
+// tests and future sharded control-plane workers.
+func (s *Store) ListPendingDeploymentsForOrg(ctx context.Context, orgID uuid.UUID) ([]PendingDeployment, error) {
+	return s.listPendingDeployments(ctx, &orgID)
+}
+
+func (s *Store) listPendingDeployments(ctx context.Context, orgID *uuid.UUID) ([]PendingDeployment, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT d.id, d.environment_id, d.stack_version_id, d.revision, d.slot,
 		       d.project_name, d.state, d.resolved_spec, d.created_at, d.updated_at,
@@ -361,9 +419,9 @@ func (s *Store) ListPendingDeployments(ctx context.Context) ([]PendingDeployment
 		JOIN environments e ON e.id = d.environment_id
 		JOIN stacks s       ON s.id = e.stack_id
 		JOIN applications a ON a.id = s.app_id
-		WHERE d.state='pending'
+		WHERE d.state='pending' AND ($1::uuid IS NULL OR a.org_id=$1)
 		ORDER BY d.created_at
-	`)
+	`, orgID)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -387,11 +445,25 @@ func (s *Store) ListPendingDeployments(ctx context.Context) ([]PendingDeployment
 
 // ListRolloutsInState returns deployments the controller must advance.
 func (s *Store) ListRolloutsInState(ctx context.Context, states ...DeploymentState) ([]Deployment, error) {
+	return s.listRolloutsInState(ctx, nil, states...)
+}
+
+// ListRolloutsInStateForOrg scopes controller work to one organization.
+func (s *Store) ListRolloutsInStateForOrg(ctx context.Context, orgID uuid.UUID, states ...DeploymentState) ([]Deployment, error) {
+	return s.listRolloutsInState(ctx, &orgID, states...)
+}
+
+func (s *Store) listRolloutsInState(ctx context.Context, orgID *uuid.UUID, states ...DeploymentState) ([]Deployment, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, environment_id, stack_version_id, revision, slot, project_name,
-		       state, created_at, updated_at
-		FROM deployments WHERE state::text = ANY($1) ORDER BY updated_at
-	`, statesToText(states))
+		SELECT d.id, d.environment_id, d.stack_version_id, d.revision, d.slot, d.project_name,
+		       d.state, d.created_at, d.updated_at
+		FROM deployments d
+		JOIN environments e ON e.id = d.environment_id
+		JOIN stacks s       ON s.id = e.stack_id
+		JOIN applications a ON a.id = s.app_id
+		WHERE d.state::text = ANY($1) AND ($2::uuid IS NULL OR a.org_id=$2)
+		ORDER BY d.updated_at
+	`, statesToText(states), orgID)
 	if err != nil {
 		return nil, mapErr(err)
 	}

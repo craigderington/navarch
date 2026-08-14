@@ -431,6 +431,24 @@ via `?created_by=`.
 **Sprint 4** — multi-node, WireGuard mesh, placement scoring
 **Sprint 5** — Bubble Tea TUI, log aggregation, metrics
 
+**Post-review hardening. DONE.** Every API route except `/healthz` requires
+the shared `COMPOSECTL_AGENT_TOKEN`; both binaries fail closed when it is
+absent. Instance reports are scoped to the node in the request. Unsupported
+rollout strategies are rejected (only blue/green is implemented). Agent
+heartbeats report unique-container CPU/memory allocation and placement checks
+both resources. Existing pinned services cannot change or disappear across a
+deployment, and Docker adoption verifies a resolved-runtime fingerprint so a
+secret rotation cannot be silently claimed without recreating the container.
+
+**Audit + operational metrics. DONE.** Deployment lifecycle changes, preview
+expiry, and secret key/version mutations append events transactionally. Events
+survive deployment deletion (`0004_audit_events` changes the FK to `SET NULL`),
+and `GET /v1/orgs/{org}/events` provides newest-first cursor pagination.
+`GET /metrics` is authenticated Prometheus text format: bounded HTTP route
+labels, loop results/durations, DB availability, deployment states, ready
+nodes, active previews, and recent tombstones. Never add secret values, raw
+request paths, compose bodies, or environment values to events or metric labels.
+
 ---
 
 ## Conventions
@@ -465,11 +483,9 @@ via `?created_by=`.
   together. `go mod tidy` overshot the OTel stack to the latest (1.25-needing)
   versions rather than the older ones Docker minimally requires — fine, since
   we're at 1.25 anyway.
-- `internal/spec` and `internal/config` still have **no tests**, and
-  `internal/api` covers only nodes, secrets and previews. The
-  overlay-precedence rules (`internal/api/overlay.go`) and digest stability
-  (`internal/spec`) are the untested spots with a history of real bugs —
-  worth covering.
+- `internal/api` still lacks direct coverage for much of the catalog and
+  deployment surface. Overlay precedence has regression coverage through API
+  tests, while `internal/spec` and both config loaders now have focused tests.
 - The example stack's comment claims `cache` is "swappable (tmpfs only)",
   but `cache` declares no mount at all. Harmless — it is swappable either
   way — but the comment describes a case the example never exercises.
@@ -483,31 +499,16 @@ via `?created_by=`.
   it can't prove secret content that way); `preview` pairs that same
   echoing service with a pinned db, so an expiring preview has a pinned
   container and a named volume actually worth destroying.
-- **Revision networks are never removed on supersede — a node dies after
-  roughly 30 deployments.** `cc-{env8}-r{rev}-{slot}` networks are created
-  per revision and only ever removed by `RemoveEnv`, i.e. only when a
-  preview is tombstoned. Ordinary rollout teardown deletes the superseded
-  revision's containers and leaves its network behind, and the pinned
-  container's per-revision attachments keep `docker network prune` from
-  reclaiming them. Docker then runs out of address space and every
-  subsequent deployment fails with `all predefined address pools have been
-  fully subnetted` — which surfaces through the controller as the generic
-  `an instance failed to start`, pointing nowhere near the cause.
-  `dockerd.removeNetwork` already exists **and has no callers**; wiring it
-  into the supersede path is the obvious fix. This is the highest-value
-  next thing to fix.
-- **Parallel `go test` packages race through the shared database.**
-  `ListPendingDeployments` is database-global (`WHERE d.state='pending'`,
-  no org or test scoping), so `internal/rollout`'s scheduler tests call
-  `ScheduleOnce` on fixtures owned by `internal/store`'s tests and advance
-  them underneath their own assertions. Symptoms are order-dependent and
-  look unrelated to the cause: `illegal transition to scheduling`, or an
-  instance list with an extra `pending` row. Measured at roughly 1-in-6
-  full-suite runs before preview environments and 2-in-6 after (the new
-  `internal/api` tests add concurrent database work). Both `ExpireEnvironments`
-  and `ScheduleOnce` have this global-scope property; only the former's
-  test assertions have been hardened against it so far. Fix the assertions
-  to be containment-based, or scope the fixtures.
+- Revision-network cleanup is agent-owned. Reconcile keeps the current desired
+  project-network set, disconnects same-environment managed containers from
+  obsolete labelled networks, and removes those networks. It remembers envs
+  seen on the prior tick so a failed first rollout can still be cleaned after
+  its desired rows disappear; cleanup failures retain that memory and retry.
+  The shared `cc-ingress` network has no `cc.env` label and is never eligible.
+- Loop integration tests are organization-scoped so parallel `go test`
+  package binaries sharing one Postgres database cannot schedule, advance, or
+  reap one another's fixtures. Production constructors retain the global scan;
+  unexported rollout test constructors select the scoped store methods.
 
 ## Verification
 

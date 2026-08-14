@@ -31,6 +31,9 @@ func LoadConfig() (Config, error) {
 	if cfg.ControlPlaneURL == "" {
 		return Config{}, fmt.Errorf("COMPOSECTL_CONTROLPLANE_URL is required")
 	}
+	if cfg.AgentToken == "" {
+		return Config{}, fmt.Errorf("COMPOSECTL_AGENT_TOKEN is required")
+	}
 	return cfg, nil
 }
 

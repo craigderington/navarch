@@ -23,6 +23,9 @@ type DockerDriver interface {
 	InspectHealth(ctx context.Context, containerID string) (dockerd.Health, error)
 	StopRemove(ctx context.Context, containerID string) error
 	ListManaged(ctx context.Context, env8 string) ([]dockerd.Managed, error)
+	// PruneRevisionNetworks removes obsolete env-scoped revision networks after
+	// disconnecting only containers managed for that same environment.
+	PruneRevisionNetworks(ctx context.Context, env8 string, wanted map[string]bool) error
 	// EnsureVolume creates a named volume with labels. Docker would create it
 	// implicitly on first mount, but implicit volumes carry no labels, and
 	// teardown must match volumes exactly — a volume is the one object here
@@ -68,10 +71,14 @@ type Reconciler struct {
 	// second reconcile, per-env parallelism — has to guard this map, and the
 	// reports/GC bookkeeping below with it.
 	tornDown map[string]bool
+	// knownEnvs retains environments seen on the previous tick so a failed
+	// first rollout can still have its swappable containers and networks
+	// collected after its desired rows disappear.
+	knownEnvs map[string]bool
 }
 
 func NewReconciler(drv DockerDriver) *Reconciler {
-	return &Reconciler{drv: drv, debounce: 5 * time.Second, tornDown: map[string]bool{}}
+	return &Reconciler{drv: drv, debounce: 5 * time.Second, tornDown: map[string]bool{}, knownEnvs: map[string]bool{}}
 }
 
 // Reconcile converges Docker to the desired instance set and returns a report
@@ -103,28 +110,52 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInsta
 	reports := make([]Report, 0, len(desired))
 	wanted := map[string]bool{} // container name → desired
 	envs := map[string]bool{}
+	wantedNetworks := map[string]bool{}
 
 	for _, di := range desired {
 		name := containerName(di)
 		wanted[name] = true
 		envs[di.Env8] = true
+		wantedNetworks[di.ProjectName] = true
 		reports = append(reports, r.ensure(ctx, di, name, secrets[di.Env8]))
 	}
 
 	// GC: any managed container in a touched env whose name is not wanted, and
 	// which is swappable, is an orphan. Pinned containers are never GC'd here —
 	// a live deployment still holds a desired row for them.
+	cleanupEnvs := make(map[string]bool, len(r.knownEnvs)+len(envs))
+	for env8 := range r.knownEnvs {
+		cleanupEnvs[env8] = true
+	}
 	for env8 := range envs {
+		cleanupEnvs[env8] = true
+	}
+	nextKnown := make(map[string]bool, len(envs))
+	for env8 := range envs {
+		nextKnown[env8] = true
+	}
+	for env8 := range cleanupEnvs {
+		cleanupFailed := false
 		managed, err := r.drv.ListManaged(ctx, env8)
 		if err != nil {
-			continue
-		}
-		for _, m := range managed {
-			if !wanted[m.Name] && m.Swappable {
-				_ = r.drv.StopRemove(ctx, m.ID)
+			cleanupFailed = true
+		} else {
+			for _, m := range managed {
+				if !wanted[m.Name] && m.Swappable {
+					if err := r.drv.StopRemove(ctx, m.ID); err != nil {
+						cleanupFailed = true
+					}
+				}
 			}
 		}
+		if err := r.drv.PruneRevisionNetworks(ctx, env8, wantedNetworks); err != nil {
+			cleanupFailed = true
+		}
+		if cleanupFailed {
+			nextKnown[env8] = true
+		}
 	}
+	r.knownEnvs = nextKnown
 
 	// Teardown runs last: an environment being destroyed may also appear in
 	// desired (a tick straddling the reap), and destroying it after converging

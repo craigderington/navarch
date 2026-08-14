@@ -5,6 +5,9 @@ package dockerd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -20,6 +23,8 @@ import (
 
 	"github.com/craig/composectl/internal/spec"
 )
+
+const specFingerprintLabel = "cc.spec-fingerprint"
 
 // SecretSource resolves ${secret:KEY} references at container start. Sprint 2
 // uses a trivial dev implementation; Sprint 3 replaces it with the encrypted
@@ -136,16 +141,32 @@ func (d *Driver) removeNetwork(ctx context.Context, name string) error {
 // secrets is per-call, not a Driver field, because Sprint 3 resolves secrets
 // per-environment — a single Driver reconciles instances across many envs.
 func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets SecretSource) (string, bool, error) {
-	if existing, err := d.findByName(ctx, cs.Name); err != nil {
-		return "", false, err
-	} else if existing != "" {
-		return existing, false, nil
-	}
-
 	env, err := d.resolveEnv(cs.Env, cs.SecretEnv, secrets)
 	if err != nil {
 		return "", false, err
 	}
+	fingerprint, err := containerFingerprint(cs, env)
+	if err != nil {
+		return "", false, err
+	}
+	if existing, err := d.findByName(ctx, cs.Name); err != nil {
+		return "", false, err
+	} else if existing != "" {
+		inspected, err := d.cli.ContainerInspect(ctx, existing)
+		if err != nil {
+			return "", false, err
+		}
+		if inspected.Config.Labels[specFingerprintLabel] != fingerprint {
+			return "", false, fmt.Errorf("container %s configuration changed; automatic stateful recreation is not supported", cs.Name)
+		}
+		return existing, false, nil
+	}
+
+	labels := make(map[string]string, len(cs.Labels)+1)
+	for k, v := range cs.Labels {
+		labels[k] = v
+	}
+	labels[specFingerprintLabel] = fingerprint
 	envSlice := make([]string, 0, len(env))
 	for k, v := range env {
 		envSlice = append(envSlice, k+"="+v)
@@ -158,7 +179,7 @@ func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets 
 		Entrypoint: cs.Entrypoint,
 		WorkingDir: cs.WorkingDir,
 		User:       cs.User,
-		Labels:     cs.Labels,
+		Labels:     labels,
 	}
 	if cs.Health != nil && len(cs.Health.Test) > 0 {
 		cfg.Healthcheck = &container.HealthConfig{
@@ -203,6 +224,32 @@ func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets 
 		return "", false, fmt.Errorf("start %s: %w", cs.Name, err)
 	}
 	return created.ID, true, nil
+}
+
+func containerFingerprint(cs ContainerSpec, resolvedEnv map[string]string) (string, error) {
+	// Network and management labels are intentionally excluded: a pinned
+	// container joins each new revision network while its runtime configuration
+	// remains the same. Secret plaintext participates only through this hash.
+	v := struct {
+		Image       string
+		Env         map[string]string
+		Cmd         []string
+		Entrypoint  []string
+		WorkingDir  string
+		User        string
+		Mounts      []VolumeMount
+		Health      *spec.HealthCheck
+		Restart     string
+		CPUMillis   int
+		MemoryBytes int64
+	}{cs.Image, resolvedEnv, cs.Cmd, cs.Entrypoint, cs.WorkingDir, cs.User,
+		cs.Mounts, cs.Health, cs.Restart, cs.CPUMillis, cs.MemoryBytes}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("fingerprint container %s: %w", cs.Name, err)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (d *Driver) AttachNetwork(ctx context.Context, containerID, netName string, aliases ...string) error {
@@ -269,6 +316,50 @@ func (d *Driver) ListManaged(ctx context.Context, env8 string) ([]Managed, error
 		})
 	}
 	return out, nil
+}
+
+// PruneRevisionNetworks removes env-scoped networks that are no longer in the
+// desired deployment set. Pinned containers are attached to every revision
+// network, so they must be disconnected before Docker can remove an obsolete
+// network. The label check prevents this cleanup path from disconnecting an
+// unmanaged container that somehow joined a managed network.
+func (d *Driver) PruneRevisionNetworks(ctx context.Context, env8 string, wanted map[string]bool) error {
+	f := filters.NewArgs(filters.Arg("label", "cc.env="+env8))
+	nets, err := d.cli.NetworkList(ctx, network.ListOptions{Filters: f})
+	if err != nil {
+		return err
+	}
+	for _, n := range nets {
+		if wanted[n.Name] {
+			continue
+		}
+		inspected, err := d.cli.NetworkInspect(ctx, n.ID, network.InspectOptions{})
+		if err != nil {
+			if errdefs.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("inspect network %s: %w", n.Name, err)
+		}
+		for containerID := range inspected.Containers {
+			ctr, err := d.cli.ContainerInspect(ctx, containerID)
+			if err != nil {
+				if errdefs.IsNotFound(err) {
+					continue
+				}
+				return fmt.Errorf("inspect container %s on network %s: %w", containerID, n.Name, err)
+			}
+			if ctr.Config.Labels["cc.env"] != env8 {
+				return fmt.Errorf("refusing to prune network %s: unmanaged container %s is attached", n.Name, containerID)
+			}
+			if err := d.cli.NetworkDisconnect(ctx, n.ID, containerID, true); err != nil && !errdefs.IsNotFound(err) {
+				return fmt.Errorf("disconnect container %s from network %s: %w", containerID, n.Name, err)
+			}
+		}
+		if err := d.cli.NetworkRemove(ctx, n.ID); err != nil && !errdefs.IsNotFound(err) {
+			return fmt.Errorf("remove network %s: %w", n.Name, err)
+		}
+	}
+	return nil
 }
 
 // RemoveEnv destroys everything belonging to one environment: containers

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type SecretMeta struct {
@@ -22,11 +23,19 @@ type EncryptedSecret struct {
 // the agent reads the highest version. The control plane never sees plaintext
 // at rest — only the ciphertext handed to it.
 func (s *Store) SetSecret(ctx context.Context, envID uuid.UUID, key string, ciphertext []byte, keyID string) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO secrets (environment_id, key, ciphertext, key_id, version)
-		VALUES ($1, $2, $3, $4,
-			(SELECT COALESCE(MAX(version),0)+1 FROM secrets WHERE environment_id=$1 AND key=$2))
-	`, envID, key, ciphertext, keyID)
+	err := s.tx(ctx, func(tx pgx.Tx) error {
+		var version int
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO secrets (environment_id, key, ciphertext, key_id, version)
+			VALUES ($1, $2, $3, $4,
+				(SELECT COALESCE(MAX(version),0)+1 FROM secrets WHERE environment_id=$1 AND key=$2))
+			RETURNING version
+		`, envID, key, ciphertext, keyID).Scan(&version); err != nil {
+			return err
+		}
+		return appendEnvironmentEventTx(ctx, tx, envID, "secret.set", "secret version stored",
+			map[string]any{"key": key, "version": version})
+	})
 	return mapErr(err)
 }
 
@@ -52,7 +61,17 @@ func (s *Store) SecretKeysForEnv(ctx context.Context, envID uuid.UUID) ([]Secret
 }
 
 func (s *Store) DeleteSecret(ctx context.Context, envID uuid.UUID, key string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM secrets WHERE environment_id=$1 AND key=$2`, envID, key)
+	err := s.tx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM secrets WHERE environment_id=$1 AND key=$2`, envID, key)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return appendEnvironmentEventTx(ctx, tx, envID, "secret.deleted", "secret deleted",
+			map[string]any{"key": key})
+	})
 	return mapErr(err)
 }
 

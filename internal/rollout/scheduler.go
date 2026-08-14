@@ -8,12 +8,19 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/google/uuid"
+
 	"github.com/craig/composectl/internal/store"
 )
 
 type Scheduler struct {
-	st  *store.Store
-	log *slog.Logger
+	st    *store.Store
+	log   *slog.Logger
+	orgID *uuid.UUID
+}
+
+func newSchedulerForOrg(st *store.Store, log *slog.Logger, orgID uuid.UUID) *Scheduler {
+	return &Scheduler{st: st, log: log, orgID: &orgID}
 }
 
 func NewScheduler(st *store.Store, log *slog.Logger) *Scheduler {
@@ -25,7 +32,13 @@ func NewScheduler(st *store.Store, log *slog.Logger) *Scheduler {
 // retry next tick; one that cannot fit is failed. Placement is trivial in
 // Sprint 2 (first ready node with room); Sprint 4 adds scoring.
 func (sc *Scheduler) ScheduleOnce(ctx context.Context) error {
-	pending, err := sc.st.ListPendingDeployments(ctx)
+	var pending []store.PendingDeployment
+	var err error
+	if sc.orgID == nil {
+		pending, err = sc.st.ListPendingDeployments(ctx)
+	} else {
+		pending, err = sc.st.ListPendingDeploymentsForOrg(ctx, *sc.orgID)
+	}
 	if err != nil {
 		return err
 	}
@@ -47,16 +60,17 @@ func (sc *Scheduler) place(ctx context.Context, dep store.PendingDeployment) err
 		return nil // retried next tick
 	}
 
-	peak := dep.ResolvedSpec.PeakMemoryBytes()
+	peakMemory := dep.ResolvedSpec.PeakMemoryBytes()
+	peakCPU := dep.ResolvedSpec.PeakCPUMillis()
 	var chosen *store.Node
 	for i := range nodes {
-		if nodes[i].FreeMemoryBytes() >= peak {
+		if nodes[i].FreeMemoryBytes() >= peakMemory && nodes[i].FreeCPUMillis() >= peakCPU {
 			chosen = &nodes[i]
 			break
 		}
 	}
 	if chosen == nil {
-		reason := fmt.Sprintf("no ready node has %d bytes free for the rollout", peak)
+		reason := fmt.Sprintf("no ready node has %d bytes and %d millicpu free for the rollout", peakMemory, peakCPU)
 		return sc.st.UpdateDeploymentState(ctx, dep.ID, store.DeployFailed, reason)
 	}
 

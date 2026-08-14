@@ -5,6 +5,8 @@
 set -euo pipefail
 
 API=${API:-http://localhost:8417}
+API_TOKEN=${API_TOKEN:-dev-token-change-me}
+CURL_AUTH=(-H "Authorization: Bearer $API_TOKEN")
 SUFFIX=${SUFFIX:-$RANDOM}
 HOST=${HOST:-rb-$SUFFIX.example.com}
 
@@ -13,8 +15,8 @@ note() { printf '  \033[90m%s\033[0m\n' "$1"; }
 
 api() {
   local m=$1 p=$2 b=${3-} out code
-  if [ -n "$b" ]; then out=$(curl -sS -X "$m" "$API$p" -H 'Content-Type: application/json' -d "$b" -w '\n%{http_code}')
-  else out=$(curl -sS -X "$m" "$API$p" -w '\n%{http_code}'); fi
+  if [ -n "$b" ]; then out=$(curl -sS "${CURL_AUTH[@]}" -X "$m" "$API$p" -H 'Content-Type: application/json' -d "$b" -w '\n%{http_code}')
+  else out=$(curl -sS "${CURL_AUTH[@]}" -X "$m" "$API$p" -w '\n%{http_code}'); fi
   code=$(tail -n1 <<<"$out"); out=$(sed '$d' <<<"$out")
   [[ $code =~ ^2 ]] || { printf '\033[31m%s %s -> %s\033[0m\n%s\n' "$m" "$p" "$code" "$out" >&2; exit 1; }
   printf '%s' "$out"
@@ -41,14 +43,14 @@ step "Set the secret examples/hello references — deploy now 422s without it"
 api POST "/v1/envs/$ENV_ID/secrets" '{"key":"db_password","value":"devpassword"}' | jq -e .key >/dev/null
 
 step "Version 1 → revision 1 (live)"
-curl -sS -X POST "$API/v1/stacks/$STACK/versions" --data-binary @examples/hello/compose.yaml | jq -e .id >/dev/null
+curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/stacks/$STACK/versions" --data-binary @examples/hello/compose.yaml | jq -e .id >/dev/null
 D1=$(api POST "/v1/envs/$ENV_ID/deployments" '{}' | jq -r .id)
 wait_live "$D1"; SV1=$(sv_of "$D1")
 note "revision 1 live on stack version ${SV1:0:8}…"
 
 step "Version 2 (LOG_LEVEL=debug) → revision 2 (live)"
 sed 's/LOG_LEVEL: info/LOG_LEVEL: debug/' examples/hello/compose.yaml \
-  | curl -sS -X POST "$API/v1/stacks/$STACK/versions" --data-binary @- | jq -e .id >/dev/null
+  | curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/stacks/$STACK/versions" --data-binary @- | jq -e .id >/dev/null
 D2=$(api POST "/v1/envs/$ENV_ID/deployments" '{}' | jq -r .id)
 wait_live "$D2"; SV2=$(sv_of "$D2")
 note "revision 2 live on stack version ${SV2:0:8}…"
