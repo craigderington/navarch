@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -424,13 +425,44 @@ func (d *Driver) RemoveEnv(ctx context.Context, env8 string) error {
 		}
 	}
 
+	// Failures are collected rather than returned early. The three resource
+	// kinds are independent, and returning on the first one let a network that
+	// would not delete strand the environment's volumes indefinitely: teardown
+	// retried forever, never reaching the volume step, and the durable state a
+	// tombstone exists to destroy survived.
+	var problems []error
+
 	nets, err := d.cli.NetworkList(ctx, network.ListOptions{Filters: f})
 	if err != nil {
 		return err
 	}
 	for _, n := range nets {
+		// Disconnect whatever is still attached, including containers this
+		// platform does not manage. The shared router joins a revision network
+		// to serve that environment's ingress and carries no cc.env label, so
+		// the container sweep above never removes it — and Docker refuses to
+		// remove a network that still has an active endpoint. Left alone, this
+		// failed teardown for every preview that had an ingress, which is all
+		// of them.
+		//
+		// PruneRevisionNetworks deliberately does the opposite and refuses to
+		// touch a network with an unmanaged container attached. That is right
+		// for routine GC, which runs constantly and must never yank a live
+		// container off a network. It is wrong here: RemoveEnv runs only on an
+		// explicit tombstone the control plane wrote durably before deleting
+		// the environment, and that is an instruction to destroy, not a guess.
+		inspected, err := d.cli.NetworkInspect(ctx, n.ID, network.InspectOptions{})
+		if err != nil && !errdefs.IsNotFound(err) {
+			problems = append(problems, fmt.Errorf("inspect network %s: %w", n.Name, err))
+			continue
+		}
+		for containerID := range inspected.Containers {
+			if err := d.cli.NetworkDisconnect(ctx, n.ID, containerID, true); err != nil && !errdefs.IsNotFound(err) {
+				problems = append(problems, fmt.Errorf("disconnect %s from network %s: %w", containerID, n.Name, err))
+			}
+		}
 		if err := d.cli.NetworkRemove(ctx, n.ID); err != nil && !errdefs.IsNotFound(err) {
-			return fmt.Errorf("remove network %s: %w", n.Name, err)
+			problems = append(problems, fmt.Errorf("remove network %s: %w", n.Name, err))
 		}
 	}
 
@@ -440,10 +472,10 @@ func (d *Driver) RemoveEnv(ctx context.Context, env8 string) error {
 	}
 	for _, v := range vols.Volumes {
 		if err := d.cli.VolumeRemove(ctx, v.Name, false); err != nil && !errdefs.IsNotFound(err) {
-			return fmt.Errorf("remove volume %s: %w", v.Name, err)
+			problems = append(problems, fmt.Errorf("remove volume %s: %w", v.Name, err))
 		}
 	}
-	return nil
+	return errors.Join(problems...)
 }
 
 func (d *Driver) findByName(ctx context.Context, name string) (string, error) {

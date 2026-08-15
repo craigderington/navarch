@@ -274,3 +274,79 @@ func TestEnsureVolumeAndRemoveEnv(t *testing.T) {
 		t.Errorf("RemoveEnv must be idempotent: %v", err)
 	}
 }
+
+// The shared router joins a revision network to serve that environment's
+// ingress and carries no cc.env label, so RemoveEnv's container sweep never
+// removes it. Docker refuses to delete a network with an active endpoint, so
+// the network removal failed, and because volumes are removed *after*
+// networks, the environment's durable state survived the teardown entirely.
+// Every preview has an ingress, so every preview leaked its volume.
+func TestRemoveEnvDisconnectsUnmanagedContainersFromEnvNetworks(t *testing.T) {
+	d := testDriver(t)
+	ctx := context.Background()
+	env8 := "test" + uuid.NewString()[:4]
+	labels := map[string]string{"cc.env": env8}
+	vol := "cc-" + env8 + "-data"
+	netName := "cc-" + env8 + "-r1-blue"
+	routerName := "router-" + env8 // deliberately unlabelled: not ours to delete
+
+	var routerID string
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if routerID != "" {
+			_ = d.StopRemove(cctx, routerID)
+		}
+		_ = d.RemoveEnv(cctx, env8)
+	})
+
+	if err := d.EnsureVolume(ctx, vol, labels); err != nil {
+		t.Fatalf("EnsureVolume: %v", err)
+	}
+	if _, err := d.EnsureNetwork(ctx, netName, labels); err != nil {
+		t.Fatalf("EnsureNetwork: %v", err)
+	}
+	if _, err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
+	}
+
+	// Stands in for Traefik: attached to the revision network, no cc.env label.
+	id, _, err := d.EnsureContainer(ctx, ContainerSpec{
+		Name: routerName, Image: "busybox:latest",
+		Cmd:         []string{"sh", "-c", "sleep 60"},
+		Labels:      map[string]string{"cc.role": "ingress-router"},
+		Network:     netName,
+		MemoryBytes: 64 << 20,
+	}, nil)
+	if err != nil {
+		t.Fatalf("EnsureContainer (router): %v", err)
+	}
+	routerID = id
+
+	if err := d.RemoveEnv(ctx, env8); err != nil {
+		t.Fatalf("RemoveEnv must not fail with an unmanaged container attached: %v", err)
+	}
+
+	f := filters.NewArgs(filters.Arg("label", "cc.env="+env8))
+	nets, err := d.cli.NetworkList(ctx, network.ListOptions{Filters: f})
+	if err != nil {
+		t.Fatalf("NetworkList: %v", err)
+	}
+	if len(nets) != 0 {
+		t.Errorf("the env's networks must be removed, %d left", len(nets))
+	}
+	// The point of the fix: the volume step is reached at all.
+	vols, err := d.cli.VolumeList(ctx, volume.ListOptions{Filters: f})
+	if err != nil {
+		t.Fatalf("VolumeList: %v", err)
+	}
+	if len(vols.Volumes) != 0 {
+		t.Errorf("the env's volumes must be removed, %d left", len(vols.Volumes))
+	}
+
+	// Disconnected, not destroyed. The router serves other environments; a
+	// tombstone authorises destroying its own environment, nothing else.
+	if _, err := d.cli.ContainerInspect(ctx, routerID); err != nil {
+		t.Errorf("the unmanaged router must survive teardown: %v", err)
+	}
+}
