@@ -41,12 +41,30 @@ func TestSyncRejectsUnsafeHostname(t *testing.T) {
 	}
 }
 
-func TestSyncEmptyIsValid(t *testing.T) {
+// An empty route set must produce a file with no http section. This test used
+// to assert only that Sync returned nil and left a file behind, which is what
+// let the real bug through: the file it wrote was `routers: {}`, which Traefik
+// rejects outright ("routers cannot be a standalone element"). A rejected file
+// leaves the previously accepted config in force, so the last environment's
+// hostname kept routing after teardown — verified against traefik:v3.3, where
+// a live route stayed at 200 across that write and only a section-less file
+// dropped it to 404.
+func TestSyncEmptyWritesNoHTTPSection(t *testing.T) {
 	dir := t.TempDir()
 	if err := New(dir).Sync(nil); err != nil {
 		t.Fatalf("empty sync: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "composectl.yml")); err != nil {
+	// ReadFile also carries the old assertion: a file must still exist when the
+	// route set is empty, rather than the path being left absent.
+	body, err := os.ReadFile(filepath.Join(dir, "composectl.yml"))
+	if err != nil {
 		t.Fatalf("expected a file even when empty: %v", err)
+	}
+	// Any of these means an empty element reached the file, and Traefik would
+	// reject it — keeping stale routes alive rather than withdrawing them.
+	for _, banned := range []string{"routers", "services", "http:"} {
+		if strings.Contains(string(body), banned) {
+			t.Fatalf("empty config must not contain %q, got:\n%s", banned, body)
+		}
 	}
 }
