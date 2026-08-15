@@ -96,6 +96,11 @@ func TestOrgListTable(t *testing.T) {
 }
 
 func TestCommandFlagsAreNotSwallowedAsGlobals(t *testing.T) {
+	// The org is given as an id, not the "org-1" placeholder this used to pass:
+	// a non-id value is now a slug and would be resolved, turning a test about
+	// argv parsing into a test about resolution. Nothing regressed by that —
+	// a non-UUID sent raw was always rejected by the server's pathUUID.
+	const orgID = "11111111-1111-1111-1111-111111111111"
 	var saw string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		saw = r.URL.String()
@@ -103,11 +108,11 @@ func TestCommandFlagsAreNotSwallowedAsGlobals(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	var out, errb bytes.Buffer
-	code := Run([]string{"--url", srv.URL, "--token", "t", "app", "list", "--org", "org-1"}, &out, &errb)
+	code := Run([]string{"--url", srv.URL, "--token", "t", "app", "list", "--org", orgID}, &out, &errb)
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
-	if !strings.Contains(saw, "/v1/orgs/org-1/apps") {
+	if !strings.Contains(saw, "/v1/orgs/"+orgID+"/apps") {
 		t.Fatalf("request %s", saw)
 	}
 }

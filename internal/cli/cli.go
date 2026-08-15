@@ -307,6 +307,16 @@ Commands:
   wait ID              Block until a deployment reaches a state
   version              Print CLI version
 
+Naming things:
+  Anywhere an id is accepted, a slug path rooted at the organization works too.
+  Depth follows the hierarchy, and segments may mix ids and slugs.
+
+    --org    dev
+    --app    dev/preview
+    --stack  dev/preview/main
+    --env    dev/preview/main/staging
+    node     dev/dev-node-1            (organization + hostname)
+
 Config file (lowest precedence): $NAVARCH_CONFIG or ~/.config/navarch/config.yaml
 
 The previous COMPOSECTL_* variables and ~/.config/composectl/config.yaml are
@@ -315,7 +325,8 @@ still read, at lower precedence, so an existing setup keeps working.
 Examples:
   navarch health
   navarch validate examples/hello/compose.yaml
-  navarch stack push $STACK examples/hello/compose.yaml
-  navarch deploy --env $ENV
-  navarch events --org $ORG --limit 20
+  navarch stack push dev/preview/main examples/hello/compose.yaml
+  navarch deploy --env dev/preview/main/staging
+  navarch secret set --env dev/preview/main/staging db_password hunter2
+  navarch events --org dev --limit 20
 `

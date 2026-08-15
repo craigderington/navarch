@@ -59,6 +59,29 @@ half is removable once nothing sets it.
 working tree; if it exists elsewhere it, not this table, is the authority on
 naming.
 
+**References resolve by parsing, never by shape** (`internal/cli/resolve.go`).
+Anywhere the CLI takes an id it also takes a slug path rooted at the org —
+`dev`, `dev/shop`, `dev/shop/main`, `dev/shop/main/staging`, and `dev/hostname`
+for a node — with segments free to mix ids and slugs. Two properties are
+load-bearing:
+
+- **A UUID is itself valid slug syntax** — lowercase alphanumeric with internal
+  dashes, 36 chars, inside the store's 63-char cap — so nothing stops a stack
+  being named after one. `isID` therefore *parses*, and accepts only the
+  canonical dashed form: `uuid.Parse` also takes a bare 32-hex string, which is
+  indistinguishable from an ordinary slug, and treating that as an id would make
+  one unlucky name permanently unaddressable.
+- **An id costs no request.** Each resolver returns immediately for an id, so
+  existing scripts issue exactly the calls they always did and only a path pays
+  the one-request-per-level walk. `TestResolveIDCostsNoRequests` asserts this on
+  the request log, not the return value.
+
+Wrong-depth paths are usage errors (exit 2) naming the expected shape; a
+resolution miss is a runtime error (exit 1) naming what was not found and where.
+Node hostnames carry no uniqueness constraint, so an ambiguous one errors with
+the candidates rather than picking — draining the wrong node is not worth a
+guess. Deployments are id-only: they have revisions, not slugs.
+
 ---
 
 ## Quickstart

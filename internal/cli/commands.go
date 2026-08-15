@@ -94,9 +94,12 @@ func cmdApp(ctx context.Context, e env, args []string) error {
 		if err != nil {
 			return err
 		}
-		org := flags["org"]
-		if org == "" {
-			return usage("usage: navarch app list --org ID")
+		if flags["org"] == "" {
+			return usage("usage: navarch app list --org ORG")
+		}
+		org, err := e.resolveOrg(ctx, flags["org"])
+		if err != nil {
+			return err
 		}
 		apps, err := e.c.ListApps(ctx, org)
 		if err != nil {
@@ -113,13 +116,17 @@ func cmdApp(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if len(pos) < 1 || flags["org"] == "" {
-			return usage("usage: navarch app create SLUG --org ID [--name NAME]")
+			return usage("usage: navarch app create SLUG --org ORG [--name NAME]")
 		}
 		name := flags["name"]
 		if name == "" {
 			name = pos[0]
 		}
-		a, err := e.c.CreateApp(ctx, flags["org"], pos[0], name)
+		org, err := e.resolveOrg(ctx, flags["org"])
+		if err != nil {
+			return err
+		}
+		a, err := e.c.CreateApp(ctx, org, pos[0], name)
 		if err != nil {
 			return err
 		}
@@ -140,9 +147,13 @@ func cmdStack(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["app"] == "" {
-			return usage("usage: navarch stack list --app ID")
+			return usage("usage: navarch stack list --app ORG/APP")
 		}
-		stacks, err := e.c.ListStacks(ctx, flags["app"])
+		app, err := e.resolveApp(ctx, flags["app"])
+		if err != nil {
+			return err
+		}
+		stacks, err := e.c.ListStacks(ctx, app)
 		if err != nil {
 			return err
 		}
@@ -157,18 +168,26 @@ func cmdStack(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if len(pos) < 1 || flags["app"] == "" {
-			return usage("usage: navarch stack create SLUG --app ID")
+			return usage("usage: navarch stack create SLUG --app ORG/APP")
 		}
-		s, err := e.c.CreateStack(ctx, flags["app"], pos[0])
+		app, err := e.resolveApp(ctx, flags["app"])
+		if err != nil {
+			return err
+		}
+		s, err := e.c.CreateStack(ctx, app, pos[0])
 		if err != nil {
 			return err
 		}
 		return emitOne(e, s, []string{"ID", "SLUG", "APP"}, []string{s.ID, s.Slug, s.AppID})
 	case "get":
-		if err := need(args, 2, "usage: navarch stack get ID"); err != nil {
+		if err := need(args, 2, "usage: navarch stack get ORG/APP/STACK"); err != nil {
 			return err
 		}
-		s, err := e.c.GetStack(ctx, args[1])
+		stack, err := e.resolveStack(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		s, err := e.c.GetStack(ctx, stack)
 		if err != nil {
 			return err
 		}
@@ -179,22 +198,30 @@ func cmdStack(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if len(pos) < 2 {
-			return usage("usage: navarch stack push STACK_ID FILE [--created-by NAME]")
+			return usage("usage: navarch stack push ORG/APP/STACK FILE [--created-by NAME]")
 		}
 		raw, err := readFileOrStdin(pos[1])
 		if err != nil {
 			return err
 		}
-		sv, err := e.c.PushStack(ctx, pos[0], raw, flags["created-by"])
+		stack, err := e.resolveStack(ctx, pos[0])
+		if err != nil {
+			return err
+		}
+		sv, err := e.c.PushStack(ctx, stack, raw, flags["created-by"])
 		if err != nil {
 			return err
 		}
 		return emitOne(e, sv, []string{"ID", "VERSION", "DIGEST"}, []string{sv.ID, strconv.Itoa(sv.Version), sv.SpecDigest})
 	case "versions":
-		if err := need(args, 2, "usage: navarch stack versions STACK_ID"); err != nil {
+		if err := need(args, 2, "usage: navarch stack versions ORG/APP/STACK"); err != nil {
 			return err
 		}
-		vs, err := e.c.ListStackVersions(ctx, args[1])
+		stack, err := e.resolveStack(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		vs, err := e.c.ListStackVersions(ctx, stack)
 		if err != nil {
 			return err
 		}
@@ -219,9 +246,13 @@ func cmdEnv(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["stack"] == "" {
-			return usage("usage: navarch env list --stack ID")
+			return usage("usage: navarch env list --stack ORG/APP/STACK")
 		}
-		envs, err := e.c.ListEnvs(ctx, flags["stack"])
+		stack, err := e.resolveStack(ctx, flags["stack"])
+		if err != nil {
+			return err
+		}
+		envs, err := e.c.ListEnvs(ctx, stack)
 		if err != nil {
 			return err
 		}
@@ -240,22 +271,30 @@ func cmdEnv(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if len(pos) < 1 || flags["stack"] == "" {
-			return usage("usage: navarch env create SLUG --stack ID [--hostname HOST] [--config k=v]")
+			return usage("usage: navarch env create SLUG --stack ORG/APP/STACK [--hostname HOST] [--config k=v]")
 		}
 		in := client.CreateEnvInput{Slug: pos[0], Hostname: flags["hostname"], Strategy: flags["strategy"]}
 		if flags["config"] != "" {
 			in.Config = parseKV(flags["config"])
 		}
-		ev, err := e.c.CreateEnv(ctx, flags["stack"], in)
+		stack, err := e.resolveStack(ctx, flags["stack"])
+		if err != nil {
+			return err
+		}
+		ev, err := e.c.CreateEnv(ctx, stack, in)
 		if err != nil {
 			return err
 		}
 		return emitOne(e, ev, []string{"ID", "SLUG", "HOSTNAME"}, []string{ev.ID, ev.Slug, ev.Hostname})
 	case "get":
-		if err := need(args, 2, "usage: navarch env get ID"); err != nil {
+		if err := need(args, 2, "usage: navarch env get ORG/APP/STACK/ENV"); err != nil {
 			return err
 		}
-		ev, err := e.c.GetEnv(ctx, args[1])
+		envID, err := e.resolveEnv(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		ev, err := e.c.GetEnv(ctx, envID)
 		if err != nil {
 			return err
 		}
@@ -293,7 +332,11 @@ func cmdPreview(ctx context.Context, e env, args []string) error {
 		}
 		in.TTLHours = n
 	}
-	p, err := e.c.CreatePreview(ctx, flags["stack"], in)
+	stack, err := e.resolveStack(ctx, flags["stack"])
+	if err != nil {
+		return err
+	}
+	p, err := e.c.CreatePreview(ctx, stack, in)
 	if err != nil {
 		return err
 	}
@@ -307,9 +350,13 @@ func cmdDeploy(ctx context.Context, e env, args []string) error {
 		return err
 	}
 	if flags["env"] == "" {
-		return usage("usage: navarch deploy --env ID [--version ID] [--created-by NAME]")
+		return usage("usage: navarch deploy --env ORG/APP/STACK/ENV [--version ID] [--created-by NAME]")
 	}
-	d, err := e.c.Deploy(ctx, flags["env"], flags["version"], flags["created-by"])
+	envID, err := e.resolveEnv(ctx, flags["env"])
+	if err != nil {
+		return err
+	}
+	d, err := e.c.Deploy(ctx, envID, flags["version"], flags["created-by"])
 	if err != nil {
 		return err
 	}
@@ -328,9 +375,13 @@ func cmdDeployment(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["env"] == "" {
-			return usage("usage: navarch deployment list --env ID")
+			return usage("usage: navarch deployment list --env ORG/APP/STACK/ENV")
 		}
-		ds, err := e.c.ListDeployments(ctx, flags["env"])
+		envID, err := e.resolveEnv(ctx, flags["env"])
+		if err != nil {
+			return err
+		}
+		ds, err := e.c.ListDeployments(ctx, envID)
 		if err != nil {
 			return err
 		}
@@ -378,7 +429,7 @@ func cmdRollback(ctx context.Context, e env, args []string) error {
 		return err
 	}
 	if flags["env"] == "" {
-		return usage("usage: navarch rollback --env ID [--to REVISION]")
+		return usage("usage: navarch rollback --env ORG/APP/STACK/ENV [--to REVISION]")
 	}
 	to := 0
 	if flags["to"] != "" {
@@ -387,7 +438,11 @@ func cmdRollback(ctx context.Context, e env, args []string) error {
 			return usage("--to must be a revision number")
 		}
 	}
-	d, err := e.c.Rollback(ctx, flags["env"], to)
+	envID, err := e.resolveEnv(ctx, flags["env"])
+	if err != nil {
+		return err
+	}
+	d, err := e.c.Rollback(ctx, envID, to)
 	if err != nil {
 		return err
 	}
@@ -406,9 +461,13 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["env"] == "" {
-			return usage("usage: navarch secret list --env ID")
+			return usage("usage: navarch secret list --env ORG/APP/STACK/ENV")
 		}
-		secs, err := e.c.ListSecrets(ctx, flags["env"])
+		envID, err := e.resolveEnv(ctx, flags["env"])
+		if err != nil {
+			return err
+		}
+		secs, err := e.c.ListSecrets(ctx, envID)
 		if err != nil {
 			return err
 		}
@@ -423,9 +482,13 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["env"] == "" || len(pos) < 2 {
-			return usage("usage: navarch secret set --env ID KEY VALUE")
+			return usage("usage: navarch secret set --env ORG/APP/STACK/ENV KEY VALUE")
 		}
-		if err := e.c.SetSecret(ctx, flags["env"], pos[0], pos[1]); err != nil {
+		envID, err := e.resolveEnv(ctx, flags["env"])
+		if err != nil {
+			return err
+		}
+		if err := e.c.SetSecret(ctx, envID, pos[0], pos[1]); err != nil {
 			return err
 		}
 		if e.cfg.Output == "json" {
@@ -439,9 +502,13 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["env"] == "" || len(pos) < 1 {
-			return usage("usage: navarch secret delete --env ID KEY")
+			return usage("usage: navarch secret delete --env ORG/APP/STACK/ENV KEY")
 		}
-		if err := e.c.DeleteSecret(ctx, flags["env"], pos[0]); err != nil {
+		envID, err := e.resolveEnv(ctx, flags["env"])
+		if err != nil {
+			return err
+		}
+		if err := e.c.DeleteSecret(ctx, envID, pos[0]); err != nil {
 			return err
 		}
 		if e.cfg.Output == "json" {
@@ -465,9 +532,13 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["org"] == "" {
-			return usage("usage: navarch node list --org ID")
+			return usage("usage: navarch node list --org ORG")
 		}
-		nodes, err := e.c.ListNodes(ctx, flags["org"])
+		org, err := e.resolveOrg(ctx, flags["org"])
+		if err != nil {
+			return err
+		}
+		nodes, err := e.c.ListNodes(ctx, org)
 		if err != nil {
 			return err
 		}
@@ -477,26 +548,36 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		}
 		return emit(e, nodes, []string{"ID", "HOSTNAME", "STATE", "ADDR", "CPU_MILLIS"}, rows)
 	case "get":
-		if err := need(args, 2, "usage: navarch node get ID"); err != nil {
+		if err := need(args, 2, "usage: navarch node get ORG/HOSTNAME"); err != nil {
 			return err
 		}
-		n, err := e.c.GetNode(ctx, args[1])
+		nodeID, err := e.resolveNode(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		n, err := e.c.GetNode(ctx, nodeID)
 		if err != nil {
 			return err
 		}
 		return emitOne(e, n, []string{"ID", "HOSTNAME", "STATE", "ADDR"},
 			[]string{n.ID, n.Hostname, n.State, n.AdvertiseAddr})
 	case "drain":
-		if err := need(args, 2, "usage: navarch node drain ID"); err != nil {
+		if err := need(args, 2, "usage: navarch node drain ORG/HOSTNAME"); err != nil {
 			return err
 		}
-		if err := e.c.DrainNode(ctx, args[1]); err != nil {
+		nodeID, err := e.resolveNode(ctx, args[1])
+		if err != nil {
 			return err
 		}
+		if err := e.c.DrainNode(ctx, nodeID); err != nil {
+			return err
+		}
+		// Report the resolved id, not what was typed: after a rename the two
+		// differ, and the id is what identifies the node that was drained.
 		if e.cfg.Output == "json" {
-			return printJSON(e.out, map[string]string{"status": "draining", "id": args[1]})
+			return printJSON(e.out, map[string]string{"status": "draining", "id": nodeID})
 		}
-		fmt.Fprintf(e.out, "draining\t%s\n", args[1])
+		fmt.Fprintf(e.out, "draining\t%s\n", nodeID)
 		return nil
 	default:
 		return usage("usage: navarch node list|get|drain ...")
@@ -552,7 +633,7 @@ func cmdEvents(ctx context.Context, e env, args []string) error {
 		return err
 	}
 	if flags["org"] == "" {
-		return usage("usage: navarch events --org ID [--limit N] [--before ID]")
+		return usage("usage: navarch events --org ORG [--limit N] [--before ID]")
 	}
 	limit := 0
 	if flags["limit"] != "" {
@@ -568,7 +649,11 @@ func cmdEvents(ctx context.Context, e env, args []string) error {
 			return usage("--before must be an event id")
 		}
 	}
-	evs, err := e.c.ListEvents(ctx, flags["org"], limit, before)
+	org, err := e.resolveOrg(ctx, flags["org"])
+	if err != nil {
+		return err
+	}
+	evs, err := e.c.ListEvents(ctx, org, limit, before)
 	if err != nil {
 		return err
 	}

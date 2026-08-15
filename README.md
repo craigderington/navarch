@@ -62,10 +62,29 @@ export NAVARCH_TOKEN=dev-token-change-me
 navarch health
 navarch validate examples/hello/compose.yaml
 navarch org list
-navarch stack push <stack-id> examples/hello/compose.yaml
-navarch deploy --env <env-id>
-navarch events --org <org-id>
+navarch stack push dev/shop/main examples/hello/compose.yaml
+navarch deploy --env dev/shop/main/staging
+navarch events --org dev
 ```
+
+### Naming things
+
+Anywhere an id is accepted, a slug path rooted at the organization works too.
+Depth follows the hierarchy, and segments may mix ids and slugs, so a script
+that already captured one id can still name the rest:
+
+| Flag | Path | Example |
+|---|---|---|
+| `--org` | `ORG` | `dev` |
+| `--app` | `ORG/APP` | `dev/shop` |
+| `--stack` | `ORG/APP/STACK` | `dev/shop/main` |
+| `--env` | `ORG/APP/STACK/ENV` | `dev/shop/main/staging` |
+| `node get`, `node drain` | `ORG/HOSTNAME` | `dev/dev-node-1` |
+
+Resolution costs one request per level and happens only for paths — a reference
+that is already an id is passed straight through, so existing scripts issue
+exactly the calls they always did. Deployments are addressed by id only: they
+have revisions, not slugs.
 
 Config file (optional): `~/.config/navarch/config.yaml` with `url` and `token`.
 Flags override the environment; the environment overrides the file.
