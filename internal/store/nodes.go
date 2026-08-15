@@ -116,13 +116,20 @@ type HeartbeatParams struct {
 func (s *Store) Heartbeat(ctx context.Context, nodeID uuid.UUID, p HeartbeatParams) error {
 	// Alloc is owned by PlaceDeployment / DeleteInstances. Heartbeat only
 	// proves liveness and will not un-drain a node or clobber a reservation.
+	// The CASE needs an explicit ::node_state. Every branch is an unknown-type
+	// literal, so Postgres resolves the CASE as text and then refuses to
+	// assign text to the enum column ("column \"state\" is of type node_state
+	// but expression is of type text"). A bare `state='draining'` coerces
+	// fine, which is why DrainNode never hit this — it is the CASE that
+	// forces the resolution. Same family as the deployment-state enum
+	// gotchas: enum columns need the cast spelled out.
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE nodes SET last_heartbeat=now(),
-		       state = CASE
+		       state = (CASE
 		           WHEN state = 'draining' THEN 'draining'
 		           WHEN state = 'retired' THEN 'retired'
 		           ELSE 'ready'
-		       END
+		       END)::node_state
 		WHERE id=$1 AND state <> 'retired'
 	`, nodeID)
 	if err != nil {

@@ -63,6 +63,48 @@ func TestRegisterNodeIssuesTokenOnce(t *testing.T) {
 	}
 }
 
+// Heartbeat had no coverage at all and shipped broken: its CASE resolved to
+// text, which Postgres refuses to assign to the node_state enum, so every
+// heartbeat 500'd. The agent path hid it behind an earlier 401.
+func TestHeartbeatKeepsNodeReady(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	n := newNode(t, st, org.ID)
+
+	if err := st.Heartbeat(testCtx(t), n.ID, HeartbeatParams{}); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	ready, err := st.ListReadyNodes(testCtx(t), org.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != n.ID {
+		t.Fatalf("expected the heartbeating node to be ready, got %+v", ready)
+	}
+}
+
+// The state machine the CASE exists to protect: a heartbeat proves liveness
+// and must not un-drain a node the operator deliberately drained.
+func TestHeartbeatDoesNotUndrainNode(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	n := newNode(t, st, org.ID)
+
+	if err := st.DrainNode(testCtx(t), n.ID); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if err := st.Heartbeat(testCtx(t), n.ID, HeartbeatParams{}); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	ready, err := st.ListReadyNodes(testCtx(t), org.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(ready) != 0 {
+		t.Fatalf("heartbeat must not un-drain a node, got %+v", ready)
+	}
+}
+
 func TestDrainNodeLeavesReadyPool(t *testing.T) {
 	st := testStore(t)
 	org := newOrg(t, st)
