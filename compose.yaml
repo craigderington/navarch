@@ -71,8 +71,12 @@ services:
       - traefik-dynamic:/dynamic
 
   # Traefik routes the env hostname to the live revision's ingress container.
-  # It watches the file-provider dir the control plane writes, and sits on the
-  # external cc-ingress network the agent attaches ingress containers to.
+  # It watches the file-provider dir the control plane writes, and the agent
+  # attaches it to each revision network so it can reach that revision's
+  # ingress container by name. The movement is deliberately one-way — the
+  # router joins the tenant's network, the tenant never joins a shared one —
+  # so two fleets have no network in common. The agent finds this container by
+  # its cc.role label below.
   traefik:
     image: traefik:v3.3
     command:
@@ -122,12 +126,6 @@ services:
       # Identity must persist across restarts — a fresh keypair each boot
       # would make every existing secret's ciphertext undecryptable.
       - age-identity:/identity
-
-# cc-ingress is created by `make up` before compose comes up (external), so both
-# Traefik and the agent-created ingress containers can share it.
-networks:
-  cc-ingress:
-    external: true
 
 volumes:
   pgdata:

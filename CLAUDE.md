@@ -478,6 +478,18 @@ these, so don't drift them): swappable container
 named volume `cc-{env8}-{volume}`. Labels: `cc.env`, `cc.deployment`,
 `cc.service`, `cc.swappable`. `env8` = `store.shortID(environmentID)`.
 
+**The router joins the tenant's network; the tenant never joins a shared one.**
+Traefik reaches a revision's ingress container because the agent attaches the
+*router* to that revision network (`AttachRouterToNetwork`, locating the
+container by its `cc.role=ingress-router` label). The Sprint 2 plan in
+`docs/superpowers/` specifies the opposite — a shared external `cc-ingress`
+network that every ingress container joins — and that plan is history, not the
+design: a shared mesh puts two tenants' ingress containers on one network with
+working DNS between them. The `cc-ingress` network was removed once nothing
+referenced it; don't reintroduce it from the plan. The cost of this direction is
+that the router holds an endpoint on every revision network, which is why
+`RemoveEnv` must disconnect unmanaged containers before removing one.
+
 **An empty router config is a file with no `http` section — never an empty
 one.** Traefik's parser refuses an element with no children, so `routers: {}`
 fails the *whole* file with `routers cannot be a standalone element`, and
@@ -676,7 +688,8 @@ unit tests ran green against all three bugs.
   obsolete labelled networks, and removes those networks. It remembers envs
   seen on the prior tick so a failed first rollout can still be cleaned after
   its desired rows disappear; cleanup failures retain that memory and retry.
-  The shared `cc-ingress` network has no `cc.env` label and is never eligible.
+  Only `cc.env`-labelled networks are ever eligible, which is what keeps the
+  sweep off anything the platform did not create.
 - Loop integration tests are organization-scoped so parallel `go test`
   package binaries sharing one Postgres database cannot schedule, advance, or
   reap one another's fixtures. Production constructors retain the global scan;

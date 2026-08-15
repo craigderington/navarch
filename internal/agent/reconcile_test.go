@@ -245,10 +245,15 @@ func TestReconcileAttachesRouterToRevisionNetwork(t *testing.T) {
 	if len(f.routerNets) != 1 || f.routerNets[0] != d.ProjectName {
 		t.Fatalf("router must join the revision network, got %v", f.routerNets)
 	}
-	for _, a := range f.attached {
-		if strings.HasSuffix(a, "->cc-ingress") {
-			t.Fatalf("tenant ingress must not join cc-ingress, got attaches=%v", f.attached)
-		}
+	// Traffic reaches a tenant by moving the router onto the tenant's network,
+	// never by moving the tenant onto a shared one. A swappable ingress is
+	// created on its revision network and must be attached to nothing further:
+	// asserting on the absence of *any* extra attachment states that property
+	// directly. This used to name the shared `cc-ingress` network the Sprint 2
+	// plan called for, which meant it stopped guarding anything the moment that
+	// network was removed.
+	if len(f.attached) != 0 {
+		t.Fatalf("a swappable ingress must join no network beyond its revision's, got attaches=%v", f.attached)
 	}
 }
 
