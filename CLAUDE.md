@@ -90,18 +90,63 @@ the abstraction is wrong — raise it rather than routing around it.
 
 ## The core concept: swappable vs pinned
 
-Blue/green runs two copies of a stack simultaneously. Services holding
-durable state **cannot** be duplicated — two Postgres processes on one
-volume corrupt it. So the parser classifies every service:
+Blue/green runs two copies of a stack simultaneously. Some services must not
+be duplicated. **Every service declares which it is** — the platform does not
+infer it:
 
-| Classification | Trigger | Rollout behavior |
+```yaml
+x-composectl:
+  rollout: swap   # duplicated blue/green
+  # rollout: pin  # one instance, attached to every revision's network
+```
+
+| Classification | Declared | Rollout behavior |
 |---|---|---|
-| **swappable** | no writable named volume | duplicated blue/green |
-| **pinned** | mounts a writable named volume | runs once, shared across revisions |
+| **swappable** | `rollout: swap` | duplicated blue/green |
+| **pinned** | `rollout: pin` | runs once, shared across revisions |
 
-Read-only volume mounts stay swappable. This single bit drives rollout
-behavior, node pinning, and `PeakMemoryBytes()` (swappable counted twice,
-pinned once).
+**Omitting it is a parse error.** There is no default, deliberately: the
+author who does not realise blue/green changes cardinality is exactly the one
+an optional field fails to protect.
+
+The declaration drives rollout behavior, node pinning, and
+`PeakMemoryBytes()` (swappable counted twice, pinned once).
+
+**The volume rule survives as a constraint, not a definition.** `rollout:
+swap` on a service mounting a *writable* named volume is rejected — two
+revisions writing one filesystem is the failure the classification exists to
+prevent, and it is the one thing an author may not declare their way into.
+Read-only mounts are exempt and may be `swap`. A pinned ingress is still
+rejected; it could not participate in blue/green.
+
+### Why it is declared rather than inferred
+
+It used to be inferred: writable named volume → pinned, else swappable. That
+computed the wrong property. A writable volume answers *"would two writers
+corrupt this filesystem?"*; blue/green needs *"may this run twice?"*. They
+coincide for Postgres, which is why the conflation held for two sprints.
+
+They come apart at the **effect-singleton**: a scheduler, cron runner,
+migration step or broker that owns no local state but whose correctness
+assumes one instance. It mounts nothing, so the old rule called it swappable
+and ran two copies against the shared pinned database — every periodic task
+firing twice, external side effects included, while the rollout reported
+success. Nothing in a compose file distinguishes that from a stateless
+worker.
+
+The sharpest case is the broker. A Redis run correctly as `--save ""
+--appendonly no` mounts nothing, so it was duplicated — and since swappable
+containers live only on their own revision network (`reconcile.go`, pinned
+containers alone are attached to *every* revision's network), each revision
+got its own keyspace. Blue's lock and green's lock were taken in different
+Redises: both succeed, both hold "the" lock. Duplicating the stack destroyed
+the mechanism authors use to make singletons safe. `examples/webapp` carries
+this case with the reasoning inline.
+
+Note what this does **not** fix: declaring `swap` on a worker with a
+scheduler embedded in it still double-fires. The platform stops guessing;
+it does not make the author right. That is the intended trade — a wrong
+answer the author typed beats a wrong answer the platform inferred.
 
 Anything touching rollout, scheduling, or capacity must respect it.
 
@@ -474,6 +519,34 @@ request paths, compose bodies, or environment values to events or metric labels.
 - Comments explain **why**, not what. The existing comments carry real
   design rationale; match that register.
 
+## Three bugs the rollout-mode work uncovered
+
+All three sat on the agent↔control-plane path, stacked so that each hid the
+next. Fixed, each with a regression test verified to fail without its fix.
+
+- **Every per-node endpoint returned 401.** `Server.ServeHTTP` authorizes
+  *before* handing off to the mux, and `r.PathValue("id")` is only populated
+  once the mux has matched a route — so it was empty, `uuid.Parse` failed, and
+  heartbeat / desired-state / report were refused unconditionally. The agent
+  could register (operator token) and do nothing else. `nodeAgentPathID` now
+  parses the id out of the path. The `internal/api` tests missed it because
+  they build a `Server` with no bearer token, which skips authorization
+  entirely — `TestNodeTokenAuthorizesAgentEndpoints` configures one.
+- **`Heartbeat` 500'd on an enum cast.** Its `CASE` is built from unknown-type
+  literals, so Postgres resolved it as `text` and refused to assign that to
+  the `node_state` column. Needs `(CASE … END)::node_state`. Same family as
+  the deployment-state enum gotchas below. `Heartbeat` had *no* test at all;
+  it has two now. Nodes never left `unreachable`, so `ListReadyNodes` stayed
+  empty and secret writes failed with "no ready node with an encryption key".
+- **Traefik never started.** `--api.disabled=true` is not a Traefik flag; v3
+  aborts with `field not found, node: disabled`. From the demo's side a router
+  that never booted is indistinguishable from a routing bug. The API is off by
+  default, so the flag is simply gone.
+
+The demo passes end to end again — rollout, auto-promote, zero-downtime flip.
+Worth noting `make demo` is the only check that exercises this path: the
+unit tests ran green against all three bugs.
+
 ## Known loose ends
 
 - **Toolchain is go 1.25** (go.mod directive + `golang:1.25-alpine` builder,
@@ -563,12 +636,20 @@ swappable), and secrets embedded mid-string.
 either number changed classification, so justify it or revert:
 
 ```
-digest            6072c68f9a252be6aec77e816a6b4c43ef96244bdb8583c1854d657a32695730
-swappable         api, cache, worker
-pinned            db
+digest            98d75411a605267292ea77e565309d6c7f60766b8c75c3ecc1e0404903b6e138
+swappable         api, worker
+pinned            cache, db
 ingress           api
-peak_memory_bytes 2415919104   # (512+256+128 MiB)*2 + 512 MiB
+peak_memory_bytes 2281701376   # (512+256 MiB)*2 + 512 + 128 MiB
 ```
+
+This baseline moved once, deliberately, when rollout mode became a declared
+field. `cache` was swappable and is now pinned: it is a Redis that api and
+worker both address as `redis://cache:6379`, and duplicating it gave each
+revision its own keyspace and its own copy of any lock taken in it. The
+previous baseline was `6072c68f…` / swappable `api, cache, worker` / pinned
+`db` / `2415919104`. Anything that moves it *again* needs its own
+justification.
 
 The digest is stable across repeated calls; if it varies run-to-run on an
 unchanged file, a new unsorted slice field has entered `DeploymentSpec`.

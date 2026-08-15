@@ -2,9 +2,16 @@
 # agent can bring it up for real. Same shape the parser classifies in
 # examples/webapp, but with real images:
 #
-#   api   -> swappable (no volume) + ingress
-#   cache -> swappable
-#   db    -> PINNED (named volume) — runs once, shared across blue/green
+#   api   -> swap (ingress)
+#   cache -> swap
+#   db    -> pin (writable volume) — runs once, shared across blue/green
+#
+# cache is swap here and pin in examples/webapp, which is not an
+# inconsistency: nothing in this stack dials it. whoami speaks to no broker,
+# so there is no coordination plane to split and each revision may hold its
+# own copy. In webapp, api and worker both address it as redis://cache:6379,
+# and a duplicated lock plane is exactly the bug that made rollout mode a
+# declared field. What the service *is* matters less than who talks to it.
 #
 # The secret ${secret:db_password} is expanded by the agent at container start
 # (dev source in Sprint 2; encrypted store in Sprint 3).
@@ -22,12 +29,15 @@ services:
       - db
       - cache
     x-composectl:
+      rollout: swap
       ingress:
         port: 80
 
   cache:
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
+    x-composectl:
+      rollout: swap
 
   db:
     image: postgres:16-alpine
@@ -37,6 +47,8 @@ services:
       POSTGRES_PASSWORD: ${secret:db_password}
     volumes:
       - dbdata:/var/lib/postgresql/data
+    x-composectl:
+      rollout: pin
 
 volumes:
   dbdata:

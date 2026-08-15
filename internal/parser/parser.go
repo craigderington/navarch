@@ -366,9 +366,12 @@ func convertService(name string, svc types.ServiceConfig) (spec.Service, Validat
 	})
 
 	// --- mounts ---------------------------------------------------------
-	// A named volume makes the service stateful, and stateful services
-	// cannot be duplicated during blue/green. This is where Swappable
-	// gets decided.
+	// A writable named volume no longer *decides* the classification — the
+	// author does, via x-composectl.rollout. It survives as a constraint:
+	// two writers on one filesystem is still refused below. Recorded here,
+	// enforced once the declaration has been read.
+
+	var hasWritableVolume bool
 
 	for _, v := range svc.Volumes {
 		switch v.Type {
@@ -398,7 +401,7 @@ func convertService(name string, svc types.ServiceConfig) (spec.Service, Validat
 				ReadOnly: v.ReadOnly,
 			})
 			if !v.ReadOnly {
-				out.Swappable = false
+				hasWritableVolume = true
 			}
 		case "tmpfs":
 			errs = append(errs, ValidationError{field("volumes"),
@@ -473,7 +476,103 @@ func convertService(name string, svc types.ServiceConfig) (spec.Service, Validat
 		out.Ingress = ing
 	}
 
+	// --- rollout mode (x-composectl extension) ---------------------------
+	// Cardinality is declared, never inferred. A writable named volume tells
+	// you two processes would corrupt a filesystem; it tells you nothing
+	// about whether running a program twice is semantically equivalent to
+	// running it once. Those are different properties, and the platform used
+	// to compute the first and act on the second.
+	//
+	// The gap was the effect-singleton: a scheduler, cron runner, migration
+	// step or broker that owns no local state but whose correctness assumes
+	// exactly one instance. It mounts nothing, so the old rule called it
+	// swappable and blue/green ran two copies against the shared pinned
+	// database — every periodic task firing twice, external side effects and
+	// all, while the rollout reported success. No compose-visible property
+	// distinguishes that service from a stateless worker, so the platform
+	// stops guessing and requires the author to say.
+	//
+	// Mandatory rather than opt-in: an optional `pin` is exactly the field
+	// forgotten by the author who has not realised blue/green changes
+	// cardinality, and that author is the one the rule exists to protect.
+	// Missing is a parse error, so there is no default to forget.
+
+	mode, declared, err := parseRolloutExtension(svc.Extensions)
+	switch {
+	case err != nil:
+		errs = append(errs, ValidationError{field("x-composectl.rollout"), err.Error()})
+	case !declared:
+		errs = append(errs, ValidationError{field("x-composectl.rollout"),
+			"rollout mode must be declared: swap (duplicated blue/green) or pin (one instance shared across revisions)"})
+	default:
+		out.Swappable = mode == RolloutSwap
+	}
+
+	// The volume rule, demoted from definition to constraint. Duplicating a
+	// service that writes a named volume puts two processes on one
+	// filesystem — the failure the classification existed to prevent, and
+	// the one thing an author may not declare their way into.
+	if declared && mode == RolloutSwap && hasWritableVolume {
+		errs = append(errs, ValidationError{field("x-composectl.rollout"),
+			"service declares rollout: swap but mounts a writable named volume; two revisions would write one filesystem"})
+	}
+
+	// Ingress must participate in blue/green or there is no zero-downtime
+	// rollout to speak of. Previously this was caught in validateGraph via
+	// the volume inference; it is a declaration conflict now, and belongs
+	// with the declaration so the error names the field the author wrote.
+	if declared && mode == RolloutPin && out.Ingress != nil {
+		errs = append(errs, ValidationError{field("x-composectl.rollout"),
+			"ingress service declares rollout: pin; it cannot participate in blue/green rollout"})
+	}
+
 	return out, errs
+}
+
+// RolloutMode is the declared cardinality of a service during a rollout.
+type RolloutMode string
+
+const (
+	// RolloutSwap duplicates the service: both revisions run their own copy,
+	// each on its own revision network.
+	RolloutSwap RolloutMode = "swap"
+	// RolloutPin runs the service once and attaches it to every revision's
+	// network, so both revisions address the same container.
+	RolloutPin RolloutMode = "pin"
+)
+
+// parseRolloutExtension reads the rollout mode from the x-composectl block:
+//
+//	x-composectl:
+//	  rollout: swap
+//
+// Returns whether it was declared at all, so a missing declaration is
+// reported as a missing declaration rather than defaulting silently.
+func parseRolloutExtension(ext types.Extensions) (RolloutMode, bool, error) {
+	rawExt, ok := ext["x-composectl"]
+	if !ok {
+		return "", false, nil
+	}
+	m, ok := rawExt.(map[string]any)
+	if !ok {
+		// parseIngressExtension reports the same malformed block; saying it
+		// twice would double every error for one typo.
+		return "", false, nil
+	}
+	raw, ok := m["rollout"]
+	if !ok {
+		return "", false, nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return "", true, fmt.Errorf("rollout must be a string: %q or %q", RolloutSwap, RolloutPin)
+	}
+	switch RolloutMode(s) {
+	case RolloutSwap, RolloutPin:
+		return RolloutMode(s), true, nil
+	default:
+		return "", true, fmt.Errorf("unknown rollout mode %q; must be %q or %q", s, RolloutSwap, RolloutPin)
+	}
 }
 
 // parseIngressExtension reads the x-composectl extension block:
@@ -549,16 +648,12 @@ func validateGraph(s *spec.DeploymentSpec) ValidationErrors {
 		})
 	}
 
-	// An ingress service holding a volume can't be blue/green swapped,
-	// which defeats zero-downtime rollout entirely. Worth failing loudly.
-	for _, name := range ingress {
-		if !s.Services[name].Swappable {
-			errs = append(errs, ValidationError{
-				Field:   "services." + name,
-				Message: "ingress service mounts a writable volume; it cannot participate in blue/green rollout",
-			})
-		}
-	}
+	// The ingress-may-not-be-pinned rule lives in convertService now. It used
+	// to be checked here because pinning was inferred from a volume and only
+	// the assembled spec knew the answer; it is a declared field today, so
+	// the error can name x-composectl.rollout on the offending service
+	// instead of pointing at the service generically. Checking it in both
+	// places would report one mistake twice.
 
 	return errs
 }

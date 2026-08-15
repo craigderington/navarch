@@ -25,6 +25,8 @@ services:
     image: nginx:alpine
     environment:
       DB: postgres://app:${secret:db_password}@db/app
+    x-composectl:
+      rollout: swap
 `
 
 // uniqSlug builds a slug that satisfies the store's lowercase-alphanumeric-

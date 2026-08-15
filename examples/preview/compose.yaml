@@ -18,6 +18,7 @@ services:
     depends_on:
       - db
     x-composectl:
+      rollout: swap
       ingress:
         port: 80
 
@@ -29,6 +30,8 @@ services:
       POSTGRES_PASSWORD: ${secret:name}
     volumes:
       - previewdata:/var/lib/postgresql/data
+    x-composectl:
+      rollout: pin
 
 volumes:
   previewdata:

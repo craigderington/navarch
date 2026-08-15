@@ -100,6 +100,8 @@ services:
   s:
     image: nginx
     volumes: ["data:/mnt"]
+    x-composectl:
+      rollout: pin
 volumes:
   data: {}
 `)
@@ -172,6 +174,8 @@ services:
     image: nginx
     healthcheck:
       test: ["curl", "-f", "http://localhost/"]
+    x-composectl:
+      rollout: swap
 `), "test")
 	if err == nil {
 		t.Fatal("expected compose-go's healthcheck validation to reject this")
@@ -232,6 +236,8 @@ services:
   a:
     image: nginx
     scale: 1
+    x-composectl:
+      rollout: swap
 `)
 }
 
@@ -245,9 +251,13 @@ services:
   app:
     image: nginx
     volumes: ["conf:/etc/nginx/conf.d:ro"]
+    x-composectl:
+      rollout: swap
   owner:
     image: busybox
     volumes: ["data:/data"]
+    x-composectl:
+      rollout: pin
 volumes:
   conf: {}
   data: {}
@@ -279,6 +289,8 @@ services:
     environment:
       DATABASE_URL: postgres://app:${secret:db_password}@db:5432/app
       LOG_LEVEL: info
+    x-composectl:
+      rollout: swap
 `), "test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -301,6 +313,8 @@ func TestResourceDefaultsApplied(t *testing.T) {
 services:
   a:
     image: nginx
+    x-composectl:
+      rollout: swap
 `), "test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -496,5 +510,179 @@ services: {}
 `)
 	if !hasErr(verrs, "services", "empty") {
 		t.Fatalf("expected empty services to be rejected, got: %v", verrs)
+	}
+}
+
+// --------------------------------------------------------------------
+// Rollout mode: cardinality is declared, never inferred
+// --------------------------------------------------------------------
+
+func TestRolloutModeMustBeDeclared(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+`)
+	if !hasErr(verrs, "services.a.x-composectl.rollout", "must be declared") {
+		t.Fatalf("expected a missing-rollout error, got: %v", verrs)
+	}
+}
+
+// Missing declarations are collected like every other violation, not
+// reported one service at a time across repeated deploy attempts.
+func TestEveryUndeclaredServiceIsReportedInOnePass(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+  b:
+    image: busybox
+  c:
+    image: alpine
+`)
+	for _, name := range []string{"a", "b", "c"} {
+		if !hasErr(verrs, "services."+name+".x-composectl.rollout", "must be declared") {
+			t.Fatalf("expected %s to be reported, got: %v", name, verrs)
+		}
+	}
+}
+
+func TestUnknownRolloutModeIsRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+    x-composectl:
+      rollout: singleton
+`)
+	if !hasErr(verrs, "services.a.x-composectl.rollout", `unknown rollout mode "singleton"`) {
+		t.Fatalf("expected an unknown-mode error, got: %v", verrs)
+	}
+}
+
+func TestNonStringRolloutModeIsRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+    x-composectl:
+      rollout: true
+`)
+	if !hasErr(verrs, "services.a.x-composectl.rollout", "must be a string") {
+		t.Fatalf("expected a type error, got: %v", verrs)
+	}
+}
+
+// The volume rule survives as a constraint. An author may declare their
+// cardinality but may not declare two processes onto one filesystem.
+func TestSwapWithWritableVolumeIsRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: postgres:16
+    volumes: ["data:/var/lib/postgresql/data"]
+    x-composectl:
+      rollout: swap
+volumes:
+  data: {}
+`)
+	if !hasErr(verrs, "services.a.x-composectl.rollout", "one filesystem") {
+		t.Fatalf("expected swap+volume to be refused, got: %v", verrs)
+	}
+}
+
+// Read-only mounts were always exempt from the old inference; they must stay
+// exempt from the new constraint, or a shared config volume would force its
+// consumer out of blue/green.
+func TestSwapWithReadOnlyVolumeIsAccepted(t *testing.T) {
+	got := mustParse(t, `
+services:
+  a:
+    image: nginx
+    volumes: ["conf:/etc/nginx/conf.d:ro"]
+    x-composectl:
+      rollout: swap
+  owner:
+    image: busybox
+    volumes: ["conf2:/data"]
+    x-composectl:
+      rollout: pin
+volumes:
+  conf: {}
+  conf2: {}
+`)
+	if swappable := got.SwappableServices(); len(swappable) != 1 || swappable[0] != "a" {
+		t.Fatalf("read-only mount must not block swap, got swappable=%v", swappable)
+	}
+}
+
+// The point of the whole change: a service with no storage at all can now be
+// declared pinned. Under the old rule this was unexpressible — a scheduler,
+// cron runner or broker mounted nothing, so it was duplicated during every
+// rollout no matter what its author intended.
+func TestVolumelessServiceCanBeDeclaredPinned(t *testing.T) {
+	got := mustParse(t, `
+services:
+  api:
+    image: nginx
+    x-composectl:
+      rollout: swap
+      ingress:
+        port: 80
+  beat:
+    image: acme/scheduler
+    command: ["celery", "beat"]
+    x-composectl:
+      rollout: pin
+`)
+	pinned := got.PinnedServices()
+	if len(pinned) != 1 || pinned[0] != "beat" {
+		t.Fatalf("expected beat to be pinned with no volume, got pinned=%v", pinned)
+	}
+	// Cardinality drives capacity: a pinned service is counted once.
+	want := int64(DefaultMemoryBytes * 3) // api twice, beat once
+	if got := got.PeakMemoryBytes(); got != want {
+		t.Fatalf("peak memory %d, want %d", got, want)
+	}
+}
+
+func TestPinnedIngressIsRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  api:
+    image: nginx
+    x-composectl:
+      rollout: pin
+      ingress:
+        port: 80
+`)
+	if !hasErr(verrs, "services.api.x-composectl.rollout", "cannot participate in blue/green") {
+		t.Fatalf("expected a pinned-ingress rejection, got: %v", verrs)
+	}
+}
+
+// One mistake, one error. The rule used to live in validateGraph as well,
+// and checking it in both places reported a pinned ingress twice.
+func TestPinnedIngressIsReportedOnce(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  api:
+    image: nginx
+    volumes: ["data:/data"]
+    x-composectl:
+      rollout: pin
+      ingress:
+        port: 80
+volumes:
+  data: {}
+`)
+	var n int
+	for _, ve := range verrs {
+		if strings.Contains(ve.Message, "cannot participate in blue/green") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("expected exactly one pinned-ingress error, got %d: %v", n, verrs)
 	}
 }

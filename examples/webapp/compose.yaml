@@ -1,11 +1,29 @@
 # Example stack demonstrating how the parser classifies services.
 #
-#   api    -> swappable (no volumes) + ingress
-#   worker -> swappable
-#   db     -> PINNED (named volume) — runs once, shared across blue/green
-#   cache  -> swappable (tmpfs only)
+# Every service declares x-composectl.rollout; omitting it is a parse error.
+# The platform no longer infers cardinality from storage, because a writable
+# volume answers "would two writers corrupt this filesystem?" and blue/green
+# needs "may this run twice?" — related questions, different answers.
 #
-# Peak rollout memory = (api + worker + cache) * 2 + db
+#   api    -> swap (ingress; the thing blue/green exists for)
+#   worker -> swap (queue consumers are designed to run N-up...)
+#   cache  -> pin  (...but only against ONE broker — see below)
+#   db     -> pin  (writable volume; swap here is refused outright)
+#
+# cache is the interesting one, and the reason this example exists. It mounts
+# nothing — the author correctly disabled persistence, because a broker should
+# not persist — so the old volume-based rule called it swappable and gave each
+# revision its own copy. Two Redises means two keyspaces: blue's worker takes
+# a lock in one, green's worker takes the SAME lock in the other, both succeed,
+# both believe they are the leader, and every periodic task fires twice against
+# the one shared db. Declaring pin gives the stack a single coordination plane,
+# which is what makes swap correct for worker.
+#
+# The cost is real and worth stating: a pinned service is adopted across
+# revisions by stable name, so changing cache's image needs a recreate
+# workflow rather than a rollout. That is the same deal db has always had.
+#
+# Peak rollout memory = (api + worker) * 2 + cache + db
 
 services:
   api:
@@ -29,6 +47,7 @@ services:
           cpus: "0.5"
           memory: 512M
     x-composectl:
+      rollout: swap
       ingress:
         port: 8080
         path: /
@@ -47,6 +66,8 @@ services:
         limits:
           cpus: "0.25"
           memory: 256M
+    x-composectl:
+      rollout: swap
 
   db:
     image: postgres:16-alpine
@@ -66,6 +87,8 @@ services:
         limits:
           cpus: "0.5"
           memory: 512M
+    x-composectl:
+      rollout: pin
 
   cache:
     image: redis:7-alpine
@@ -75,6 +98,8 @@ services:
         limits:
           cpus: "0.1"
           memory: 128M
+    x-composectl:
+      rollout: pin
 
 volumes:
   dbdata:
