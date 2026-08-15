@@ -150,10 +150,12 @@ func (e env) resolveEnv(ctx context.Context, ref string) (string, error) {
 	return "", fmt.Errorf("no environment %q in stack %q", segs[3], strings.Join(segs[:3], "/"))
 }
 
-// Nodes are addressed by hostname rather than a slug, and hostname carries no
-// uniqueness constraint in the schema — two nodes may legitimately share one.
-// An ambiguous reference is therefore an error naming the candidates, never a
-// silent pick: draining the wrong node is not a mistake worth guessing into.
+// Nodes are addressed by hostname rather than a slug. The schema makes that
+// unambiguous within an org — nodes carries UNIQUE (org_id, hostname), and this
+// resolves the org first — so the duplicate branch below should be unreachable.
+// It is kept because the resolver's input is an API response rather than the
+// table: if two ever arrive, naming them beats picking one, since the operation
+// on the other side of this is `node drain`.
 func (e env) resolveNode(ctx context.Context, ref string) (string, error) {
 	if isID(ref) {
 		return ref, nil

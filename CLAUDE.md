@@ -78,9 +78,10 @@ load-bearing:
 
 Wrong-depth paths are usage errors (exit 2) naming the expected shape; a
 resolution miss is a runtime error (exit 1) naming what was not found and where.
-Node hostnames carry no uniqueness constraint, so an ambiguous one errors with
-the candidates rather than picking — draining the wrong node is not worth a
-guess. Deployments are id-only: they have revisions, not slugs.
+An ambiguous node hostname errors with the candidates rather than picking, but
+that branch should be unreachable: `nodes` carries `UNIQUE (org_id, hostname)`
+and the resolver scopes to one org. Deployments are id-only: they have
+revisions, not slugs.
 
 ---
 
@@ -311,12 +312,16 @@ pr-1-main-93fa144e.preview.localhost
 ```
 
 `env8` is load-bearing, not decoration. `stacks.slug` is only
-`UNIQUE (app_id, slug)` and `environments.hostname` has no unique constraint,
-so `{slug}-{stack}` alone collides between two apps — same org or different
-ones — that each own a stack `main` with a preview `pr-1`. `ListLiveRoutes`
-returns both, Traefik gets two routers with the same `Host` rule, and the
-winner is arbitrary: a cross-tenant misroute into someone else's branch with
-its inherited secrets. `env8` comes from the environment's own UUID, so it is
+`UNIQUE (app_id, slug)`, so `{slug}-{stack}` alone collides between two apps —
+same org or different ones — that each own a stack `main` with a preview
+`pr-1`. Two defences now stand behind that, and they are not interchangeable:
+`0006_unique_hostname` adds a partial unique index on `environments (hostname)`,
+which turns a collision into a 409 at create time rather than a misroute; `env8`
+prevents the collision arising at all, so an ordinary preview never sees that
+409. Without the index, the older failure was silent — `ListLiveRoutes` returns
+both, Traefik gets two routers with the same `Host` rule, and the winner is
+arbitrary: a cross-tenant misroute into someone else's branch with its inherited
+secrets. `env8` comes from the environment's own UUID, so it is
 unique by construction — which is also why `handleCreatePreview` generates
 that UUID itself and inserts it explicitly rather than letting the column
 default win. The generated left-most label must be ≤63 characters, checked
