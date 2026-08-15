@@ -2,6 +2,7 @@ package dockerd
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -348,5 +349,133 @@ func TestRemoveEnvDisconnectsUnmanagedContainersFromEnvNetworks(t *testing.T) {
 	// tombstone authorises destroying its own environment, nothing else.
 	if _, err := d.cli.ContainerInspect(ctx, routerID); err != nil {
 		t.Errorf("the unmanaged router must survive teardown: %v", err)
+	}
+}
+
+// A superseded revision's network keeps a router endpoint: the agent attached
+// the router while that revision was live and nothing detaches it when the
+// revision is torn down. The router carries no cc.env label, so the
+// unmanaged-container guard used to refuse the prune outright and the network
+// survived for the life of the environment — one per revision, each holding an
+// address block, until the pool ran out and rollouts could no longer create a
+// network. Verified non-vacuous: without the isIngressRouter exemption this
+// fails with "refusing to prune network ...: unmanaged container ... attached".
+func TestPruneRevisionNetworksDisconnectsTheIngressRouter(t *testing.T) {
+	d := testDriver(t)
+	ctx := context.Background()
+	env8 := "test" + uuid.NewString()[:4]
+	labels := map[string]string{"cc.env": env8}
+	oldNet := "cc-" + env8 + "-r1-blue"   // superseded — must be pruned
+	liveNet := "cc-" + env8 + "-r2-green" // still desired — must survive
+
+	var routerID string
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if routerID != "" {
+			_ = d.StopRemove(cctx, routerID)
+		}
+		_ = d.RemoveEnv(cctx, env8)
+	})
+
+	for _, n := range []string{oldNet, liveNet} {
+		if _, err := d.EnsureNetwork(ctx, n, labels); err != nil {
+			t.Fatalf("EnsureNetwork %s: %v", n, err)
+		}
+	}
+	if _, err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
+	}
+	id, _, err := d.EnsureContainer(ctx, ContainerSpec{
+		Name: "router-" + env8, Image: "busybox:latest",
+		Cmd:         []string{"sh", "-c", "sleep 60"},
+		Labels:      map[string]string{"cc.role": "ingress-router"},
+		Network:     oldNet,
+		MemoryBytes: 64 << 20,
+	}, nil)
+	if err != nil {
+		t.Fatalf("EnsureContainer (router): %v", err)
+	}
+	routerID = id
+	// The router is on both, exactly as it is after a flip.
+	if err := d.AttachNetwork(ctx, routerID, liveNet); err != nil {
+		t.Fatalf("AttachNetwork: %v", err)
+	}
+
+	if err := d.PruneRevisionNetworks(ctx, env8, map[string]bool{liveNet: true}); err != nil {
+		t.Fatalf("prune must not be blocked by the router's own endpoint: %v", err)
+	}
+
+	nets, err := d.cli.NetworkList(ctx, network.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("label", "cc.env="+env8)),
+	})
+	if err != nil {
+		t.Fatalf("NetworkList: %v", err)
+	}
+	if len(nets) != 1 || nets[0].Name != liveNet {
+		var got []string
+		for _, n := range nets {
+			got = append(got, n.Name)
+		}
+		t.Fatalf("only the wanted network may survive, got %v", got)
+	}
+
+	// Disconnected from the obsolete network, still serving the live one.
+	ctr, err := d.cli.ContainerInspect(ctx, routerID)
+	if err != nil {
+		t.Fatalf("the router must survive a prune: %v", err)
+	}
+	if _, stillOn := ctr.NetworkSettings.Networks[oldNet]; stillOn {
+		t.Errorf("router should have been disconnected from %s", oldNet)
+	}
+	if _, onLive := ctr.NetworkSettings.Networks[liveNet]; !onLive {
+		t.Errorf("router must remain attached to the live network %s", liveNet)
+	}
+}
+
+// The exemption is for the platform's own router only. A container that is
+// neither managed for this env nor the router still blocks the prune, because
+// routine GC runs constantly and must never yank something off a network it
+// may be using — that restraint is what separates this path from RemoveEnv.
+func TestPruneRevisionNetworksStillRefusesForeignContainers(t *testing.T) {
+	d := testDriver(t)
+	ctx := context.Background()
+	env8 := "test" + uuid.NewString()[:4]
+	netName := "cc-" + env8 + "-r1-blue"
+
+	var foreignID string
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if foreignID != "" {
+			_ = d.StopRemove(cctx, foreignID)
+		}
+		_ = d.RemoveEnv(cctx, env8)
+	})
+
+	if _, err := d.EnsureNetwork(ctx, netName, map[string]string{"cc.env": env8}); err != nil {
+		t.Fatalf("EnsureNetwork: %v", err)
+	}
+	if _, err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
+	}
+	id, _, err := d.EnsureContainer(ctx, ContainerSpec{
+		Name: "foreign-" + env8, Image: "busybox:latest",
+		Cmd:         []string{"sh", "-c", "sleep 60"},
+		Labels:      map[string]string{"someone": "else"},
+		Network:     netName,
+		MemoryBytes: 64 << 20,
+	}, nil)
+	if err != nil {
+		t.Fatalf("EnsureContainer: %v", err)
+	}
+	foreignID = id
+
+	err = d.PruneRevisionNetworks(ctx, env8, map[string]bool{})
+	if err == nil {
+		t.Fatal("prune must refuse while a foreign container is attached")
+	}
+	if !strings.Contains(err.Error(), "refusing to prune") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

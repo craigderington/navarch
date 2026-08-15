@@ -684,10 +684,20 @@ unit tests ran green against all three bugs.
   echoing service with a pinned db, so an expiring preview has a pinned
   container and a named volume actually worth destroying.
 - Revision-network cleanup is agent-owned. Reconcile keeps the current desired
-  project-network set, disconnects same-environment managed containers from
-  obsolete labelled networks, and removes those networks. It remembers envs
-  seen on the prior tick so a failed first rollout can still be cleaned after
-  its desired rows disappear; cleanup failures retain that memory and retry.
+  project-network set, disconnects same-environment managed containers **and
+  the platform's own ingress router** from obsolete labelled networks, and
+  removes those networks. The router exemption is load-bearing: it holds an
+  endpoint on every revision network it ever served, carries no `cc.env` label,
+  and without it every superseded revision network survived for the life of the
+  environment — one leaked network per revision until Docker's address pool ran
+  out and rollouts could no longer create one. Disconnecting it is safe only
+  because the network is not in `wanted`: no live revision uses it, and served
+  routes resolve to containers on the live revision's network. Anything *else*
+  unmanaged still blocks the prune, which is the line between this path and
+  `RemoveEnv`. Reconcile remembers envs seen on the prior tick so a failed first
+  rollout can still be cleaned after its desired rows disappear; cleanup
+  failures retain that memory and retry, and now report their reason
+  (`EnvFailure{Env8, Op, Err}`) instead of collapsing into a boolean.
   Only `cc.env`-labelled networks are ever eligible, which is what keeps the
   sweep off anything the platform did not create.
 - Loop integration tests are organization-scoped so parallel `go test`

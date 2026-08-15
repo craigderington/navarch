@@ -106,7 +106,18 @@ func imageDigest(id string, repoDigests []string, ref string) string {
 	return ref
 }
 
-const routerLabel = "cc.role=ingress-router"
+const (
+	routerLabelKey   = "cc.role"
+	routerLabelValue = "ingress-router"
+	routerLabel      = routerLabelKey + "=" + routerLabelValue
+)
+
+// isIngressRouter reports whether a container is the platform's own router.
+// It is the one container that joins tenant networks without belonging to a
+// tenant, so every label check on a network's members has to account for it.
+func isIngressRouter(labels map[string]string) bool {
+	return labels[routerLabelKey] == routerLabelValue
+}
 
 func (d *Driver) AttachRouterToNetwork(ctx context.Context, netName string) error {
 	list, err := d.cli.ContainerList(ctx, container.ListOptions{
@@ -358,45 +369,74 @@ func (d *Driver) ListManaged(ctx context.Context, env8 string) ([]Managed, error
 }
 
 // PruneRevisionNetworks removes env-scoped networks that are no longer in the
-// desired deployment set. Pinned containers are attached to every revision
-// network, so they must be disconnected before Docker can remove an obsolete
-// network. The label check prevents this cleanup path from disconnecting an
-// unmanaged container that somehow joined a managed network.
+// desired deployment set. Two kinds of container have to come off first, and
+// they are not the same case:
+//
+//   - Pinned containers, which are attached to every revision network.
+//   - The platform's own ingress router, which the agent attached to this
+//     network while the revision was live (AttachRouterToNetwork). It carries
+//     cc.role=ingress-router and no cc.env, so a bare "is this container
+//     managed for this env" test reads it as foreign.
+//
+// That second case used to make every superseded revision network unprunable
+// for the life of the environment — one leaked network per revision, each
+// holding a router endpoint, until Docker's address pool ran out and new
+// rollouts could no longer create a network. Disconnecting the router here is
+// safe precisely because this network is not in `wanted`: no live revision uses
+// it, and the routes Traefik serves resolve to container names on the live
+// revision's network, which is in `wanted` and never touched.
+//
+// Anything else attached is genuinely unmanaged — a human, another tool — and
+// still blocks removal rather than being yanked off a network it may be using.
+// That restraint is the difference between this path and RemoveEnv, which runs
+// only on an explicit tombstone and may disconnect anything.
+//
+// Failures are collected rather than returned on the first one: a single stuck
+// network used to abort the pass and strand every other obsolete network for
+// that environment behind it.
 func (d *Driver) PruneRevisionNetworks(ctx context.Context, env8 string, wanted map[string]bool) error {
 	f := filters.NewArgs(filters.Arg("label", "cc.env="+env8))
 	nets, err := d.cli.NetworkList(ctx, network.ListOptions{Filters: f})
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for _, n := range nets {
 		if wanted[n.Name] {
 			continue
 		}
-		inspected, err := d.cli.NetworkInspect(ctx, n.ID, network.InspectOptions{})
+		if err := d.pruneNetwork(ctx, env8, n.Name, n.ID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (d *Driver) pruneNetwork(ctx context.Context, env8, name, id string) error {
+	inspected, err := d.cli.NetworkInspect(ctx, id, network.InspectOptions{})
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect network %s: %w", name, err)
+	}
+	for containerID := range inspected.Containers {
+		ctr, err := d.cli.ContainerInspect(ctx, containerID)
 		if err != nil {
 			if errdefs.IsNotFound(err) {
 				continue
 			}
-			return fmt.Errorf("inspect network %s: %w", n.Name, err)
+			return fmt.Errorf("inspect container %s on network %s: %w", containerID, name, err)
 		}
-		for containerID := range inspected.Containers {
-			ctr, err := d.cli.ContainerInspect(ctx, containerID)
-			if err != nil {
-				if errdefs.IsNotFound(err) {
-					continue
-				}
-				return fmt.Errorf("inspect container %s on network %s: %w", containerID, n.Name, err)
-			}
-			if ctr.Config.Labels["cc.env"] != env8 {
-				return fmt.Errorf("refusing to prune network %s: unmanaged container %s is attached", n.Name, containerID)
-			}
-			if err := d.cli.NetworkDisconnect(ctx, n.ID, containerID, true); err != nil && !errdefs.IsNotFound(err) {
-				return fmt.Errorf("disconnect container %s from network %s: %w", containerID, n.Name, err)
-			}
+		if ctr.Config.Labels["cc.env"] != env8 && !isIngressRouter(ctr.Config.Labels) {
+			return fmt.Errorf("refusing to prune network %s: unmanaged container %s is attached", name, containerID)
 		}
-		if err := d.cli.NetworkRemove(ctx, n.ID); err != nil && !errdefs.IsNotFound(err) {
-			return fmt.Errorf("remove network %s: %w", n.Name, err)
+		if err := d.cli.NetworkDisconnect(ctx, id, containerID, true); err != nil && !errdefs.IsNotFound(err) {
+			return fmt.Errorf("disconnect container %s from network %s: %w", containerID, name, err)
 		}
+	}
+	if err := d.cli.NetworkRemove(ctx, id); err != nil && !errdefs.IsNotFound(err) {
+		return fmt.Errorf("remove network %s: %w", name, err)
 	}
 	return nil
 }

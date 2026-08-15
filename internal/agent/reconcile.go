@@ -112,20 +112,30 @@ func NewReconciler(drv DockerDriver) *Reconciler {
 // the tornDown field — because the same tombstone is offered on every tick for
 // its whole retention window.
 //
-// The second return value is the env8s whose RemoveEnv call failed. Reconcile
-// itself is pure and carries no logger, so it cannot log the failure — the
-// caller, which does, is responsible for surfacing it. A failure is not
-// retried within this call; the tombstone stays in teardownEnvs for its full
-// retention window, so the next tick tries again regardless of whether this
-// one's failure got logged.
-// TeardownFailure is one environment whose RemoveEnv call did not succeed,
-// carrying the reason so the caller can log something actionable.
-type TeardownFailure struct {
+// The second return value carries every env-scoped operation that failed.
+// Reconcile is pure and holds no logger, so it cannot report them itself — the
+// caller, which does, is responsible for surfacing them. Nothing is retried
+// within a call: a tombstone stays in teardownEnvs for its full retention
+// window and an obsolete network is still obsolete next tick, so both are
+// reattempted regardless of whether this tick's failure got logged.
+
+// EnvFailure is one env-scoped operation that did not succeed, carrying both
+// which operation it was and why. The reason is the point: a failure reported
+// as an env8 alone is indistinguishable from a slow one and can only be
+// diagnosed by reproducing it, which is what made the router's endpoint on a
+// revision network expensive to find twice over.
+type EnvFailure struct {
 	Env8 string
+	Op   string // "teardown" | "network-cleanup"
 	Err  error
 }
 
-func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInstance, secrets map[string]dockerd.SecretSource, teardownEnvs []string) ([]Report, []TeardownFailure) {
+const (
+	opTeardown       = "teardown"
+	opNetworkCleanup = "network-cleanup"
+)
+
+func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInstance, secrets map[string]dockerd.SecretSource, teardownEnvs []string) ([]Report, []EnvFailure) {
 	reports := make([]Report, 0, len(desired))
 	wanted := map[string]bool{} // container name → desired
 	envs := map[string]bool{}
@@ -160,22 +170,31 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInsta
 	for env8 := range envs {
 		nextKnown[env8] = true
 	}
+	var failures []EnvFailure
 	for env8 := range cleanupEnvs {
 		cleanupFailed := false
+		// All three of these used to collapse into a bare boolean, so a GC that
+		// could never succeed retried every tick and reported nothing at all —
+		// the reason a router endpoint kept every superseded revision network
+		// alive went unnoticed until someone inspected Docker by hand.
+		fail := func(err error) {
+			cleanupFailed = true
+			failures = append(failures, EnvFailure{Env8: env8, Op: opNetworkCleanup, Err: err})
+		}
 		managed, err := r.drv.ListManaged(ctx, env8)
 		if err != nil {
-			cleanupFailed = true
+			fail(fmt.Errorf("list managed containers: %w", err))
 		} else {
 			for _, m := range managed {
 				if !wanted[m.Name] && m.Swappable {
 					if err := r.drv.StopRemove(ctx, m.ID); err != nil {
-						cleanupFailed = true
+						fail(fmt.Errorf("remove orphaned container %s: %w", m.Name, err))
 					}
 				}
 			}
 		}
 		if err := r.drv.PruneRevisionNetworks(ctx, env8, wantedNetworks); err != nil {
-			cleanupFailed = true
+			fail(err)
 		}
 		if cleanupFailed {
 			nextKnown[env8] = true
@@ -186,7 +205,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInsta
 	// Teardown runs last: an environment being destroyed may also appear in
 	// desired (a tick straddling the reap), and destroying it after converging
 	// costs one wasted create rather than leaving a half-removed env behind.
-	var failedTeardowns []TeardownFailure
 	for _, env8 := range teardownEnvs {
 		if r.tornDown[env8] {
 			continue
@@ -197,7 +215,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInsta
 			// with the env8 — this used to report only which environment
 			// failed, which turned a teardown that could never succeed into a
 			// warning line repeating every two seconds with no way to tell why.
-			failedTeardowns = append(failedTeardowns, TeardownFailure{Env8: env8, Err: err})
+			failures = append(failures, EnvFailure{Env8: env8, Op: opTeardown, Err: err})
 			continue
 		}
 		r.tornDown[env8] = true
@@ -218,7 +236,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInsta
 			}
 		}
 	}
-	return reports, failedTeardowns
+	return reports, failures
 }
 
 func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name string, secrets dockerd.SecretSource) Report {

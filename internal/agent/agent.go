@@ -134,13 +134,13 @@ func (c *cpClient) reconcileTick(ctx context.Context, nodeID uuid.UUID, rec *Rec
 		sources[env8] = m
 	}
 
-	reports, failedTeardowns := rec.Reconcile(ctx, desired.Instances, sources, desired.TeardownEnvs)
-	// Mirrors the secret-decrypt handling above: one environment's teardown
-	// failure (permissions, a volume still in use by something unmanaged) must
-	// not stall the tick or hide the problem — it's logged and left for the
-	// tombstone's next offer, which arrives every tick for its 24h retention.
-	for _, f := range failedTeardowns {
-		log.Warn("env teardown failed", "env", f.Env8, "err", f.Err)
+	reports, failures := rec.Reconcile(ctx, desired.Instances, sources, desired.TeardownEnvs)
+	// Mirrors the secret-decrypt handling above: one environment's failed
+	// teardown or cleanup (permissions, a volume still in use by something
+	// unmanaged) must not stall the tick or hide the problem — it is logged and
+	// left for the next tick, which reattempts both unconditionally.
+	for _, f := range failures {
+		log.Warn("env cleanup failed", "env", f.Env8, "op", f.Op, "err", f.Err)
 	}
 	if len(reports) > 0 {
 		if err := c.do(ctx, http.MethodPost, "/v1/nodes/"+nodeID.String()+"/report",

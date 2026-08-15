@@ -325,6 +325,34 @@ func TestReconcileRetriesFailedTeardownOnTheNextTick(t *testing.T) {
 	}
 }
 
+// A cleanup failure has to reach the caller with its reason attached, the same
+// as a teardown does. This one collapsed into a bare boolean: the pass retried
+// every tick and reported nothing, so a prune that could never succeed — the
+// router's endpoint on a superseded revision network — looked exactly like an
+// environment with nothing to clean.
+func TestReconcileSurfacesCleanupFailureWithReason(t *testing.T) {
+	f := &fakeDriver{
+		health:    map[string]dockerd.Health{},
+		pruneErrs: map[string]error{"env12345": errors.New("refusing to prune network")},
+	}
+	r := NewReconciler(f)
+	d := desired("api", true, dockerd.Health{})
+
+	_, failures := r.Reconcile(context.Background(), []store.DesiredInstance{d}, nil, nil)
+	if len(failures) != 1 {
+		t.Fatalf("want one failure reported, got %v", failures)
+	}
+	if failures[0].Env8 != "env12345" {
+		t.Errorf("Env8 = %q", failures[0].Env8)
+	}
+	if failures[0].Op != opNetworkCleanup {
+		t.Errorf("Op = %q, want %q", failures[0].Op, opNetworkCleanup)
+	}
+	if failures[0].Err == nil || !strings.Contains(failures[0].Err.Error(), "refusing to prune") {
+		t.Errorf("the driver's reason must survive, got %v", failures[0].Err)
+	}
+}
+
 // The skip set is bounded by what the control plane is currently offering, so
 // an env8 it has stopped offering (its tombstone swept past retention) is
 // forgotten rather than remembered for the life of the process. Re-offering it
