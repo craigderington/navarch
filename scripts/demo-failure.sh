@@ -11,10 +11,16 @@ CURL_AUTH=(-H "Authorization: Bearer $API_TOKEN")
 ORG=$(curl -sS "${CURL_AUTH[@]}" "$API/v1/orgs" | jq -r '.organizations[]|select(.slug=="dev")|.id')
 APP=$(curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/orgs/$ORG/apps" -d "{\"slug\":\"fail-$RANDOM\",\"name\":\"f\"}" | jq -r .id)
 STACK=$(curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/apps/$APP/stacks" -d "{\"slug\":\"s-$RANDOM\"}" | jq -r .id)
-printf 'services:\n  api:\n    image: ghcr.io/composectl/does-not-exist:0.0.0\n' \
-  | curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/stacks/$STACK/versions" --data-binary @- >/dev/null
-ENV=$(curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/stacks/$STACK/envs" -d '{"slug":"prod"}' | jq -r .id)
-DEP=$(curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/envs/$ENV/deployments" -d '{}' | jq -r .id)
+# Even a deliberately broken stack has to declare its rollout mode — the image
+# is what must fail here, not the parse. Asserting on .id matters more than the
+# field itself: this POST discarded its response, so when rollout became a
+# required declaration the 422 was invisible and surfaced 40 polls later as
+# "state=null", which reads like a stalled rollout rather than a stack that was
+# never created.
+printf 'services:\n  api:\n    image: ghcr.io/composectl/does-not-exist:0.0.0\n    x-composectl:\n      rollout: swap\n' \
+  | curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/stacks/$STACK/versions" --data-binary @- | jq -e .id >/dev/null
+ENV=$(curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/stacks/$STACK/envs" -d '{"slug":"prod"}' | jq -er .id)
+DEP=$(curl -sS "${CURL_AUTH[@]}" -X POST "$API/v1/envs/$ENV/deployments" -d '{}' | jq -er .id)
 
 echo "deployment $DEP — waiting for failure…"
 for _ in $(seq 1 40); do
