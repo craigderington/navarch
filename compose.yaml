@@ -80,7 +80,11 @@ services:
       - "--providers.file.directory=/dynamic"
       - "--providers.file.watch=true"
       - "--log.level=INFO"
-      - "--api.disabled=true"
+      # No --api flag: Traefik v3 leaves the API and dashboard off unless one
+      # is passed. There is no `--api.disabled`; passing it aborts startup with
+      # "failed to decode configuration from flags: field not found, node:
+      # disabled", and a Traefik that never starts looks exactly like a routing
+      # bug from the demo's side.
     depends_on:
       controlplane:
         condition: service_healthy
