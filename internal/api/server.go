@@ -83,11 +83,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) authorized(r *http.Request) bool {
 	// Agent endpoints accept only that node's token so the operator token
 	// cannot be used to pull another node's desired-state ciphertext.
-	if isNodeAgentPath(r) {
-		id, err := uuid.Parse(r.PathValue("id"))
-		if err != nil {
-			return false
-		}
+	if id, ok := nodeAgentPathID(r); ok {
 		plain := bearerToken(r)
 		if plain == "" {
 			return false
@@ -100,17 +96,43 @@ func (s *Server) authorized(r *http.Request) bool {
 	return validBearerToken(r, s.bearerToken)
 }
 
-func isNodeAgentPath(r *http.Request) bool {
+// nodeAgentPathID reports whether r targets a per-node agent endpoint, and
+// the node id it names.
+//
+// The id is parsed out of the path here rather than read from
+// r.PathValue("id"). Authorization runs in ServeHTTP, *before* the request
+// reaches the mux, and PathValue is only populated once the mux has matched
+// the request against a registered pattern — so it is empty at this point.
+// Reading it here made uuid.Parse fail on every request and returned 401 for
+// heartbeat, desired-state and report unconditionally, leaving an agent able
+// to register and do nothing else. The api tests did not catch it because
+// they construct a Server with no bearer token, which skips authorization in
+// ServeHTTP entirely.
+func nodeAgentPathID(r *http.Request) (uuid.UUID, bool) {
+	var want string
 	switch {
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/heartbeat"):
-		return true
+		want = "heartbeat"
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/desired-state"):
-		return true
+		want = "desired-state"
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/report"):
-		return true
+		want = "report"
 	default:
-		return false
+		return uuid.Nil, false
 	}
+	// /v1/nodes/{id}/{want} -> ["", "v1", "nodes", "{id}", "{want}"]
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) != 5 || parts[1] != "v1" || parts[2] != "nodes" || parts[4] != want {
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(parts[3])
+	if err != nil {
+		// A malformed id on an agent path must stay on the agent branch and
+		// fail, never fall through to the operator-token check — that would
+		// let the shared token reach a node endpoint.
+		return uuid.Nil, true
+	}
+	return id, true
 }
 
 func bearerToken(r *http.Request) string {

@@ -38,6 +38,85 @@ func testServer(t *testing.T) *Server {
 	return srv
 }
 
+// Every other test here builds a Server with no bearer token, which makes
+// ServeHTTP skip authorization entirely — so the per-node token path was
+// never exercised and shipped returning 401 for every agent request. These
+// cases configure a token deliberately.
+//
+// The failure it guards: authorization runs before the mux matches a route,
+// so r.PathValue("id") is empty there and the node id has to be parsed from
+// the path directly.
+func TestNodeTokenAuthorizesAgentEndpoints(t *testing.T) {
+	srv := testServer(t)
+	WithBearerToken("operator-token")(srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	org, err := srv.st.GetOrganizationBySlug(ctx, "dev")
+	if err != nil {
+		t.Fatalf("GetOrganizationBySlug: %v", err)
+	}
+	node, err := srv.st.RegisterNode(ctx, store.RegisterNodeParams{
+		OrgID: org.ID, Hostname: "auth-" + uuid.NewString()[:8],
+		AdvertiseAddr: "10.9.9.9", CPUMillis: 1000, MemoryBytes: 1 << 30,
+	})
+	if err != nil {
+		t.Fatalf("RegisterNode: %v", err)
+	}
+	if node.Token == "" {
+		t.Fatal("first registration must issue a plaintext node token")
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.st.Pool().Exec(c, `DELETE FROM nodes WHERE id=$1`, node.ID)
+	})
+
+	path := "/v1/nodes/" + node.ID.String() + "/desired-state"
+
+	t.Run("node token is accepted", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer "+node.Token)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for a valid node token, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	// The operator token must not reach a node endpoint: it would let anyone
+	// holding it pull another node's desired-state ciphertext.
+	t.Run("operator token is refused", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer operator-token")
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for the operator token, got %d", rec.Code)
+		}
+	})
+
+	t.Run("another node's token is refused", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/nodes/"+uuid.NewString()+"/desired-state", nil)
+		req.Header.Set("Authorization", "Bearer "+node.Token)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for a mismatched node, got %d", rec.Code)
+		}
+	})
+
+	t.Run("malformed node id is refused", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/nodes/not-a-uuid/desired-state", nil)
+		req.Header.Set("Authorization", "Bearer operator-token")
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("malformed id must not fall through to the operator token, got %d", rec.Code)
+		}
+	})
+}
+
 func TestRegisterNodeHandler(t *testing.T) {
 	srv := testServer(t)
 	body, _ := json.Marshal(map[string]any{
