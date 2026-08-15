@@ -107,6 +107,53 @@ func (s *Store) CreateStack(ctx context.Context, appID uuid.UUID, slug string) (
 	return &st, nil
 }
 
+func (s *Store) ListStacks(ctx context.Context, appID uuid.UUID) ([]Stack, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, app_id, slug, created_at
+		FROM stacks WHERE app_id=$1 ORDER BY slug
+	`, appID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := []Stack{}
+	for rows.Next() {
+		var st Stack
+		if err := rows.Scan(&st.ID, &st.AppID, &st.Slug, &st.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetApplication(ctx context.Context, id uuid.UUID) (*Application, error) {
+	var a Application
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, org_id, slug, name, created_at FROM applications WHERE id=$1
+	`, id).Scan(&a.ID, &a.OrgID, &a.Slug, &a.Name, &a.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &a, nil
+}
+
+func (s *Store) GetNode(ctx context.Context, id uuid.UUID) (*Node, error) {
+	nodes, err := s.queryNodes(ctx, `
+		SELECT id, org_id, hostname, host(advertise_addr), state,
+		       cpu_millis, memory_bytes, alloc_cpu_millis, alloc_memory_bytes,
+		       labels, COALESCE(agent_version,''), COALESCE(age_recipient,''), last_heartbeat, created_at
+		FROM nodes WHERE id=$1
+	`, id)
+	if err != nil {
+		return nil, err
+	}
+	if len(nodes) == 0 {
+		return nil, ErrNotFound
+	}
+	return &nodes[0], nil
+}
+
 // ------------------------------------------------------------- environments
 
 // CreateEnvironmentParams is the input to a new environment. Strategy and
@@ -121,6 +168,9 @@ type CreateEnvironmentParams struct {
 
 func (s *Store) CreateEnvironment(ctx context.Context, p CreateEnvironmentParams) (*Environment, error) {
 	if err := validateSlug("slug", p.Slug); err != nil {
+		return nil, err
+	}
+	if err := validateHostname(p.Hostname); err != nil {
 		return nil, err
 	}
 	if p.Strategy != "" && p.Strategy != StrategyBlueGreen {

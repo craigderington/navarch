@@ -1,5 +1,6 @@
 .DEFAULT_GOAL := help
 DB_URL ?= postgres://composectl:composectl@localhost:5473/composectl?sslmode=disable
+MIGRATION_DB_URL ?= postgres://composectl:composectl@postgres:5432/composectl?sslmode=disable
 API    ?= http://localhost:8417
 API_TOKEN ?= dev-token-change-me
 
@@ -15,6 +16,7 @@ tidy: ## Resolve module dependencies
 .PHONY: build
 build: ## Build binaries into ./bin
 	CGO_ENABLED=0 go build -o bin/controlplane ./cmd/controlplane
+	CGO_ENABLED=0 go build -o bin/composectl ./cmd/composectl
 
 .PHONY: test
 test: ## Run tests
@@ -44,11 +46,11 @@ psql: ## Open a psql shell
 
 .PHONY: migrate-up
 migrate-up: ## Apply migrations
-	docker compose run --rm migrate -path=/migrations -database="$(DB_URL)" up
+	docker compose run --rm migrate -path=/migrations -database="$(MIGRATION_DB_URL)" up
 
 .PHONY: migrate-down
 migrate-down: ## Roll back one migration
-	docker compose run --rm migrate -path=/migrations -database="$(DB_URL)" down 1
+	docker compose run --rm migrate -path=/migrations -database="$(MIGRATION_DB_URL)" down 1
 
 .PHONY: validate
 validate: ## Validate the example stack against the running API

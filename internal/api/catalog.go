@@ -127,6 +127,55 @@ func (s *Server) handleCreateStack(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, stack)
 }
 
+func (s *Server) handleListStacks(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	appID, ok := pathUUID(w, r, "app")
+	if !ok {
+		return
+	}
+	if _, err := s.st.GetApplication(ctx, appID); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	stacks, err := s.st.ListStacks(ctx, appID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"stacks": stacks})
+}
+
+func (s *Server) handleGetStack(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	id, ok := pathUUID(w, r, "stack")
+	if !ok {
+		return
+	}
+	stack, err := s.st.GetStack(ctx, id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stack)
+}
+
+func (s *Server) handleGetEnv(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	id, ok := pathUUID(w, r, "env")
+	if !ok {
+		return
+	}
+	env, err := s.st.GetEnvironment(ctx, id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, env)
+}
+
 // ------------------------------------------------------------ stack versions
 
 // handleCreateStackVersion takes the compose file as the raw request body,

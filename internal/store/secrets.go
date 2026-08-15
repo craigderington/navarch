@@ -78,6 +78,54 @@ func (s *Store) DeleteSecret(ctx context.Context, envID uuid.UUID, key string) e
 // EncryptedSecretsForNode returns the latest-version ciphertext for every env
 // with an active deployment on the node, keyed by env8. The agent decrypts these
 // locally to build a per-env secret source.
+// RecipientsForEnvironment returns age recipients that should be able to
+// open this environment's secrets: nodes already running it, or every
+// ready node in the org if nothing is placed yet.
+func (s *Store) RecipientsForEnvironment(ctx context.Context, envID uuid.UUID) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT n.age_recipient
+		FROM nodes n
+		JOIN service_instances si ON si.node_id = n.id
+		JOIN deployments d ON d.id = si.deployment_id
+		WHERE d.environment_id = $1
+		  AND d.state IN ('scheduling','starting','healthy','live')
+		  AND n.age_recipient IS NOT NULL AND n.age_recipient <> ''
+	`, envID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := []string{}
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) > 0 {
+		return out, nil
+	}
+	orgID, err := s.OrgForEnvironment(ctx, envID)
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := s.ListReadyNodes(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range nodes {
+		if n.AgeRecipient != "" {
+			out = append(out, n.AgeRecipient)
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) EncryptedSecretsForNode(ctx context.Context, nodeID uuid.UUID) (map[string][]EncryptedSecret, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT s.environment_id, s.key, s.ciphertext

@@ -14,9 +14,9 @@ import (
 var secretKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // Secret handlers. The control plane never sees plaintext at rest: a value
-// arrives here once over TLS, gets encrypted immediately to every ready
-// node's age recipient, and only the ciphertext is stored. See
-// internal/secrets for the encrypt/decrypt boundary.
+// arrives here once, is encrypted to the nodes that should open it, and
+// only the ciphertext is stored. See internal/secrets for the encrypt
+// boundary.
 
 type setSecretRequest struct {
 	Key   string `json:"key"`
@@ -41,21 +41,10 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid secret key", nil)
 		return
 	}
-	orgID, err := s.st.OrgForEnvironment(ctx, envID)
+	recipients, err := s.st.RecipientsForEnvironment(ctx, envID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
-	}
-	nodes, err := s.st.ListReadyNodes(ctx, orgID)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	var recipients []string
-	for _, n := range nodes {
-		if n.AgeRecipient != "" {
-			recipients = append(recipients, n.AgeRecipient)
-		}
 	}
 	if len(recipients) == 0 {
 		writeError(w, http.StatusUnprocessableEntity,

@@ -10,7 +10,8 @@ services:
       POSTGRES_PASSWORD: composectl
       POSTGRES_DB: composectl
     ports:
-      - "5473:5432"
+      # Loopback only: tenant containers must not hairpin to the control DB.
+      - "127.0.0.1:5473:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -52,7 +53,8 @@ services:
     volumes:
       - traefik-dynamic:/dynamic
     ports:
-      - "8417:8417"
+      # Loopback only: the shared dev token must not be reachable from fleets.
+      - "127.0.0.1:8417:8417"
     healthcheck:
       test: ["CMD", "/composectl-controlplane", "-healthcheck"]
       interval: 10s
@@ -64,7 +66,7 @@ services:
   # volume; this one-shot makes /dynamic writable before it starts.
   traefik-init:
     image: busybox
-    command: ["sh", "-c", "mkdir -p /dynamic && chmod 777 /dynamic"]
+    command: ["sh", "-c", "mkdir -p /dynamic && chown 65532:65532 /dynamic && chmod 700 /dynamic"]
     volumes:
       - traefik-dynamic:/dynamic
 
@@ -77,19 +79,20 @@ services:
       - "--entryPoints.web.address=:80"
       - "--providers.file.directory=/dynamic"
       - "--providers.file.watch=true"
-      - "--api.insecure=true"
       - "--log.level=INFO"
+      - "--api.disabled=true"
     depends_on:
       controlplane:
         condition: service_healthy
     ports:
-      - "8095:80"
-      - "8096:8080"
+      # Loopback only. The dashboard/API is disabled; do not publish :8080.
+      - "127.0.0.1:8095:80"
+    labels:
+      cc.role: ingress-router
     volumes:
       - traefik-dynamic:/dynamic:ro
     networks:
       - default
-      - cc-ingress
 
   # Node agent: reconciles the host Docker daemon to the control plane's desired
   # state. It creates sibling containers on the host daemon via the mounted
@@ -109,6 +112,7 @@ services:
       COMPOSECTL_NODE_HOSTNAME: dev-node-1
       COMPOSECTL_AGENT_TOKEN: dev-token-change-me
       COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
+      COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Identity must persist across restarts — a fresh keypair each boot

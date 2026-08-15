@@ -311,3 +311,190 @@ services:
 			DefaultCPUMillis, DefaultMemoryBytes, lim.CPUMillis, lim.MemoryBytes)
 	}
 }
+
+// --------------------------------------------------------------------
+// Isolation contract: reject loudly, and never read the control-plane disk
+// --------------------------------------------------------------------
+
+func TestIncludeIsRejectedWithoutReadingTheFile(t *testing.T) {
+	const marker = "/composectl-must-not-read-this-include.yaml"
+	verrs := parseErrs(t, `
+include:
+  - `+marker+`
+services:
+  a:
+    image: nginx
+`)
+	if !hasErr(verrs, "include", "not supported") {
+		t.Fatalf("expected include to be rejected, got: %v", verrs)
+	}
+	for _, ve := range verrs {
+		if strings.Contains(ve.Message, marker) && strings.Contains(strings.ToLower(ve.Message), "no such file") {
+			t.Fatalf("loader read the include path: %v", verrs)
+		}
+	}
+}
+
+func TestExtendsFileIsRejectedWithoutReadingTheFile(t *testing.T) {
+	const marker = "/composectl-must-not-read-this-extends.yaml"
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+    extends:
+      file: `+marker+`
+      service: base
+`)
+	if !hasErr(verrs, "services.a.extends", "not supported") {
+		t.Fatalf("expected extends to be rejected, got: %v", verrs)
+	}
+	for _, ve := range verrs {
+		if strings.Contains(ve.Message, "no such file") {
+			t.Fatalf("loader read the extends file: %v", verrs)
+		}
+	}
+}
+
+func TestEnvFileIsRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+    env_file: /etc/passwd
+`)
+	if !hasErr(verrs, "services.a.env_file", "not supported") {
+		t.Fatalf("expected env_file to be rejected, got: %v", verrs)
+	}
+}
+
+func TestLabelFileIsRejectedWithoutReadingTheFile(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+    label_file: /etc/passwd
+`)
+	if !hasErr(verrs, "services.a.label_file", "not supported") {
+		t.Fatalf("expected label_file to be rejected, got: %v", verrs)
+	}
+}
+
+func TestPidHostIsRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+    pid: host
+`)
+	if !hasErr(verrs, "services.a.pid", "not permitted") {
+		t.Fatalf("expected pid: host to be rejected, got: %v", verrs)
+	}
+}
+
+func TestDevicesAreRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+    devices:
+      - /dev/sda:/dev/sda
+`)
+	if !hasErr(verrs, "services.a.devices", "not permitted") {
+		t.Fatalf("expected devices to be rejected, got: %v", verrs)
+	}
+}
+
+func TestTmpfsMountIsRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+    volumes:
+      - type: tmpfs
+        target: /tmp
+`)
+	if !hasErr(verrs, "services.a.volumes", "tmpfs") {
+		t.Fatalf("expected tmpfs mount to be rejected, got: %v", verrs)
+	}
+}
+
+func TestCapDropIsRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+    cap_drop: [ALL]
+`)
+	if !hasErr(verrs, "services.a.cap_drop", "not permitted") {
+		t.Fatalf("expected cap_drop to be rejected, got: %v", verrs)
+	}
+}
+
+func TestExtraHostsAreRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+    extra_hosts:
+      - "db:1.2.3.4"
+`)
+	if !hasErr(verrs, "services.a.extra_hosts", "not permitted") {
+		t.Fatalf("expected extra_hosts to be rejected, got: %v", verrs)
+	}
+}
+
+func TestProfilesAreRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+    profiles: [debug]
+`)
+	if !hasErr(verrs, "services.a.profiles", "not supported") {
+		t.Fatalf("expected profiles to be rejected, got: %v", verrs)
+	}
+}
+
+func TestVolumeDriverOptsAreRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  a:
+    image: nginx
+    volumes: ["data:/data"]
+volumes:
+  data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /etc
+`)
+	if !hasErr(verrs, "volumes.data", "driver_opts") {
+		t.Fatalf("expected volume driver_opts to be rejected, got: %v", verrs)
+	}
+}
+
+func TestDependsOnHealthyIsRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services:
+  db:
+    image: postgres
+  api:
+    image: nginx
+    depends_on:
+      db:
+        condition: service_healthy
+`)
+	if !hasErr(verrs, "services.api.depends_on", "condition") {
+		t.Fatalf("expected service_healthy depends_on to be rejected, got: %v", verrs)
+	}
+}
+
+func TestEmptyServicesIsRejected(t *testing.T) {
+	verrs := parseErrs(t, `
+services: {}
+`)
+	if !hasErr(verrs, "services", "empty") {
+		t.Fatalf("expected empty services to be rejected, got: %v", verrs)
+	}
+}

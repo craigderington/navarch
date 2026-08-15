@@ -26,7 +26,9 @@ The single-node platform loop is implemented end to end:
 Only `blue_green` is currently supported. Requests for `rolling` or `recreate`
 are rejected rather than silently receiving different behavior. The current
 security model is a single shared token and is suitable for trusted development
-deployments, not a public multi-tenant control plane.
+deployments, not a public multi-tenant control plane. The compose file binds
+Postgres, the API, and Traefik to loopback so fleet containers cannot hairpin
+to the control plane. Traefik's insecure API is disabled.
 
 ## Quickstart
 
@@ -46,6 +48,27 @@ make demo-secrets  # encrypted storage and agent-side secret injection
 make demo-preview  # preview creation, routing, expiry, and full teardown
 make test          # race-enabled Go test suite
 ```
+
+## CLI
+
+`composectl` is the operator client. It speaks the same bearer token as the
+API and prints tables by default (`--output json` for scripts).
+
+```bash
+make build                 # writes bin/composectl
+export COMPOSECTL_URL=http://localhost:8417
+export COMPOSECTL_TOKEN=dev-token-change-me
+
+composectl health
+composectl validate examples/hello/compose.yaml
+composectl org list
+composectl stack push <stack-id> examples/hello/compose.yaml
+composectl deploy --env <env-id>
+composectl events --org <org-id>
+```
+
+Config file (optional): `~/.config/composectl/config.yaml` with `url` and `token`.
+Flags override the environment; the environment overrides the file.
 
 Direct API requests require a bearer token:
 
@@ -105,14 +128,19 @@ its author expects. Important rejected directives include:
 | Directive | Reason |
 |---|---|
 | `build:` | images must be built and pushed before deployment |
-| `privileged`, `cap_add` | breaks the current isolation contract |
+| `include`, `extends`, `env_file`, `label_file` | control plane must not read tenant-supplied paths |
+| `privileged`, `cap_add`, `cap_drop` | breaks the current isolation contract |
+| `pid`/`ipc`/`uts`/`userns_mode`, `devices`, `security_opt`, `sysctls`, `runtime` | host-namespace or device escape |
 | `container_name` | collides between revisions |
 | published host ports | collide during blue/green; use `x-composectl.ingress` |
-| bind or anonymous mounts | state is not portable or safely tracked |
+| bind, tmpfs, or anonymous mounts | state is not portable or safely tracked |
+| volume `driver_opts` / non-local drivers | bind-via-volume host-path escape |
 | writable volume shared by services | unsupported ownership semantics |
 | non-default `network_mode` | revisions receive isolated networks |
 | replicas or scale greater than one | scaling is not implemented yet |
+| `depends_on` condition other than `service_started` | start order is honoured; health-wait is not |
 | cyclic or missing `depends_on` targets | invalid service graph |
+| `profiles` | would silently omit services |
 | pinned ingress service | cannot participate in traffic switching |
 
 Validation collects all violations in one pass. Defaults are 250 millicpu and

@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"time"
@@ -16,6 +17,7 @@ import (
 // binary links the SDK.
 func LoadConfig() (Config, error) {
 	host, _ := os.Hostname()
+	identity := envOr("COMPOSECTL_AGE_IDENTITY_FILE", "/identity/age.key")
 	cfg := Config{
 		ControlPlaneURL: envOr("COMPOSECTL_CONTROLPLANE_URL", "http://controlplane:8417"),
 		Org:             envOr("COMPOSECTL_ORG", "dev"),
@@ -26,7 +28,8 @@ func LoadConfig() (Config, error) {
 		CPUMillis:       intEnv("COMPOSECTL_NODE_CPU_MILLIS", runtime.NumCPU()*1000),
 		MemoryBytes:     int64(intEnv("COMPOSECTL_NODE_MEMORY_MB", 8192)) << 20,
 		PollInterval:    time.Duration(intEnv("COMPOSECTL_POLL_SECONDS", 2)) * time.Second,
-		IdentityFile:    envOr("COMPOSECTL_AGE_IDENTITY_FILE", "/identity/age.key"),
+		IdentityFile:    identity,
+		NodeTokenFile:   envOr("COMPOSECTL_NODE_TOKEN_FILE", filepath.Join(filepath.Dir(identity), "node.token")),
 	}
 	if cfg.ControlPlaneURL == "" {
 		return Config{}, fmt.Errorf("COMPOSECTL_CONTROLPLANE_URL is required")

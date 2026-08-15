@@ -73,19 +73,52 @@ type ContainerSpec struct {
 	MemoryBytes int64
 }
 
-func (d *Driver) EnsureImage(ctx context.Context, ref string) error {
+func (d *Driver) EnsureImage(ctx context.Context, ref string) (string, error) {
 	// Pull only when absent — an image already present (common in dev) skips
 	// the network round-trip. ImageInspectWithRaw is the form stable across
 	// SDK versions (three returns: inspect, raw JSON, err).
-	if _, _, err := d.cli.ImageInspectWithRaw(ctx, ref); err == nil {
-		return nil
-	}
-	rc, err := d.cli.ImagePull(ctx, ref, image.PullOptions{})
+	inspected, _, err := d.cli.ImageInspectWithRaw(ctx, ref)
 	if err != nil {
-		return fmt.Errorf("pull %s: %w", ref, err)
+		rc, pullErr := d.cli.ImagePull(ctx, ref, image.PullOptions{})
+		if pullErr != nil {
+			return "", fmt.Errorf("pull %s: %w", ref, pullErr)
+		}
+		defer rc.Close()
+		_, _ = io.Copy(io.Discard, rc) // draining the stream is what blocks until done
+		inspected, _, err = d.cli.ImageInspectWithRaw(ctx, ref)
+		if err != nil {
+			return "", fmt.Errorf("inspect %s: %w", ref, err)
+		}
 	}
-	defer rc.Close()
-	_, _ = io.Copy(io.Discard, rc) // draining the stream is what blocks until done
+	return imageDigest(inspected.ID, inspected.RepoDigests, ref), nil
+}
+
+func imageDigest(id string, repoDigests []string, ref string) string {
+	for _, d := range repoDigests {
+		if strings.Contains(d, "@sha256:") {
+			return d
+		}
+	}
+	if strings.HasPrefix(id, "sha256:") {
+		return id
+	}
+	return ref
+}
+
+const routerLabel = "cc.role=ingress-router"
+
+func (d *Driver) AttachRouterToNetwork(ctx context.Context, netName string) error {
+	list, err := d.cli.ContainerList(ctx, container.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("label", routerLabel)),
+	})
+	if err != nil {
+		return fmt.Errorf("list ingress routers: %w", err)
+	}
+	for _, c := range list {
+		if err := d.AttachNetwork(ctx, c.ID, netName); err != nil {
+			return fmt.Errorf("attach router %s to %s: %w", c.ID, netName, err)
+		}
+	}
 	return nil
 }
 
@@ -204,9 +237,14 @@ func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets 
 		Binds:         binds,
 		RestartPolicy: restartPolicy(cs.Restart),
 		Resources: container.Resources{
-			NanoCPUs: int64(cs.CPUMillis) * 1_000_000, // millicpu → nanocpu
-			Memory:   cs.MemoryBytes,
+			NanoCPUs:   int64(cs.CPUMillis) * 1_000_000, // millicpu → nanocpu
+			Memory:     cs.MemoryBytes,
+			MemorySwap: cs.MemoryBytes, // no extra swap beyond the memory cap
+			PidsLimit:  int64Ptr(256),
 		},
+		SecurityOpt: []string{"no-new-privileges:true"},
+		CapDrop:     []string{"ALL"},
+		CapAdd:      []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "NET_BIND_SERVICE", "SETFCAP", "SETGID", "SETPCAP", "SETUID"},
 	}
 
 	var netCfg *network.NetworkingConfig
@@ -463,6 +501,8 @@ func (d *Driver) resolveEnv(env, secretEnv map[string]string, secrets SecretSour
 }
 
 func durationSecs(sec int) time.Duration { return time.Duration(sec) * time.Second }
+
+func int64Ptr(n int64) *int64 { return &n }
 
 func restartPolicy(mode string) container.RestartPolicy {
 	switch mode {

@@ -52,13 +52,25 @@ func (s *Store) CreateStackVersion(ctx context.Context, stackID uuid.UUID, raw s
 }
 
 func (s *Store) GetStackVersion(ctx context.Context, id uuid.UUID) (*StackVersion, error) {
+	return s.getStackVersion(ctx, id, nil)
+}
+
+// GetStackVersionForStack resolves a version only when it belongs to the
+// expected stack. Callers creating deployments must use this scoped lookup so
+// a globally valid version UUID cannot cross a stack or organization boundary.
+func (s *Store) GetStackVersionForStack(ctx context.Context, id, stackID uuid.UUID) (*StackVersion, error) {
+	return s.getStackVersion(ctx, id, &stackID)
+}
+
+func (s *Store) getStackVersion(ctx context.Context, id uuid.UUID, stackID *uuid.UUID) (*StackVersion, error) {
 	var sv StackVersion
 	var specJSON []byte
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, stack_id, version, spec_json, spec_digest,
 		       COALESCE(created_by,''), created_at
-		FROM stack_versions WHERE id = $1
-	`, id).Scan(&sv.ID, &sv.StackID, &sv.Version, &specJSON,
+		FROM stack_versions
+		WHERE id = $1 AND ($2::uuid IS NULL OR stack_id = $2)
+	`, id, stackID).Scan(&sv.ID, &sv.StackID, &sv.Version, &specJSON,
 		&sv.SpecDigest, &sv.CreatedBy, &sv.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)

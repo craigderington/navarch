@@ -132,6 +132,62 @@ func TestCreatePreviewUnknownInheritSourceIs404(t *testing.T) {
 	}
 }
 
+func TestCreatePreviewRejectsVersionFromAnotherStack(t *testing.T) {
+	srv := testServer(t)
+	targetStackID := newTestStack(t, srv)
+	foreignStackID := newTestStack(t, srv)
+	foreignID, err := uuid.Parse(foreignStackID)
+	if err != nil {
+		t.Fatalf("parse foreign stack id: %v", err)
+	}
+	foreignVersion, err := srv.st.LatestStackVersion(context.Background(), foreignID)
+	if err != nil {
+		t.Fatalf("LatestStackVersion: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"slug": "pr-foreign", "stack_version_id": foreignVersion.ID,
+	})
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/stacks/"+targetStackID+"/previews", strings.NewReader(string(body))))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("want 404 for a foreign stack version, got %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCreateDeploymentRejectsVersionFromAnotherStack(t *testing.T) {
+	srv := testServer(t)
+	targetStackID := newTestStack(t, srv)
+	foreignStackID := newTestStack(t, srv)
+	targetID, err := uuid.Parse(targetStackID)
+	if err != nil {
+		t.Fatalf("parse target stack id: %v", err)
+	}
+	foreignID, err := uuid.Parse(foreignStackID)
+	if err != nil {
+		t.Fatalf("parse foreign stack id: %v", err)
+	}
+	foreignVersion, err := srv.st.LatestStackVersion(context.Background(), foreignID)
+	if err != nil {
+		t.Fatalf("LatestStackVersion: %v", err)
+	}
+	env, err := srv.st.CreateEnvironment(context.Background(), store.CreateEnvironmentParams{
+		StackID: targetID, Slug: "prod",
+	})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"stack_version_id": foreignVersion.ID})
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/envs/"+env.ID.String()+"/deployments", strings.NewReader(string(body))))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("want 404 for a foreign stack version, got %d: %s", rec.Code, rec.Body)
+	}
+}
+
 // newTestStack builds the org/application/stack/version chain a preview
 // hangs off of, and nothing else — no node, no "prod" environment — since
 // CreatePreview doesn't touch either. Cleanup mirrors the bottom-up order

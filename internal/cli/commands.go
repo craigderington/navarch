@@ -1,0 +1,632 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"time"
+
+	"github.com/craig/composectl/internal/client"
+)
+
+func cmdHealth(ctx context.Context, e env) error {
+	h, err := e.c.Health(ctx)
+	if err != nil {
+		return err
+	}
+	return emitOne(e, h, []string{"STATUS"}, []string{h.Status})
+}
+
+func cmdValidate(ctx context.Context, e env, args []string) error {
+	if err := need(args, 1, "usage: composectl validate FILE"); err != nil {
+		return err
+	}
+	raw, err := readFileOrStdin(args[0])
+	if err != nil {
+		return err
+	}
+	res, err := e.c.Validate(ctx, raw)
+	if err != nil {
+		return err
+	}
+	if e.cfg.Output == "json" {
+		return printJSON(e.out, res)
+	}
+	fmt.Fprintf(e.out, "valid\t%v\n", res.Valid)
+	fmt.Fprintf(e.out, "digest\t%s\n", res.Digest)
+	fmt.Fprintf(e.out, "services\t%s\n", join(res.Summary.Services))
+	fmt.Fprintf(e.out, "swappable\t%s\n", join(res.Summary.Swappable))
+	fmt.Fprintf(e.out, "pinned\t%s\n", join(res.Summary.Pinned))
+	if res.Summary.Ingress != "" {
+		fmt.Fprintf(e.out, "ingress\t%s\n", res.Summary.Ingress)
+	}
+	fmt.Fprintf(e.out, "peak_memory_bytes\t%d\n", res.Summary.PeakMemoryBytes)
+	return nil
+}
+
+func cmdOrg(ctx context.Context, e env, args []string) error {
+	if len(args) == 0 {
+		return usage("usage: composectl org list|create ...")
+	}
+	switch args[0] {
+	case "list":
+		orgs, err := e.c.ListOrgs(ctx)
+		if err != nil {
+			return err
+		}
+		rows := make([][]string, 0, len(orgs))
+		for _, o := range orgs {
+			rows = append(rows, []string{o.ID, o.Slug, o.Name, ts(o.CreatedAt)})
+		}
+		return emit(e, orgs, []string{"ID", "SLUG", "NAME", "CREATED"}, rows)
+	case "create":
+		if err := need(args, 2, "usage: composectl org create SLUG [--name NAME]"); err != nil {
+			return err
+		}
+		flags, pos, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		if len(pos) < 1 {
+			return usage("usage: composectl org create SLUG [--name NAME]")
+		}
+		name := flags["name"]
+		if name == "" {
+			name = pos[0]
+		}
+		o, err := e.c.CreateOrg(ctx, pos[0], name)
+		if err != nil {
+			return err
+		}
+		return emitOne(e, o, []string{"ID", "SLUG", "NAME"}, []string{o.ID, o.Slug, o.Name})
+	default:
+		return usage("usage: composectl org list|create ...")
+	}
+}
+
+func cmdApp(ctx context.Context, e env, args []string) error {
+	if len(args) == 0 {
+		return usage("usage: composectl app list|create --org ID ...")
+	}
+	switch args[0] {
+	case "list":
+		flags, _, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		org := flags["org"]
+		if org == "" {
+			return usage("usage: composectl app list --org ID")
+		}
+		apps, err := e.c.ListApps(ctx, org)
+		if err != nil {
+			return err
+		}
+		rows := make([][]string, 0, len(apps))
+		for _, a := range apps {
+			rows = append(rows, []string{a.ID, a.Slug, a.Name, a.OrgID})
+		}
+		return emit(e, apps, []string{"ID", "SLUG", "NAME", "ORG"}, rows)
+	case "create":
+		flags, pos, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		if len(pos) < 1 || flags["org"] == "" {
+			return usage("usage: composectl app create SLUG --org ID [--name NAME]")
+		}
+		name := flags["name"]
+		if name == "" {
+			name = pos[0]
+		}
+		a, err := e.c.CreateApp(ctx, flags["org"], pos[0], name)
+		if err != nil {
+			return err
+		}
+		return emitOne(e, a, []string{"ID", "SLUG", "NAME", "ORG"}, []string{a.ID, a.Slug, a.Name, a.OrgID})
+	default:
+		return usage("usage: composectl app list|create --org ID ...")
+	}
+}
+
+func cmdStack(ctx context.Context, e env, args []string) error {
+	if len(args) == 0 {
+		return usage("usage: composectl stack list|create|get|push|versions ...")
+	}
+	switch args[0] {
+	case "list":
+		flags, _, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		if flags["app"] == "" {
+			return usage("usage: composectl stack list --app ID")
+		}
+		stacks, err := e.c.ListStacks(ctx, flags["app"])
+		if err != nil {
+			return err
+		}
+		rows := make([][]string, 0, len(stacks))
+		for _, s := range stacks {
+			rows = append(rows, []string{s.ID, s.Slug, s.AppID})
+		}
+		return emit(e, stacks, []string{"ID", "SLUG", "APP"}, rows)
+	case "create":
+		flags, pos, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		if len(pos) < 1 || flags["app"] == "" {
+			return usage("usage: composectl stack create SLUG --app ID")
+		}
+		s, err := e.c.CreateStack(ctx, flags["app"], pos[0])
+		if err != nil {
+			return err
+		}
+		return emitOne(e, s, []string{"ID", "SLUG", "APP"}, []string{s.ID, s.Slug, s.AppID})
+	case "get":
+		if err := need(args, 2, "usage: composectl stack get ID"); err != nil {
+			return err
+		}
+		s, err := e.c.GetStack(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		return emitOne(e, s, []string{"ID", "SLUG", "APP"}, []string{s.ID, s.Slug, s.AppID})
+	case "push":
+		flags, pos, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		if len(pos) < 2 {
+			return usage("usage: composectl stack push STACK_ID FILE [--created-by NAME]")
+		}
+		raw, err := readFileOrStdin(pos[1])
+		if err != nil {
+			return err
+		}
+		sv, err := e.c.PushStack(ctx, pos[0], raw, flags["created-by"])
+		if err != nil {
+			return err
+		}
+		return emitOne(e, sv, []string{"ID", "VERSION", "DIGEST"}, []string{sv.ID, strconv.Itoa(sv.Version), sv.SpecDigest})
+	case "versions":
+		if err := need(args, 2, "usage: composectl stack versions STACK_ID"); err != nil {
+			return err
+		}
+		vs, err := e.c.ListStackVersions(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		rows := make([][]string, 0, len(vs))
+		for _, v := range vs {
+			rows = append(rows, []string{v.ID, strconv.Itoa(v.Version), v.SpecDigest, v.CreatedBy, ts(v.CreatedAt)})
+		}
+		return emit(e, vs, []string{"ID", "VERSION", "DIGEST", "CREATED_BY", "CREATED"}, rows)
+	default:
+		return usage("usage: composectl stack list|create|get|push|versions ...")
+	}
+}
+
+func cmdEnv(ctx context.Context, e env, args []string) error {
+	if len(args) == 0 {
+		return usage("usage: composectl env list|create|get ...")
+	}
+	switch args[0] {
+	case "list":
+		flags, _, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		if flags["stack"] == "" {
+			return usage("usage: composectl env list --stack ID")
+		}
+		envs, err := e.c.ListEnvs(ctx, flags["stack"])
+		if err != nil {
+			return err
+		}
+		rows := make([][]string, 0, len(envs))
+		for _, ev := range envs {
+			live := ""
+			if ev.LiveDeploymentID != nil {
+				live = *ev.LiveDeploymentID
+			}
+			rows = append(rows, []string{ev.ID, ev.Slug, ev.Hostname, ev.Strategy, live})
+		}
+		return emit(e, envs, []string{"ID", "SLUG", "HOSTNAME", "STRATEGY", "LIVE"}, rows)
+	case "create":
+		flags, pos, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		if len(pos) < 1 || flags["stack"] == "" {
+			return usage("usage: composectl env create SLUG --stack ID [--hostname HOST] [--config k=v]")
+		}
+		in := client.CreateEnvInput{Slug: pos[0], Hostname: flags["hostname"], Strategy: flags["strategy"]}
+		if flags["config"] != "" {
+			in.Config = parseKV(flags["config"])
+		}
+		ev, err := e.c.CreateEnv(ctx, flags["stack"], in)
+		if err != nil {
+			return err
+		}
+		return emitOne(e, ev, []string{"ID", "SLUG", "HOSTNAME"}, []string{ev.ID, ev.Slug, ev.Hostname})
+	case "get":
+		if err := need(args, 2, "usage: composectl env get ID"); err != nil {
+			return err
+		}
+		ev, err := e.c.GetEnv(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		live := ""
+		if ev.LiveDeploymentID != nil {
+			live = *ev.LiveDeploymentID
+		}
+		return emitOne(e, ev, []string{"ID", "SLUG", "HOSTNAME", "LIVE"}, []string{ev.ID, ev.Slug, ev.Hostname, live})
+	default:
+		return usage("usage: composectl env list|create|get ...")
+	}
+}
+
+func cmdPreview(ctx context.Context, e env, args []string) error {
+	if len(args) == 0 || args[0] != "create" {
+		return usage("usage: composectl preview create --stack ID --slug SLUG [--inherit ENV_SLUG] [--ttl HOURS] [--version ID]")
+	}
+	flags, _, err := flagMap(args[1:])
+	if err != nil {
+		return err
+	}
+	if flags["stack"] == "" || flags["slug"] == "" {
+		return usage("usage: composectl preview create --stack ID --slug SLUG [--inherit ENV_SLUG] [--ttl HOURS] [--version ID]")
+	}
+	in := client.CreatePreviewInput{
+		Slug:               flags["slug"],
+		StackVersionID:     flags["version"],
+		InheritSecretsFrom: flags["inherit"],
+		CreatedBy:          flags["created-by"],
+	}
+	if flags["ttl"] != "" {
+		n, err := strconv.Atoi(flags["ttl"])
+		if err != nil {
+			return usage("--ttl must be an integer number of hours")
+		}
+		in.TTLHours = n
+	}
+	p, err := e.c.CreatePreview(ctx, flags["stack"], in)
+	if err != nil {
+		return err
+	}
+	return emitOne(e, p, []string{"ENV", "HOSTNAME", "DEPLOYMENT", "EXPIRES"},
+		[]string{p.EnvironmentID, p.Hostname, p.DeploymentID, ptrTS(p.ExpiresAt)})
+}
+
+func cmdDeploy(ctx context.Context, e env, args []string) error {
+	flags, _, err := flagMap(args)
+	if err != nil {
+		return err
+	}
+	if flags["env"] == "" {
+		return usage("usage: composectl deploy --env ID [--version ID] [--created-by NAME]")
+	}
+	d, err := e.c.Deploy(ctx, flags["env"], flags["version"], flags["created-by"])
+	if err != nil {
+		return err
+	}
+	return emitOne(e, d, []string{"ID", "REV", "SLOT", "STATE"},
+		[]string{d.ID, strconv.Itoa(d.Revision), d.Slot, d.State})
+}
+
+func cmdDeployment(ctx context.Context, e env, args []string) error {
+	if len(args) == 0 {
+		return usage("usage: composectl deployment list|get ...")
+	}
+	switch args[0] {
+	case "list":
+		flags, _, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		if flags["env"] == "" {
+			return usage("usage: composectl deployment list --env ID")
+		}
+		ds, err := e.c.ListDeployments(ctx, flags["env"])
+		if err != nil {
+			return err
+		}
+		rows := make([][]string, 0, len(ds))
+		for _, d := range ds {
+			rows = append(rows, []string{d.ID, strconv.Itoa(d.Revision), d.Slot, d.State, d.FailureReason})
+		}
+		return emit(e, ds, []string{"ID", "REV", "SLOT", "STATE", "FAILURE"}, rows)
+	case "get":
+		if err := need(args, 2, "usage: composectl deployment get ID"); err != nil {
+			return err
+		}
+		d, err := e.c.GetDeployment(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		return emitOne(e, d, []string{"ID", "REV", "SLOT", "STATE", "PROJECT"},
+			[]string{d.ID, strconv.Itoa(d.Revision), d.Slot, d.State, d.ProjectName})
+	default:
+		return usage("usage: composectl deployment list|get ...")
+	}
+}
+
+func cmdPromote(ctx context.Context, e env, args []string) error {
+	if err := need(args, 1, "usage: composectl promote DEPLOYMENT_ID"); err != nil {
+		return err
+	}
+	out, err := e.c.Promote(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	if e.cfg.Output == "json" {
+		return printJSON(e.out, out)
+	}
+	fmt.Fprintf(e.out, "promoted\t%v\n", out["promoted"])
+	if v, ok := out["superseded"]; ok {
+		fmt.Fprintf(e.out, "superseded\t%v\n", v)
+	}
+	return nil
+}
+
+func cmdRollback(ctx context.Context, e env, args []string) error {
+	flags, _, err := flagMap(args)
+	if err != nil {
+		return err
+	}
+	if flags["env"] == "" {
+		return usage("usage: composectl rollback --env ID [--to REVISION]")
+	}
+	to := 0
+	if flags["to"] != "" {
+		to, err = strconv.Atoi(flags["to"])
+		if err != nil {
+			return usage("--to must be a revision number")
+		}
+	}
+	d, err := e.c.Rollback(ctx, flags["env"], to)
+	if err != nil {
+		return err
+	}
+	return emitOne(e, d, []string{"ID", "REV", "SLOT", "STATE"},
+		[]string{d.ID, strconv.Itoa(d.Revision), d.Slot, d.State})
+}
+
+func cmdSecret(ctx context.Context, e env, args []string) error {
+	if len(args) == 0 {
+		return usage("usage: composectl secret list|set|delete ...")
+	}
+	switch args[0] {
+	case "list":
+		flags, _, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		if flags["env"] == "" {
+			return usage("usage: composectl secret list --env ID")
+		}
+		secs, err := e.c.ListSecrets(ctx, flags["env"])
+		if err != nil {
+			return err
+		}
+		rows := make([][]string, 0, len(secs))
+		for _, s := range secs {
+			rows = append(rows, []string{s.Key, strconv.Itoa(s.Version), ts(s.CreatedAt)})
+		}
+		return emit(e, secs, []string{"KEY", "VERSION", "CREATED"}, rows)
+	case "set":
+		flags, pos, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		if flags["env"] == "" || len(pos) < 2 {
+			return usage("usage: composectl secret set --env ID KEY VALUE")
+		}
+		if err := e.c.SetSecret(ctx, flags["env"], pos[0], pos[1]); err != nil {
+			return err
+		}
+		if e.cfg.Output == "json" {
+			return printJSON(e.out, map[string]string{"key": pos[0]})
+		}
+		fmt.Fprintf(e.out, "set\t%s\n", pos[0])
+		return nil
+	case "delete":
+		flags, pos, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		if flags["env"] == "" || len(pos) < 1 {
+			return usage("usage: composectl secret delete --env ID KEY")
+		}
+		if err := e.c.DeleteSecret(ctx, flags["env"], pos[0]); err != nil {
+			return err
+		}
+		if e.cfg.Output == "json" {
+			return printJSON(e.out, map[string]string{"deleted": pos[0]})
+		}
+		fmt.Fprintf(e.out, "deleted\t%s\n", pos[0])
+		return nil
+	default:
+		return usage("usage: composectl secret list|set|delete ...")
+	}
+}
+
+func cmdNode(ctx context.Context, e env, args []string) error {
+	if len(args) == 0 {
+		return usage("usage: composectl node list|get|drain ...")
+	}
+	switch args[0] {
+	case "list":
+		flags, _, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		if flags["org"] == "" {
+			return usage("usage: composectl node list --org ID")
+		}
+		nodes, err := e.c.ListNodes(ctx, flags["org"])
+		if err != nil {
+			return err
+		}
+		rows := make([][]string, 0, len(nodes))
+		for _, n := range nodes {
+			rows = append(rows, []string{n.ID, n.Hostname, n.State, n.AdvertiseAddr, strconv.Itoa(n.CPUMillis)})
+		}
+		return emit(e, nodes, []string{"ID", "HOSTNAME", "STATE", "ADDR", "CPU_MILLIS"}, rows)
+	case "get":
+		if err := need(args, 2, "usage: composectl node get ID"); err != nil {
+			return err
+		}
+		n, err := e.c.GetNode(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		return emitOne(e, n, []string{"ID", "HOSTNAME", "STATE", "ADDR"},
+			[]string{n.ID, n.Hostname, n.State, n.AdvertiseAddr})
+	case "drain":
+		if err := need(args, 2, "usage: composectl node drain ID"); err != nil {
+			return err
+		}
+		if err := e.c.DrainNode(ctx, args[1]); err != nil {
+			return err
+		}
+		if e.cfg.Output == "json" {
+			return printJSON(e.out, map[string]string{"status": "draining", "id": args[1]})
+		}
+		fmt.Fprintf(e.out, "draining\t%s\n", args[1])
+		return nil
+	default:
+		return usage("usage: composectl node list|get|drain ...")
+	}
+}
+
+func cmdWait(ctx context.Context, e env, args []string) error {
+	flags, pos, err := flagMap(args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 1 {
+		return usage("usage: composectl wait DEPLOYMENT_ID [--state live] [--timeout 180]")
+	}
+	want := flags["state"]
+	if want == "" {
+		want = "live"
+	}
+	timeoutSec := 180
+	if flags["timeout"] != "" {
+		timeoutSec, err = strconv.Atoi(flags["timeout"])
+		if err != nil || timeoutSec <= 0 {
+			return usage("--timeout must be a positive number of seconds")
+		}
+	}
+	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
+	for {
+		d, err := e.c.GetDeployment(ctx, pos[0])
+		if err != nil {
+			return err
+		}
+		if d.State == want {
+			return emitOne(e, d, []string{"ID", "REV", "STATE"},
+				[]string{d.ID, strconv.Itoa(d.Revision), d.State})
+		}
+		if d.State == "failed" && want != "failed" {
+			return fmt.Errorf("deployment %s failed: %s", d.ID, d.FailureReason)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for %s (stuck at %s)", want, d.State)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func cmdEvents(ctx context.Context, e env, args []string) error {
+	flags, _, err := flagMap(args)
+	if err != nil {
+		return err
+	}
+	if flags["org"] == "" {
+		return usage("usage: composectl events --org ID [--limit N] [--before ID]")
+	}
+	limit := 0
+	if flags["limit"] != "" {
+		limit, err = strconv.Atoi(flags["limit"])
+		if err != nil {
+			return usage("--limit must be an integer")
+		}
+	}
+	var before int64
+	if flags["before"] != "" {
+		before, err = strconv.ParseInt(flags["before"], 10, 64)
+		if err != nil {
+			return usage("--before must be an event id")
+		}
+	}
+	evs, err := e.c.ListEvents(ctx, flags["org"], limit, before)
+	if err != nil {
+		return err
+	}
+	rows := make([][]string, 0, len(evs))
+	for _, ev := range evs {
+		rows = append(rows, []string{strconv.FormatInt(ev.ID, 10), ev.Kind, ev.Message, ts(ev.CreatedAt)})
+	}
+	return emit(e, evs, []string{"ID", "KIND", "MESSAGE", "CREATED"}, rows)
+}
+
+func join(ss []string) string {
+	if len(ss) == 0 {
+		return "-"
+	}
+	out := ss[0]
+	for i := 1; i < len(ss); i++ {
+		out += "," + ss[i]
+	}
+	return out
+}
+
+func parseKV(s string) map[string]string {
+	m := map[string]string{}
+	for _, part := range splitComma(s) {
+		k, v, ok := splitOnce(part, "=")
+		if ok {
+			m[k] = v
+		}
+	}
+	return m
+}
+
+func splitComma(s string) []string {
+	var out []string
+	cur := ""
+	for _, r := range s {
+		if r == ',' {
+			if cur != "" {
+				out = append(out, cur)
+			}
+			cur = ""
+			continue
+		}
+		cur += string(r)
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
+}
+
+func splitOnce(s, sep string) (string, string, bool) {
+	i := 0
+	for i < len(s)-len(sep)+1 {
+		if s[i:i+len(sep)] == sep {
+			return s[:i], s[i+len(sep):], true
+		}
+		i++
+	}
+	return s, "", false
+}

@@ -108,9 +108,27 @@ func TestSchedulerPlacesPendingDeployment(t *testing.T) {
 
 func TestSchedulerRejectsNodeWithoutPeakCPU(t *testing.T) {
 	st := testStore(t)
-	depID, nodeID, orgID := fixture(t, st)
-	if err := st.Heartbeat(ctx(t), nodeID, store.HeartbeatParams{AllocCPUMillis: 7500}); err != nil {
-		t.Fatalf("heartbeat: %v", err)
+	depID, _, orgID := fixture(t, st)
+	// Capacity is reserved from the node's advertised size, not heartbeat
+	// alloc. A 100-millicpu node cannot fit a 750-millicpu peak rollout.
+	_, err := st.RegisterNode(ctx(t), store.RegisterNodeParams{
+		OrgID: orgID, Hostname: "tiny-" + uuid.NewString()[:8], AdvertiseAddr: "10.0.0.9",
+		CPUMillis: 100, MemoryBytes: 16 << 30,
+	})
+	if err != nil {
+		t.Fatalf("register tiny node: %v", err)
+	}
+	// Drain the original large node so only the tiny one is ready.
+	nodes, err := st.ListNodes(ctx(t), orgID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, n := range nodes {
+		if n.CPUMillis > 100 {
+			if err := st.DrainNode(ctx(t), n.ID); err != nil {
+				t.Fatalf("drain: %v", err)
+			}
+		}
 	}
 	if err := newSchedulerForOrg(st, discardLog(), orgID).ScheduleOnce(ctx(t)); err != nil {
 		t.Fatalf("ScheduleOnce: %v", err)

@@ -16,10 +16,14 @@ import (
 // here (rather than importing the concrete type) lets tests substitute a fake
 // and keeps this logic free of the Docker SDK.
 type DockerDriver interface {
-	EnsureImage(ctx context.Context, ref string) error
+	EnsureImage(ctx context.Context, ref string) (string, error)
 	EnsureNetwork(ctx context.Context, name string, labels map[string]string) (string, error)
 	EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (string, bool, error)
 	AttachNetwork(ctx context.Context, containerID, network string, aliases ...string) error
+	// AttachRouterToNetwork connects the platform ingress proxy to a
+	// revision network so it can reach that revision's ingress container
+	// without putting tenant containers on a shared mesh.
+	AttachRouterToNetwork(ctx context.Context, network string) error
 	InspectHealth(ctx context.Context, containerID string) (dockerd.Health, error)
 	StopRemove(ctx context.Context, containerID string) error
 	ListManaged(ctx context.Context, env8 string) ([]dockerd.Managed, error)
@@ -51,6 +55,10 @@ type Report struct {
 type Reconciler struct {
 	drv      DockerDriver
 	debounce time.Duration
+	// firstRunning is when a no-healthcheck container was first observed
+	// running. It must stay up for debounce before we report running, so a
+	// crash-loop cannot auto-promote on the first tick.
+	firstRunning map[uuid.UUID]time.Time
 
 	// tornDown records env8s whose RemoveEnv already returned nil. A tombstone
 	// stays on offer for its full retention window (24h), so without this every
@@ -78,7 +86,11 @@ type Reconciler struct {
 }
 
 func NewReconciler(drv DockerDriver) *Reconciler {
-	return &Reconciler{drv: drv, debounce: 5 * time.Second, tornDown: map[string]bool{}, knownEnvs: map[string]bool{}}
+	return &Reconciler{
+		drv: drv, debounce: 5 * time.Second,
+		tornDown: map[string]bool{}, knownEnvs: map[string]bool{},
+		firstRunning: map[uuid.UUID]time.Time{},
+	}
 }
 
 // Reconcile converges Docker to the desired instance set and returns a report
@@ -111,13 +123,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInsta
 	wanted := map[string]bool{} // container name → desired
 	envs := map[string]bool{}
 	wantedNetworks := map[string]bool{}
+	liveIDs := map[uuid.UUID]bool{}
 
-	for _, di := range desired {
+	for _, di := range orderDesired(desired) {
 		name := containerName(di)
 		wanted[name] = true
 		envs[di.Env8] = true
 		wantedNetworks[di.ProjectName] = true
+		liveIDs[di.InstanceID] = true
 		reports = append(reports, r.ensure(ctx, di, name, secrets[di.Env8]))
+	}
+	for id := range r.firstRunning {
+		if !liveIDs[id] {
+			delete(r.firstRunning, id)
+		}
 	}
 
 	// GC: any managed container in a touched env whose name is not wanted, and
@@ -200,7 +219,8 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 		return rep
 	}
 
-	if err := r.drv.EnsureImage(ctx, di.Service.Image); err != nil {
+	digest, err := r.drv.EnsureImage(ctx, di.Service.Image)
+	if err != nil {
 		return fail(err)
 	}
 	if _, err := r.drv.EnsureNetwork(ctx, di.ProjectName, map[string]string{"cc.env": di.Env8}); err != nil {
@@ -208,6 +228,9 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 	}
 
 	cs := containerSpec(di, name)
+	if digest != "" {
+		cs.Image = digest
+	}
 	for _, m := range cs.Mounts {
 		if err := r.drv.EnsureVolume(ctx, m.Volume, map[string]string{"cc.env": di.Env8}); err != nil {
 			return fail(err)
@@ -224,15 +247,10 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 			return fail(err)
 		}
 	}
-	// An ingress service also joins the shared cc-ingress network so Traefik
-	// (permanently on it) can reach this revision's ingress container by its
-	// unique name. Blue and green never collide because the name carries the
-	// revision + slot.
+	// Traefik joins the revision network; tenant ingress stays off any
+	// shared mesh so one fleet cannot talk to another.
 	if di.Service.Ingress != nil {
-		if _, err := r.drv.EnsureNetwork(ctx, "cc-ingress", map[string]string{"cc.shared": "ingress"}); err != nil {
-			return fail(err)
-		}
-		if err := r.drv.AttachNetwork(ctx, id, "cc-ingress", name); err != nil {
+		if err := r.drv.AttachRouterToNetwork(ctx, di.ProjectName); err != nil {
 			return fail(err)
 		}
 	}
@@ -244,8 +262,82 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 		return fail(err)
 	}
 	rep.RestartCount = h.RestartCount
-	rep.State, rep.HealthStatus = mapHealth(di.Service.Health != nil && len(di.Service.Health.Test) > 0, h)
+	rep.State, rep.HealthStatus = r.observe(di, h)
 	return rep
+}
+
+func (r *Reconciler) observe(di store.DesiredInstance, h dockerd.Health) (store.InstanceState, string) {
+	hasHealthcheck := di.Service.Health != nil && len(di.Service.Health.Test) > 0
+	if !h.Running {
+		delete(r.firstRunning, di.InstanceID)
+		return mapHealth(hasHealthcheck, h)
+	}
+	if hasHealthcheck {
+		return mapHealth(true, h)
+	}
+	if r.firstRunning[di.InstanceID].IsZero() {
+		r.firstRunning[di.InstanceID] = time.Now()
+	}
+	if time.Since(r.firstRunning[di.InstanceID]) < r.debounce {
+		return store.InstanceStarting, "starting"
+	}
+	return store.InstanceRunning, "running"
+}
+
+// orderDesired starts dependencies before dependents within each
+// environment/revision. Independent services keep their input order.
+func orderDesired(desired []store.DesiredInstance) []store.DesiredInstance {
+	if len(desired) < 2 {
+		return desired
+	}
+	type key struct{ env, project string }
+	groups := map[key][]store.DesiredInstance{}
+	var order []key
+	for _, di := range desired {
+		k := key{di.Env8, di.ProjectName}
+		if _, ok := groups[k]; !ok {
+			order = append(order, k)
+		}
+		groups[k] = append(groups[k], di)
+	}
+	out := make([]store.DesiredInstance, 0, len(desired))
+	for _, k := range order {
+		out = append(out, topoGroup(groups[k])...)
+	}
+	return out
+}
+
+func topoGroup(in []store.DesiredInstance) []store.DesiredInstance {
+	byName := make(map[string]store.DesiredInstance, len(in))
+	for _, di := range in {
+		byName[di.ServiceName] = di
+	}
+	const (
+		white = 0
+		grey  = 1
+		black = 2
+	)
+	color := map[string]int{}
+	out := make([]store.DesiredInstance, 0, len(in))
+	var visit func(string)
+	visit = func(name string) {
+		if color[name] != white {
+			return
+		}
+		color[name] = grey
+		di := byName[name]
+		for _, dep := range di.Service.Depends {
+			if _, ok := byName[dep]; ok {
+				visit(dep)
+			}
+		}
+		color[name] = black
+		out = append(out, di)
+	}
+	for _, di := range in {
+		visit(di.ServiceName)
+	}
+	return out
 }
 
 // mapHealth turns a container's observed state into an instance state.

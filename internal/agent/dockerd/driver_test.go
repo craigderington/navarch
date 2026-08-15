@@ -45,7 +45,7 @@ func TestEnsureContainerCreatesAndAdopts(t *testing.T) {
 		t.Fatalf("remove stale test environment: %v", err)
 	}
 
-	if err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
+	if _, err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
 		t.Fatalf("EnsureImage: %v", err)
 	}
 	netID, err := d.EnsureNetwork(ctx, netName, map[string]string{"cc.env": env8})
@@ -229,7 +229,7 @@ func TestEnsureVolumeAndRemoveEnv(t *testing.T) {
 	// busybox:latest is already pulled by TestEnsureContainerCreatesAndAdopts
 	// in this file, and EnsureImage only pulls when absent — this does not
 	// add a network dependency to the test path.
-	if err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
+	if _, err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
 		t.Fatalf("EnsureImage: %v", err)
 	}
 	cs := ContainerSpec{

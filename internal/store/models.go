@@ -125,6 +125,9 @@ type Node struct {
 	AgeRecipient     string            `json:"age_recipient,omitempty"`
 	LastHeartbeat    *time.Time        `json:"last_heartbeat,omitempty"`
 	CreatedAt        time.Time         `json:"created_at"`
+	// Token is the plaintext node credential, returned once at first
+	// registration. It is never stored and is omitted on later reads.
+	Token string `json:"token,omitempty"`
 }
 
 // FreeMemoryBytes is capacity minus current allocation.

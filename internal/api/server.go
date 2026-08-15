@@ -9,10 +9,12 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/craig/composectl/internal/metrics"
 	"github.com/craig/composectl/internal/store"
+	"github.com/google/uuid"
 )
 
 type Server struct {
@@ -58,7 +60,7 @@ func NewServer(st *store.Store, log *slog.Logger, opts ...ServerOption) *Server 
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-	if r.URL.Path != "/healthz" && s.bearerToken != "" && !validBearerToken(r, s.bearerToken) {
+	if r.URL.Path != "/healthz" && s.bearerToken != "" && !s.authorized(r) {
 		rw.Header().Set("WWW-Authenticate", `Bearer realm="composectl"`)
 		writeError(rw, http.StatusUnauthorized, "authentication required", nil)
 		if s.metrics != nil {
@@ -74,6 +76,50 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.metrics.ObserveHTTP(r.Method, route, rw.status)
 	}
+}
+
+// authorized accepts the operator API token for catalog and register, and a
+// per-node token only for that node's heartbeat / desired-state / report.
+func (s *Server) authorized(r *http.Request) bool {
+	// Agent endpoints accept only that node's token so the operator token
+	// cannot be used to pull another node's desired-state ciphertext.
+	if isNodeAgentPath(r) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			return false
+		}
+		plain := bearerToken(r)
+		if plain == "" {
+			return false
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		ok, err := s.st.NodeTokenValid(ctx, id, plain)
+		return err == nil && ok
+	}
+	return validBearerToken(r, s.bearerToken)
+}
+
+func isNodeAgentPath(r *http.Request) bool {
+	switch {
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/heartbeat"):
+		return true
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/desired-state"):
+		return true
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/report"):
+		return true
+	default:
+		return false
+	}
+}
+
+func bearerToken(r *http.Request) string {
+	const prefix = "Bearer "
+	auth := r.Header.Get("Authorization")
+	if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix {
+		return ""
+	}
+	return auth[len(prefix):]
 }
 
 type statusWriter struct {
@@ -136,6 +182,8 @@ func (s *Server) routes() {
 
 	// Stacks — POST accepts a compose file, parses it, stores a version
 	s.mux.HandleFunc("POST /v1/apps/{app}/stacks", s.handleCreateStack)
+	s.mux.HandleFunc("GET /v1/apps/{app}/stacks", s.handleListStacks)
+	s.mux.HandleFunc("GET /v1/stacks/{stack}", s.handleGetStack)
 	s.mux.HandleFunc("POST /v1/stacks/{stack}/versions", s.handleCreateStackVersion)
 	s.mux.HandleFunc("GET /v1/stacks/{stack}/versions", s.handleListStackVersions)
 
@@ -145,6 +193,7 @@ func (s *Server) routes() {
 	// Environments
 	s.mux.HandleFunc("POST /v1/stacks/{stack}/envs", s.handleCreateEnv)
 	s.mux.HandleFunc("GET /v1/stacks/{stack}/envs", s.handleListEnvs)
+	s.mux.HandleFunc("GET /v1/envs/{env}", s.handleGetEnv)
 	s.mux.HandleFunc("POST /v1/stacks/{stack}/previews", s.handleCreatePreview)
 
 	// Deployments
@@ -160,6 +209,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/nodes/{id}/desired-state", s.handleDesiredState)
 	s.mux.HandleFunc("POST /v1/nodes/{id}/report", s.handleInstanceReport)
 	s.mux.HandleFunc("GET /v1/nodes", s.handleListNodes)
+	s.mux.HandleFunc("GET /v1/nodes/{id}", s.handleGetNode)
+	s.mux.HandleFunc("POST /v1/nodes/{id}/drain", s.handleDrainNode)
 
 	// Secrets — encrypted at rest, plaintext never stored. The list response
 	// never includes values; see internal/secrets for the encrypt boundary.

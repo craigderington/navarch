@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -55,15 +56,27 @@ func (s *Store) createDeploymentTx(ctx context.Context, tx pgx.Tx, p CreateDeplo
 	// per environment without a global lock.
 	var liveSlot *string
 	var liveSpecJSON []byte
+	var stackID uuid.UUID
 	err := tx.QueryRow(ctx, `
-		SELECT d.slot, d.resolved_spec
+		SELECT e.stack_id, d.slot, d.resolved_spec
 		FROM environments e
 		LEFT JOIN deployments d ON d.id = e.live_deployment_id
 		WHERE e.id = $1
 		FOR UPDATE OF e
-	`, p.EnvironmentID).Scan(&liveSlot, &liveSpecJSON)
+	`, p.EnvironmentID).Scan(&stackID, &liveSlot, &liveSpecJSON)
 	if err != nil {
 		return nil, err
+	}
+	var versionBelongs bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM stack_versions WHERE id = $1 AND stack_id = $2
+		)
+	`, p.StackVersionID, stackID).Scan(&versionBelongs); err != nil {
+		return nil, err
+	}
+	if !versionBelongs {
+		return nil, fmt.Errorf("%w: stack version does not belong to environment stack", ErrInvalid)
 	}
 	if len(liveSpecJSON) > 0 {
 		var liveSpec spec.DeploymentSpec
@@ -101,12 +114,12 @@ func (s *Store) createDeploymentTx(ctx context.Context, tx pgx.Tx, p CreateDeplo
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO deployments (
-			environment_id, stack_version_id, revision, slot,
+			environment_id, stack_version_id, stack_id, revision, slot,
 			project_name, state, resolved_spec, created_by
-		) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7)
+		) VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$8)
 		RETURNING id, environment_id, stack_version_id, revision, slot,
 		          project_name, state, created_at, updated_at
-	`, p.EnvironmentID, p.StackVersionID, revision, slot,
+	`, p.EnvironmentID, p.StackVersionID, stackID, revision, slot,
 		projectName, specJSON, p.CreatedBy,
 	).Scan(&d.ID, &d.EnvironmentID, &d.StackVersionID, &d.Revision,
 		&d.Slot, &d.ProjectName, &d.State, &d.CreatedAt, &d.UpdatedAt)
@@ -163,6 +176,25 @@ func (s *Store) RollbackDeployment(ctx context.Context, envID uuid.UUID, toRevis
 	var resolved spec.DeploymentSpec
 	if err := json.Unmarshal(specJSON, &resolved); err != nil {
 		return nil, err
+	}
+	if required := resolved.RequiredSecrets(); len(required) > 0 {
+		have, err := s.SecretKeysForEnv(ctx, envID)
+		if err != nil {
+			return nil, err
+		}
+		set := map[string]bool{}
+		for _, m := range have {
+			set[m.Key] = true
+		}
+		var missing []string
+		for _, k := range required {
+			if !set[k] {
+				missing = append(missing, k)
+			}
+		}
+		if len(missing) > 0 {
+			return nil, fmt.Errorf("%w: environment is missing required secrets: %s", ErrInvalid, strings.Join(missing, ", "))
+		}
 	}
 	return s.CreateDeployment(ctx, CreateDeploymentParams{
 		EnvironmentID:  envID,

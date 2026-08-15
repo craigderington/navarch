@@ -167,6 +167,35 @@ func (s *Server) handleInstanceReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	node, err := s.st.GetNode(ctx, id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, node)
+}
+
+func (s *Server) handleDrainNode(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	if err := s.st.DrainNode(ctx, id); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "draining"})
+}
+
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := contextWithTimeout(r, 5*time.Second)
 	defer cancel()

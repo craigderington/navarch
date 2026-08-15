@@ -196,6 +196,28 @@ func TestCreateEnvironmentRoundTripsConfigAndHostname(t *testing.T) {
 	}
 }
 
+func TestValidateHostname(t *testing.T) {
+	if err := validateHostname("staging.example.com"); err != nil {
+		t.Fatalf("valid hostname rejected: %v", err)
+	}
+	if err := validateHostname(""); err != nil {
+		t.Fatalf("empty hostname must be allowed: %v", err)
+	}
+	for _, h := range []string{
+		"evil.com`) || Host(`x.com",
+		"foo.com\ninjected: true",
+		"NOT-LOWERCASE.com",
+		"foo_bar.com",
+		"-leading.com",
+		"trailing-.com",
+		"has space.com",
+	} {
+		if err := validateHostname(h); err == nil {
+			t.Errorf("hostname %q should be rejected", h)
+		}
+	}
+}
+
 func TestCreateEnvironmentRejectsUnsupportedStrategies(t *testing.T) {
 	st := testStore(t)
 	org := newOrg(t, st)
@@ -211,6 +233,25 @@ func TestCreateEnvironmentRejectsUnsupportedStrategies(t *testing.T) {
 				t.Fatalf("got %v, want ErrInvalid", err)
 			}
 		})
+	}
+}
+
+func TestCreateEnvironmentDuplicateHostnameConflicts(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+
+	if _, err := st.CreateEnvironment(testCtx(t), CreateEnvironmentParams{
+		StackID: stack.ID, Slug: "one", Hostname: "shared.example.com",
+	}); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	_, err := st.CreateEnvironment(testCtx(t), CreateEnvironmentParams{
+		StackID: stack.ID, Slug: "two", Hostname: "shared.example.com",
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict for duplicate hostname, got %v", err)
 	}
 }
 

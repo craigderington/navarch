@@ -5,6 +5,7 @@ package rollout
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -32,6 +33,9 @@ func NewScheduler(st *store.Store, log *slog.Logger) *Scheduler {
 // retry next tick; one that cannot fit is failed. Placement is trivial in
 // Sprint 2 (first ready node with room); Sprint 4 adds scoring.
 func (sc *Scheduler) ScheduleOnce(ctx context.Context) error {
+	if err := sc.st.MarkStaleNodesUnreachable(ctx); err != nil {
+		return err
+	}
 	var pending []store.PendingDeployment
 	var err error
 	if sc.orgID == nil {
@@ -80,8 +84,11 @@ func (sc *Scheduler) place(ctx context.Context, dep store.PendingDeployment) err
 			ServiceName: name, Swappable: svc.Swappable, ImageRef: svc.Image,
 		})
 	}
-	if err := sc.st.CreateServiceInstances(ctx, dep.ID, chosen.ID, insts); err != nil {
+	if err := sc.st.PlaceDeployment(ctx, dep.ID, chosen.ID, insts, peakCPU, peakMemory); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return sc.st.UpdateDeploymentState(ctx, dep.ID, store.DeployFailed, err.Error())
+		}
 		return err
 	}
-	return sc.st.UpdateDeploymentState(ctx, dep.ID, store.DeployScheduling, "")
+	return nil
 }

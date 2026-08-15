@@ -8,6 +8,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,6 +31,7 @@ type Config struct {
 	MemoryBytes     int64
 	PollInterval    time.Duration
 	IdentityFile    string
+	NodeTokenFile   string
 }
 
 // Run registers this node and then reconciles on a ticker until ctx is done.
@@ -79,14 +83,26 @@ type cpClient struct {
 
 func (c *cpClient) register(ctx context.Context, cfg Config) (uuid.UUID, error) {
 	var out struct {
-		ID uuid.UUID `json:"id"`
+		ID    uuid.UUID `json:"id"`
+		Token string    `json:"token"`
 	}
 	err := c.do(ctx, http.MethodPost, "/v1/nodes/register", map[string]any{
 		"org": cfg.Org, "hostname": cfg.Hostname, "advertise_addr": cfg.AdvertiseAddr,
 		"cpu_millis": cfg.CPUMillis, "memory_bytes": cfg.MemoryBytes, "agent_version": "sprint2-a",
 		"age_recipient": c.id.Recipient(),
 	}, &out)
-	return out.ID, err
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if out.Token != "" {
+		if err := persistNodeToken(cfg.NodeTokenFile, out.Token); err != nil {
+			return uuid.Nil, fmt.Errorf("persist node token: %w", err)
+		}
+		c.token = out.Token
+	} else if saved := loadNodeToken(cfg.NodeTokenFile); saved != "" {
+		c.token = saved
+	}
+	return out.ID, nil
 }
 
 func (c *cpClient) reconcileTick(ctx context.Context, nodeID uuid.UUID, rec *Reconciler, log *slog.Logger) error {
@@ -152,6 +168,27 @@ func desiredAllocations(desired []store.DesiredInstance) (cpuMillis int, memoryB
 		memoryBytes += di.Service.Limits.MemoryBytes
 	}
 	return cpuMillis, memoryBytes
+}
+
+func persistNodeToken(path, token string) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(token+"\n"), 0o600)
+}
+
+func loadNodeToken(path string) string {
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 func toReportDTO(reports []Report) []map[string]any {

@@ -60,7 +60,7 @@ func (s *Server) handleCreateDeployment(w http.ResponseWriter, r *http.Request) 
 		svID = latest.ID
 	}
 
-	sv, err := s.st.GetStackVersion(ctx, svID)
+	sv, err := s.st.GetStackVersionForStack(ctx, svID, env.StackID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

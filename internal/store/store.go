@@ -41,6 +41,26 @@ func validateSlug(field, slug string) error {
 	return nil
 }
 
+// hostnamePattern is a lowercase DNS name. It is also the Traefik Host()
+// interpolation alphabet: no backticks, spaces, or newlines, so a hostname
+// cannot break out of the file-provider rule.
+var hostnamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+
+const maxHostnameLen = 253
+
+func validateHostname(hostname string) error {
+	if hostname == "" {
+		return nil
+	}
+	if len(hostname) > maxHostnameLen {
+		return fmt.Errorf("%w: hostname must be at most %d characters", ErrInvalid, maxHostnameLen)
+	}
+	if !hostnamePattern.MatchString(hostname) {
+		return fmt.Errorf("%w: hostname must be a lowercase DNS name", ErrInvalid)
+	}
+	return nil
+}
+
 type Store struct {
 	pool *pgxpool.Pool
 }

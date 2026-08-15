@@ -31,6 +31,16 @@ func TestSyncWritesTraefikConfig(t *testing.T) {
 	}
 }
 
+func TestSyncRejectsUnsafeHostname(t *testing.T) {
+	dir := t.TempDir()
+	err := New(dir).Sync([]Route{
+		{Key: "abc12345", Hostname: "x.com`) || Host(`y.com", ServiceContainer: "cc-abc12345-r1-blue-api", Port: 80},
+	})
+	if err == nil {
+		t.Fatal("expected unsafe hostname to be rejected")
+	}
+}
+
 func TestSyncEmptyIsValid(t *testing.T) {
 	dir := t.TempDir()
 	if err := New(dir).Sync(nil); err != nil {

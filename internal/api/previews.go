@@ -119,7 +119,7 @@ func (s *Server) handleCreatePreview(w http.ResponseWriter, r *http.Request) {
 		}
 		svID = latest.ID
 	}
-	sv, err := s.st.GetStackVersion(ctx, svID)
+	sv, err := s.st.GetStackVersionForStack(ctx, svID, stackID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

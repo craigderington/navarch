@@ -116,7 +116,9 @@ so the user fixes everything at once.
 | Directive | Reason |
 |---|---|
 | `build:` | pre-build and push; platform does not build |
-| `privileged`, `cap_add` | breaks isolation |
+| `include`, `extends`, `env_file`, `label_file` | control plane must not read tenant paths |
+| `privileged`, `cap_add`, `cap_drop` | breaks isolation |
+| `pid`/`ipc`/`uts`/`devices`/`security_opt`/`sysctls`/`runtime` | host escape if applied |
 | `container_name` | collides between revisions |
 | `ports: "8080:80"` | host port collides between revisions; use `x-composectl.ingress` |
 | bind mounts | host paths not portable across nodes |

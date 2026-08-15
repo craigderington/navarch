@@ -278,4 +278,38 @@ func TestRollbackDeploymentReusesEarlierVersion(t *testing.T) {
 	}
 }
 
+func TestRollbackRejectsMissingSecrets(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	node, _ := st.RegisterNode(testCtx(t), RegisterNodeParams{
+		OrgID: org.ID, Hostname: uniq("n"), AdvertiseAddr: "10.0.0.3", CPUMillis: 8000, MemoryBytes: 16 << 30})
+	env, _ := st.CreateEnvironment(testCtx(t), CreateEnvironmentParams{StackID: stack.ID, Slug: "prod"})
+
+	secretSpec := specWithImage(t, "nginx:1.25")
+	svc := secretSpec.Services["app"]
+	svc.SecretEnv = map[string]string{"PASSWORD": "${secret:db_password}"}
+	secretSpec.Services["app"] = svc
+
+	if err := st.SetSecret(testCtx(t), env.ID, "db_password", []byte("ct"), "age1x"); err != nil {
+		t.Fatalf("set secret: %v", err)
+	}
+	v1, _ := st.CreateStackVersion(testCtx(t), stack.ID, "raw1", secretSpec, "t")
+	d1, _ := st.CreateDeployment(testCtx(t), CreateDeploymentParams{EnvironmentID: env.ID, StackVersionID: v1.ID, ResolvedSpec: secretSpec})
+	driveToLive(t, st, d1, node)
+
+	v2, _ := st.CreateStackVersion(testCtx(t), stack.ID, "raw2", specWithImage(t, "nginx:1.27"), "t")
+	d2, _ := st.CreateDeployment(testCtx(t), CreateDeploymentParams{EnvironmentID: env.ID, StackVersionID: v2.ID, ResolvedSpec: v2.Spec})
+	driveToLive(t, st, d2, node)
+
+	if err := st.DeleteSecret(testCtx(t), env.ID, "db_password"); err != nil {
+		t.Fatalf("delete secret: %v", err)
+	}
+	_, err := st.RollbackDeployment(testCtx(t), env.ID, 1)
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("expected ErrInvalid when rollback is missing secrets, got %v", err)
+	}
+}
+
 func errorsIs(err, target error) bool { return errors.Is(err, target) }

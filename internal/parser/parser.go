@@ -43,6 +43,13 @@ var secretRefPattern = regexp.MustCompile(`\$\{secret:([A-Za-z0-9_.-]+)\}`)
 // the resulting spec, which must be project-name independent so the same
 // spec can be deployed to multiple environments.
 func Parse(ctx context.Context, raw []byte, projectName string) (*spec.DeploymentSpec, error) {
+	// File-loading directives are rejected from the raw document so the
+	// loader never opens a tenant-supplied path on the control plane.
+	if verrs := preflight(raw); len(verrs) > 0 {
+		sort.Slice(verrs, func(i, j int) bool { return verrs[i].Field < verrs[j].Field })
+		return nil, verrs
+	}
+
 	// Load with compose-go's consistency check deferred. That check is
 	// fail-fast: it returns on the first problem, and two of the problems
 	// it looks for (dependency cycles, depends_on naming an unknown
@@ -73,7 +80,25 @@ func Parse(ctx context.Context, raw []byte, projectName string) (*spec.Deploymen
 	// Register named volumes and assign ownership. Ownership determines
 	// node pinning: the volume lives wherever its owning service runs.
 	misparsed := misparsedVolumeNames(project.Services)
-	for volName := range project.Volumes {
+	for volName, vol := range project.Volumes {
+		if len(vol.DriverOpts) > 0 {
+			verrs = append(verrs, ValidationError{
+				Field:   "volumes." + volName,
+				Message: "volume driver_opts are not supported",
+			})
+		}
+		if vol.Driver != "" && vol.Driver != "local" {
+			verrs = append(verrs, ValidationError{
+				Field:   "volumes." + volName,
+				Message: "custom volume drivers are not supported",
+			})
+		}
+		if vol.External {
+			verrs = append(verrs, ValidationError{
+				Field:   "volumes." + volName,
+				Message: "external volumes are not supported",
+			})
+		}
 		owner, count := volumeOwner(project.Services, volName)
 		if count == 0 {
 			if misparsed[volName] {
@@ -105,6 +130,12 @@ func Parse(ctx context.Context, raw []byte, projectName string) (*spec.Deploymen
 
 	if errs := validateGraph(s); len(errs) > 0 {
 		verrs = append(verrs, errs...)
+	}
+	if len(s.Services) == 0 {
+		verrs = append(verrs, ValidationError{
+			Field:   "services",
+			Message: "services is empty; a stack must declare at least one service",
+		})
 	}
 
 	if len(verrs) > 0 {
@@ -142,6 +173,11 @@ func load(ctx context.Context, raw []byte, projectName string, deferConsistency 
 		o.SkipResolveEnvironment = true
 		o.ResolvePaths = false
 		o.SkipConsistencyCheck = deferConsistency
+		// Defense in depth: preflight already rejected these, but if a
+		// future loader path bypasses preflight the files still must
+		// not be opened.
+		o.SkipInclude = true
+		o.SkipExtends = true
 	})
 }
 
@@ -186,6 +222,106 @@ func convertService(name string, svc types.ServiceConfig) (spec.Service, Validat
 	if len(svc.CapAdd) > 0 {
 		errs = append(errs, ValidationError{field("cap_add"),
 			"added capabilities are not permitted"})
+	}
+	if len(svc.CapDrop) > 0 {
+		errs = append(errs, ValidationError{field("cap_drop"),
+			"capability changes are not permitted"})
+	}
+	if svc.Pid != "" {
+		errs = append(errs, ValidationError{field("pid"),
+			"custom pid mode is not permitted"})
+	}
+	if svc.Ipc != "" {
+		errs = append(errs, ValidationError{field("ipc"),
+			"custom ipc mode is not permitted"})
+	}
+	if svc.Uts != "" {
+		errs = append(errs, ValidationError{field("uts"),
+			"custom uts mode is not permitted"})
+	}
+	if svc.UserNSMode != "" {
+		errs = append(errs, ValidationError{field("userns_mode"),
+			"custom userns_mode is not permitted"})
+	}
+	if svc.Runtime != "" {
+		errs = append(errs, ValidationError{field("runtime"),
+			"custom runtime is not permitted"})
+	}
+	if len(svc.Devices) > 0 {
+		errs = append(errs, ValidationError{field("devices"),
+			"host device passthrough is not permitted"})
+	}
+	if len(svc.DeviceCgroupRules) > 0 {
+		errs = append(errs, ValidationError{field("device_cgroup_rules"),
+			"device cgroup rules are not permitted"})
+	}
+	if len(svc.Gpus) > 0 {
+		errs = append(errs, ValidationError{field("gpus"),
+			"gpu passthrough is not permitted"})
+	}
+	if len(svc.SecurityOpt) > 0 {
+		errs = append(errs, ValidationError{field("security_opt"),
+			"security_opt is not permitted"})
+	}
+	if len(svc.Sysctls) > 0 {
+		errs = append(errs, ValidationError{field("sysctls"),
+			"sysctls are not permitted"})
+	}
+	if svc.CgroupParent != "" || svc.Cgroup != "" {
+		errs = append(errs, ValidationError{field("cgroup"),
+			"custom cgroup configuration is not permitted"})
+	}
+	if len(svc.VolumesFrom) > 0 {
+		errs = append(errs, ValidationError{field("volumes_from"),
+			"volumes_from is not permitted"})
+	}
+	if len(svc.ExtraHosts) > 0 {
+		errs = append(errs, ValidationError{field("extra_hosts"),
+			"extra_hosts is not permitted"})
+	}
+	if svc.Logging != nil || svc.LogDriver != "" || len(svc.LogOpt) > 0 {
+		errs = append(errs, ValidationError{field("logging"),
+			"custom logging drivers are not permitted"})
+	}
+	if svc.Isolation != "" {
+		errs = append(errs, ValidationError{field("isolation"),
+			"custom isolation is not permitted"})
+	}
+	if len(svc.StorageOpt) > 0 {
+		errs = append(errs, ValidationError{field("storage_opt"),
+			"storage_opt is not permitted"})
+	}
+	if svc.VolumeDriver != "" {
+		errs = append(errs, ValidationError{field("volume_driver"),
+			"volume_driver is not permitted"})
+	}
+	if svc.CredentialSpec != nil {
+		errs = append(errs, ValidationError{field("credential_spec"),
+			"credential_spec is not permitted"})
+	}
+	if svc.OomKillDisable {
+		errs = append(errs, ValidationError{field("oom_kill_disable"),
+			"oom_kill_disable is not permitted"})
+	}
+	if svc.Build != nil {
+		errs = append(errs, ValidationError{field("build"),
+			"build directives are not supported (pre-build and push instead)"})
+	}
+	if len(svc.Secrets) > 0 {
+		errs = append(errs, ValidationError{field("secrets"),
+			"compose secrets are not supported; use ${secret:KEY} environment templates"})
+	}
+	if len(svc.Configs) > 0 {
+		errs = append(errs, ValidationError{field("configs"),
+			"compose configs are not supported"})
+	}
+	if len(svc.Tmpfs) > 0 {
+		errs = append(errs, ValidationError{field("tmpfs"),
+			"tmpfs is not supported"})
+	}
+	if len(svc.Links) > 0 || len(svc.ExternalLinks) > 0 {
+		errs = append(errs, ValidationError{field("links"),
+			"links are not permitted"})
 	}
 
 	// --- environment & secrets ------------------------------------------
@@ -265,10 +401,8 @@ func convertService(name string, svc types.ServiceConfig) (spec.Service, Validat
 				out.Swappable = false
 			}
 		case "tmpfs":
-			out.Mounts = append(out.Mounts, spec.Mount{
-				Kind:   spec.MountTmpfs,
-				Target: v.Target,
-			})
+			errs = append(errs, ValidationError{field("volumes"),
+				fmt.Sprintf("tmpfs mount at %q is not supported", v.Target)})
 		case "bind":
 			errs = append(errs, ValidationError{field("volumes"),
 				fmt.Sprintf("bind mount %q is not permitted; host paths are not portable across nodes", v.Source)})
@@ -281,7 +415,11 @@ func convertService(name string, svc types.ServiceConfig) (spec.Service, Validat
 
 	// --- depends_on -----------------------------------------------------
 
-	for dep := range svc.DependsOn {
+	for dep, cfg := range svc.DependsOn {
+		if cfg.Condition != "" && cfg.Condition != types.ServiceConditionStarted {
+			errs = append(errs, ValidationError{field("depends_on"),
+				fmt.Sprintf("depends_on condition %q is not supported; services start in dependency order", cfg.Condition)})
+		}
 		out.Depends = append(out.Depends, dep)
 	}
 	sort.Strings(out.Depends)

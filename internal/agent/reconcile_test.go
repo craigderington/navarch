@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -26,6 +27,7 @@ type fakeDriver struct {
 	removeEnvErrs   map[string]error // env8 -> error RemoveEnv should return for it
 	prunedNetworks  []string
 	pruneErrs       map[string]error
+	routerNets      []string
 
 	// removeEnvCalls records every RemoveEnv invocation including the failing
 	// ones, which removedEnvs (successes only) cannot distinguish from a call
@@ -38,7 +40,13 @@ type fakeDriver struct {
 	volumesAtCreate int
 }
 
-func (f *fakeDriver) EnsureImage(ctx context.Context, ref string) error { return nil }
+func (f *fakeDriver) EnsureImage(ctx context.Context, ref string) (string, error) {
+	return ref, nil
+}
+func (f *fakeDriver) AttachRouterToNetwork(ctx context.Context, network string) error {
+	f.routerNets = append(f.routerNets, network)
+	return nil
+}
 func (f *fakeDriver) EnsureNetwork(ctx context.Context, name string, l map[string]string) (string, error) {
 	return "net-" + name, nil
 }
@@ -169,6 +177,37 @@ func TestReconcileRetriesNetworkPruneFailure(t *testing.T) {
 	}
 }
 
+func TestReconcileStartsDependenciesFirst(t *testing.T) {
+	f := &fakeDriver{}
+	r := NewReconciler(f)
+	api := desired("api", true, dockerd.Health{})
+	api.Service.Depends = []string{"db"}
+	db := desired("db", false, dockerd.Health{})
+	r.Reconcile(context.Background(), []store.DesiredInstance{api, db}, nil, nil)
+	if len(f.created) != 2 {
+		t.Fatalf("expected 2 containers, got %v", f.created)
+	}
+	if f.created[0] != "cc-env12345-pinned-db" {
+		t.Fatalf("dependency must start first, created=%v", f.created)
+	}
+}
+
+func TestNoHealthcheckDebouncesBeforeRunning(t *testing.T) {
+	f := &fakeDriver{}
+	r := NewReconciler(f)
+	r.debounce = time.Hour
+	d := desired("api", true, dockerd.Health{})
+	reports, _ := r.Reconcile(context.Background(), []store.DesiredInstance{d}, nil, nil)
+	if reports[0].State != store.InstanceStarting {
+		t.Fatalf("fresh no-healthcheck container must stay starting, got %s", reports[0].State)
+	}
+	r.firstRunning[d.InstanceID] = time.Now().Add(-2 * time.Hour)
+	reports, _ = r.Reconcile(context.Background(), []store.DesiredInstance{d}, nil, nil)
+	if reports[0].State != store.InstanceRunning {
+		t.Fatalf("after debounce, running container must map to running, got %s", reports[0].State)
+	}
+}
+
 func TestHealthMappingHealthchecked(t *testing.T) {
 	f := &fakeDriver{health: map[string]dockerd.Health{
 		"id-cc-env12345-r1-blue-api": {Running: true, Status: "healthy"},
@@ -197,20 +236,19 @@ func TestHealthMappingExitedFails(t *testing.T) {
 	}
 }
 
-func TestReconcileAttachesIngressToSharedNetwork(t *testing.T) {
+func TestReconcileAttachesRouterToRevisionNetwork(t *testing.T) {
 	f := &fakeDriver{health: map[string]dockerd.Health{}}
 	r := NewReconciler(f)
 	d := desired("api", true, dockerd.Health{})
 	d.Service.Ingress = &spec.Ingress{Port: 80}
 	r.Reconcile(context.Background(), []store.DesiredInstance{d}, nil, nil)
-	var attached bool
+	if len(f.routerNets) != 1 || f.routerNets[0] != d.ProjectName {
+		t.Fatalf("router must join the revision network, got %v", f.routerNets)
+	}
 	for _, a := range f.attached {
 		if strings.HasSuffix(a, "->cc-ingress") {
-			attached = true
+			t.Fatalf("tenant ingress must not join cc-ingress, got attaches=%v", f.attached)
 		}
-	}
-	if !attached {
-		t.Fatalf("ingress container must join cc-ingress, got attaches=%v", f.attached)
 	}
 }
 

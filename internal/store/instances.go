@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -21,17 +22,72 @@ type NewInstance struct {
 // double-schedule a no-op rather than a duplicate.
 func (s *Store) CreateServiceInstances(ctx context.Context, deploymentID, nodeID uuid.UUID, insts []NewInstance) error {
 	return s.tx(ctx, func(tx pgx.Tx) error {
-		for _, in := range insts {
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO service_instances
-					(deployment_id, node_id, service_name, swappable, image_ref, state)
-				VALUES ($1,$2,$3,$4,$5,'pending')
-				ON CONFLICT (deployment_id, service_name) DO NOTHING
-			`, deploymentID, nodeID, in.ServiceName, in.Swappable, in.ImageRef); err != nil {
-				return err
-			}
+		return insertInstancesTx(ctx, tx, deploymentID, nodeID, insts)
+	})
+}
+
+func insertInstancesTx(ctx context.Context, tx pgx.Tx, deploymentID, nodeID uuid.UUID, insts []NewInstance) error {
+	for _, in := range insts {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO service_instances
+				(deployment_id, node_id, service_name, swappable, image_ref, state)
+			VALUES ($1,$2,$3,$4,$5,'pending')
+			ON CONFLICT (deployment_id, service_name) DO NOTHING
+		`, deploymentID, nodeID, in.ServiceName, in.Swappable, in.ImageRef); err != nil {
+			return err
 		}
-		return nil
+	}
+	return nil
+}
+
+// PlaceDeployment reserves node capacity and writes instances in one
+// transaction so two pending rollouts cannot both see the same free space.
+func (s *Store) PlaceDeployment(ctx context.Context, depID, nodeID uuid.UUID, insts []NewInstance, peakCPU int, peakMem int64) error {
+	return s.tx(ctx, func(tx pgx.Tx) error {
+		var state DeploymentState
+		if err := tx.QueryRow(ctx, `
+			SELECT state FROM deployments WHERE id=$1 FOR UPDATE
+		`, depID).Scan(&state); err != nil {
+			return err
+		}
+		if state != DeployPending {
+			return nil
+		}
+		var cpu, mem int64
+		var allocCPU int
+		var allocMem int64
+		if err := tx.QueryRow(ctx, `
+			SELECT cpu_millis, memory_bytes, alloc_cpu_millis, alloc_memory_bytes
+			FROM nodes WHERE id=$1 FOR UPDATE
+		`, nodeID).Scan(&cpu, &mem, &allocCPU, &allocMem); err != nil {
+			return err
+		}
+		if int64(cpu)-int64(allocCPU) < int64(peakCPU) || mem-allocMem < peakMem {
+			return fmt.Errorf("%w: node lacks capacity for this rollout", ErrConflict)
+		}
+		if err := insertInstancesTx(ctx, tx, depID, nodeID, insts); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE nodes
+			SET alloc_cpu_millis = alloc_cpu_millis + $2,
+			    alloc_memory_bytes = alloc_memory_bytes + $3
+			WHERE id=$1
+		`, nodeID, peakCPU, peakMem); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `
+			UPDATE deployments SET state='scheduling', failure_reason=NULL
+			WHERE id=$1 AND state='pending'
+		`, depID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("%w: illegal transition to scheduling", ErrConflict)
+		}
+		return appendDeploymentEventTx(ctx, tx, depID, "deployment.state_changed",
+			"deployment entered scheduling", map[string]any{"state": DeployScheduling})
 	})
 }
 
@@ -146,6 +202,37 @@ func (s *Store) InstanceStates(ctx context.Context, deploymentID uuid.UUID) ([]I
 }
 
 func (s *Store) DeleteInstances(ctx context.Context, deploymentID uuid.UUID) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM service_instances WHERE deployment_id=$1`, deploymentID)
+	err := s.tx(ctx, func(tx pgx.Tx) error {
+		var nodeID *uuid.UUID
+		var specJSON []byte
+		err := tx.QueryRow(ctx, `
+			SELECT si.node_id, d.resolved_spec
+			FROM deployments d
+			LEFT JOIN service_instances si ON si.deployment_id = d.id
+			WHERE d.id=$1
+			LIMIT 1
+		`, deploymentID).Scan(&nodeID, &specJSON)
+		if err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM service_instances WHERE deployment_id=$1`, deploymentID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 || nodeID == nil || len(specJSON) == 0 {
+			return nil
+		}
+		var ds spec.DeploymentSpec
+		if err := json.Unmarshal(specJSON, &ds); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE nodes
+			SET alloc_cpu_millis = GREATEST(0, alloc_cpu_millis - $2),
+			    alloc_memory_bytes = GREATEST(0, alloc_memory_bytes - $3)
+			WHERE id=$1
+		`, *nodeID, ds.PeakCPUMillis(), ds.PeakMemoryBytes())
+		return err
+	})
 	return mapErr(err)
 }

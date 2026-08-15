@@ -36,6 +36,9 @@ func (s *Store) CreatePreview(ctx context.Context, p CreatePreviewParams) (*Envi
 	if err := validateSlug("slug", p.Slug); err != nil {
 		return nil, nil, err
 	}
+	if err := validateHostname(p.Hostname); err != nil {
+		return nil, nil, err
+	}
 
 	envID := p.EnvironmentID
 	if envID == uuid.Nil {
