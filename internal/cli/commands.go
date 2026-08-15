@@ -18,7 +18,7 @@ func cmdHealth(ctx context.Context, e env) error {
 }
 
 func cmdValidate(ctx context.Context, e env, args []string) error {
-	if err := need(args, 1, "usage: composectl validate FILE"); err != nil {
+	if err := need(args, 1, "usage: navarch validate FILE"); err != nil {
 		return err
 	}
 	raw, err := readFileOrStdin(args[0])
@@ -46,7 +46,7 @@ func cmdValidate(ctx context.Context, e env, args []string) error {
 
 func cmdOrg(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: composectl org list|create ...")
+		return usage("usage: navarch org list|create ...")
 	}
 	switch args[0] {
 	case "list":
@@ -60,7 +60,7 @@ func cmdOrg(ctx context.Context, e env, args []string) error {
 		}
 		return emit(e, orgs, []string{"ID", "SLUG", "NAME", "CREATED"}, rows)
 	case "create":
-		if err := need(args, 2, "usage: composectl org create SLUG [--name NAME]"); err != nil {
+		if err := need(args, 2, "usage: navarch org create SLUG [--name NAME]"); err != nil {
 			return err
 		}
 		flags, pos, err := flagMap(args[1:])
@@ -68,7 +68,7 @@ func cmdOrg(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if len(pos) < 1 {
-			return usage("usage: composectl org create SLUG [--name NAME]")
+			return usage("usage: navarch org create SLUG [--name NAME]")
 		}
 		name := flags["name"]
 		if name == "" {
@@ -80,13 +80,13 @@ func cmdOrg(ctx context.Context, e env, args []string) error {
 		}
 		return emitOne(e, o, []string{"ID", "SLUG", "NAME"}, []string{o.ID, o.Slug, o.Name})
 	default:
-		return usage("usage: composectl org list|create ...")
+		return usage("usage: navarch org list|create ...")
 	}
 }
 
 func cmdApp(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: composectl app list|create --org ID ...")
+		return usage("usage: navarch app list|create --org ID ...")
 	}
 	switch args[0] {
 	case "list":
@@ -96,7 +96,7 @@ func cmdApp(ctx context.Context, e env, args []string) error {
 		}
 		org := flags["org"]
 		if org == "" {
-			return usage("usage: composectl app list --org ID")
+			return usage("usage: navarch app list --org ID")
 		}
 		apps, err := e.c.ListApps(ctx, org)
 		if err != nil {
@@ -113,7 +113,7 @@ func cmdApp(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if len(pos) < 1 || flags["org"] == "" {
-			return usage("usage: composectl app create SLUG --org ID [--name NAME]")
+			return usage("usage: navarch app create SLUG --org ID [--name NAME]")
 		}
 		name := flags["name"]
 		if name == "" {
@@ -125,13 +125,13 @@ func cmdApp(ctx context.Context, e env, args []string) error {
 		}
 		return emitOne(e, a, []string{"ID", "SLUG", "NAME", "ORG"}, []string{a.ID, a.Slug, a.Name, a.OrgID})
 	default:
-		return usage("usage: composectl app list|create --org ID ...")
+		return usage("usage: navarch app list|create --org ID ...")
 	}
 }
 
 func cmdStack(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: composectl stack list|create|get|push|versions ...")
+		return usage("usage: navarch stack list|create|get|push|versions ...")
 	}
 	switch args[0] {
 	case "list":
@@ -140,7 +140,7 @@ func cmdStack(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["app"] == "" {
-			return usage("usage: composectl stack list --app ID")
+			return usage("usage: navarch stack list --app ID")
 		}
 		stacks, err := e.c.ListStacks(ctx, flags["app"])
 		if err != nil {
@@ -157,7 +157,7 @@ func cmdStack(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if len(pos) < 1 || flags["app"] == "" {
-			return usage("usage: composectl stack create SLUG --app ID")
+			return usage("usage: navarch stack create SLUG --app ID")
 		}
 		s, err := e.c.CreateStack(ctx, flags["app"], pos[0])
 		if err != nil {
@@ -165,7 +165,7 @@ func cmdStack(ctx context.Context, e env, args []string) error {
 		}
 		return emitOne(e, s, []string{"ID", "SLUG", "APP"}, []string{s.ID, s.Slug, s.AppID})
 	case "get":
-		if err := need(args, 2, "usage: composectl stack get ID"); err != nil {
+		if err := need(args, 2, "usage: navarch stack get ID"); err != nil {
 			return err
 		}
 		s, err := e.c.GetStack(ctx, args[1])
@@ -179,7 +179,7 @@ func cmdStack(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if len(pos) < 2 {
-			return usage("usage: composectl stack push STACK_ID FILE [--created-by NAME]")
+			return usage("usage: navarch stack push STACK_ID FILE [--created-by NAME]")
 		}
 		raw, err := readFileOrStdin(pos[1])
 		if err != nil {
@@ -191,7 +191,7 @@ func cmdStack(ctx context.Context, e env, args []string) error {
 		}
 		return emitOne(e, sv, []string{"ID", "VERSION", "DIGEST"}, []string{sv.ID, strconv.Itoa(sv.Version), sv.SpecDigest})
 	case "versions":
-		if err := need(args, 2, "usage: composectl stack versions STACK_ID"); err != nil {
+		if err := need(args, 2, "usage: navarch stack versions STACK_ID"); err != nil {
 			return err
 		}
 		vs, err := e.c.ListStackVersions(ctx, args[1])
@@ -204,13 +204,13 @@ func cmdStack(ctx context.Context, e env, args []string) error {
 		}
 		return emit(e, vs, []string{"ID", "VERSION", "DIGEST", "CREATED_BY", "CREATED"}, rows)
 	default:
-		return usage("usage: composectl stack list|create|get|push|versions ...")
+		return usage("usage: navarch stack list|create|get|push|versions ...")
 	}
 }
 
 func cmdEnv(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: composectl env list|create|get ...")
+		return usage("usage: navarch env list|create|get ...")
 	}
 	switch args[0] {
 	case "list":
@@ -219,7 +219,7 @@ func cmdEnv(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["stack"] == "" {
-			return usage("usage: composectl env list --stack ID")
+			return usage("usage: navarch env list --stack ID")
 		}
 		envs, err := e.c.ListEnvs(ctx, flags["stack"])
 		if err != nil {
@@ -240,7 +240,7 @@ func cmdEnv(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if len(pos) < 1 || flags["stack"] == "" {
-			return usage("usage: composectl env create SLUG --stack ID [--hostname HOST] [--config k=v]")
+			return usage("usage: navarch env create SLUG --stack ID [--hostname HOST] [--config k=v]")
 		}
 		in := client.CreateEnvInput{Slug: pos[0], Hostname: flags["hostname"], Strategy: flags["strategy"]}
 		if flags["config"] != "" {
@@ -252,7 +252,7 @@ func cmdEnv(ctx context.Context, e env, args []string) error {
 		}
 		return emitOne(e, ev, []string{"ID", "SLUG", "HOSTNAME"}, []string{ev.ID, ev.Slug, ev.Hostname})
 	case "get":
-		if err := need(args, 2, "usage: composectl env get ID"); err != nil {
+		if err := need(args, 2, "usage: navarch env get ID"); err != nil {
 			return err
 		}
 		ev, err := e.c.GetEnv(ctx, args[1])
@@ -265,20 +265,20 @@ func cmdEnv(ctx context.Context, e env, args []string) error {
 		}
 		return emitOne(e, ev, []string{"ID", "SLUG", "HOSTNAME", "LIVE"}, []string{ev.ID, ev.Slug, ev.Hostname, live})
 	default:
-		return usage("usage: composectl env list|create|get ...")
+		return usage("usage: navarch env list|create|get ...")
 	}
 }
 
 func cmdPreview(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 || args[0] != "create" {
-		return usage("usage: composectl preview create --stack ID --slug SLUG [--inherit ENV_SLUG] [--ttl HOURS] [--version ID]")
+		return usage("usage: navarch preview create --stack ID --slug SLUG [--inherit ENV_SLUG] [--ttl HOURS] [--version ID]")
 	}
 	flags, _, err := flagMap(args[1:])
 	if err != nil {
 		return err
 	}
 	if flags["stack"] == "" || flags["slug"] == "" {
-		return usage("usage: composectl preview create --stack ID --slug SLUG [--inherit ENV_SLUG] [--ttl HOURS] [--version ID]")
+		return usage("usage: navarch preview create --stack ID --slug SLUG [--inherit ENV_SLUG] [--ttl HOURS] [--version ID]")
 	}
 	in := client.CreatePreviewInput{
 		Slug:               flags["slug"],
@@ -307,7 +307,7 @@ func cmdDeploy(ctx context.Context, e env, args []string) error {
 		return err
 	}
 	if flags["env"] == "" {
-		return usage("usage: composectl deploy --env ID [--version ID] [--created-by NAME]")
+		return usage("usage: navarch deploy --env ID [--version ID] [--created-by NAME]")
 	}
 	d, err := e.c.Deploy(ctx, flags["env"], flags["version"], flags["created-by"])
 	if err != nil {
@@ -319,7 +319,7 @@ func cmdDeploy(ctx context.Context, e env, args []string) error {
 
 func cmdDeployment(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: composectl deployment list|get ...")
+		return usage("usage: navarch deployment list|get ...")
 	}
 	switch args[0] {
 	case "list":
@@ -328,7 +328,7 @@ func cmdDeployment(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["env"] == "" {
-			return usage("usage: composectl deployment list --env ID")
+			return usage("usage: navarch deployment list --env ID")
 		}
 		ds, err := e.c.ListDeployments(ctx, flags["env"])
 		if err != nil {
@@ -340,7 +340,7 @@ func cmdDeployment(ctx context.Context, e env, args []string) error {
 		}
 		return emit(e, ds, []string{"ID", "REV", "SLOT", "STATE", "FAILURE"}, rows)
 	case "get":
-		if err := need(args, 2, "usage: composectl deployment get ID"); err != nil {
+		if err := need(args, 2, "usage: navarch deployment get ID"); err != nil {
 			return err
 		}
 		d, err := e.c.GetDeployment(ctx, args[1])
@@ -350,12 +350,12 @@ func cmdDeployment(ctx context.Context, e env, args []string) error {
 		return emitOne(e, d, []string{"ID", "REV", "SLOT", "STATE", "PROJECT"},
 			[]string{d.ID, strconv.Itoa(d.Revision), d.Slot, d.State, d.ProjectName})
 	default:
-		return usage("usage: composectl deployment list|get ...")
+		return usage("usage: navarch deployment list|get ...")
 	}
 }
 
 func cmdPromote(ctx context.Context, e env, args []string) error {
-	if err := need(args, 1, "usage: composectl promote DEPLOYMENT_ID"); err != nil {
+	if err := need(args, 1, "usage: navarch promote DEPLOYMENT_ID"); err != nil {
 		return err
 	}
 	out, err := e.c.Promote(ctx, args[0])
@@ -378,7 +378,7 @@ func cmdRollback(ctx context.Context, e env, args []string) error {
 		return err
 	}
 	if flags["env"] == "" {
-		return usage("usage: composectl rollback --env ID [--to REVISION]")
+		return usage("usage: navarch rollback --env ID [--to REVISION]")
 	}
 	to := 0
 	if flags["to"] != "" {
@@ -397,7 +397,7 @@ func cmdRollback(ctx context.Context, e env, args []string) error {
 
 func cmdSecret(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: composectl secret list|set|delete ...")
+		return usage("usage: navarch secret list|set|delete ...")
 	}
 	switch args[0] {
 	case "list":
@@ -406,7 +406,7 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["env"] == "" {
-			return usage("usage: composectl secret list --env ID")
+			return usage("usage: navarch secret list --env ID")
 		}
 		secs, err := e.c.ListSecrets(ctx, flags["env"])
 		if err != nil {
@@ -423,7 +423,7 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["env"] == "" || len(pos) < 2 {
-			return usage("usage: composectl secret set --env ID KEY VALUE")
+			return usage("usage: navarch secret set --env ID KEY VALUE")
 		}
 		if err := e.c.SetSecret(ctx, flags["env"], pos[0], pos[1]); err != nil {
 			return err
@@ -439,7 +439,7 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["env"] == "" || len(pos) < 1 {
-			return usage("usage: composectl secret delete --env ID KEY")
+			return usage("usage: navarch secret delete --env ID KEY")
 		}
 		if err := e.c.DeleteSecret(ctx, flags["env"], pos[0]); err != nil {
 			return err
@@ -450,13 +450,13 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 		fmt.Fprintf(e.out, "deleted\t%s\n", pos[0])
 		return nil
 	default:
-		return usage("usage: composectl secret list|set|delete ...")
+		return usage("usage: navarch secret list|set|delete ...")
 	}
 }
 
 func cmdNode(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: composectl node list|get|drain ...")
+		return usage("usage: navarch node list|get|drain ...")
 	}
 	switch args[0] {
 	case "list":
@@ -465,7 +465,7 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 			return err
 		}
 		if flags["org"] == "" {
-			return usage("usage: composectl node list --org ID")
+			return usage("usage: navarch node list --org ID")
 		}
 		nodes, err := e.c.ListNodes(ctx, flags["org"])
 		if err != nil {
@@ -477,7 +477,7 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		}
 		return emit(e, nodes, []string{"ID", "HOSTNAME", "STATE", "ADDR", "CPU_MILLIS"}, rows)
 	case "get":
-		if err := need(args, 2, "usage: composectl node get ID"); err != nil {
+		if err := need(args, 2, "usage: navarch node get ID"); err != nil {
 			return err
 		}
 		n, err := e.c.GetNode(ctx, args[1])
@@ -487,7 +487,7 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		return emitOne(e, n, []string{"ID", "HOSTNAME", "STATE", "ADDR"},
 			[]string{n.ID, n.Hostname, n.State, n.AdvertiseAddr})
 	case "drain":
-		if err := need(args, 2, "usage: composectl node drain ID"); err != nil {
+		if err := need(args, 2, "usage: navarch node drain ID"); err != nil {
 			return err
 		}
 		if err := e.c.DrainNode(ctx, args[1]); err != nil {
@@ -499,7 +499,7 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		fmt.Fprintf(e.out, "draining\t%s\n", args[1])
 		return nil
 	default:
-		return usage("usage: composectl node list|get|drain ...")
+		return usage("usage: navarch node list|get|drain ...")
 	}
 }
 
@@ -509,7 +509,7 @@ func cmdWait(ctx context.Context, e env, args []string) error {
 		return err
 	}
 	if len(pos) < 1 {
-		return usage("usage: composectl wait DEPLOYMENT_ID [--state live] [--timeout 180]")
+		return usage("usage: navarch wait DEPLOYMENT_ID [--state live] [--timeout 180]")
 	}
 	want := flags["state"]
 	if want == "" {
@@ -552,7 +552,7 @@ func cmdEvents(ctx context.Context, e env, args []string) error {
 		return err
 	}
 	if flags["org"] == "" {
-		return usage("usage: composectl events --org ID [--limit N] [--before ID]")
+		return usage("usage: navarch events --org ID [--limit N] [--before ID]")
 	}
 	limit := 0
 	if flags["limit"] != "" {

@@ -45,7 +45,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if cmd == "version" {
-		fmt.Fprintf(stdout, "composectl %s\n", version)
+		fmt.Fprintf(stdout, "navarch %s\n", version)
 		return 0
 	}
 
@@ -278,14 +278,14 @@ func readFileOrStdin(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-const rootHelp = `composectl — command the Navarch / composectl control plane
+const rootHelp = `navarch — command the Navarch control plane
 
 Usage:
-  composectl [global flags] <command> [arguments]
+  navarch [global flags] <command> [arguments]
 
 Global flags:
-  --url URL            Control plane URL (env COMPOSECTL_URL, default http://localhost:8417)
-  --token TOKEN        Bearer token (env COMPOSECTL_TOKEN or COMPOSECTL_AGENT_TOKEN)
+  --url URL            Control plane URL (env NAVARCH_URL, default http://localhost:8417)
+  --token TOKEN        Bearer token (env NAVARCH_TOKEN or NAVARCH_AGENT_TOKEN)
   --token-file PATH    Read token from a file
   --output, -o FMT     table (default) or json
 
@@ -303,16 +303,19 @@ Commands:
   rollback             Re-deploy an earlier revision
   secret               Set, list, and delete environment secrets
   node                 List, get, and drain nodes
-	events               Organization audit timeline
+  events               Organization audit timeline
   wait ID              Block until a deployment reaches a state
   version              Print CLI version
 
-Config file (lowest precedence): $COMPOSECTL_CONFIG or ~/.config/composectl/config.yaml
+Config file (lowest precedence): $NAVARCH_CONFIG or ~/.config/navarch/config.yaml
+
+The previous COMPOSECTL_* variables and ~/.config/composectl/config.yaml are
+still read, at lower precedence, so an existing setup keeps working.
 
 Examples:
-  composectl health
-  composectl validate examples/hello/compose.yaml
-  composectl stack push $STACK examples/hello/compose.yaml
-  composectl deploy --env $ENV
-  composectl events --org $ORG --limit 20
+  navarch health
+  navarch validate examples/hello/compose.yaml
+  navarch stack push $STACK examples/hello/compose.yaml
+  navarch deploy --env $ENV
+  navarch events --org $ORG --limit 20
 `

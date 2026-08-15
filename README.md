@@ -51,24 +51,31 @@ make test          # race-enabled Go test suite
 
 ## CLI
 
-`composectl` is the operator client. It speaks the same bearer token as the
+`navarch` is the operator client. It speaks the same bearer token as the
 API and prints tables by default (`--output json` for scripts).
 
 ```bash
-make build                 # writes bin/composectl
-export COMPOSECTL_URL=http://localhost:8417
-export COMPOSECTL_TOKEN=dev-token-change-me
+make build                 # writes bin/navarch
+export NAVARCH_URL=http://localhost:8417
+export NAVARCH_TOKEN=dev-token-change-me
 
-composectl health
-composectl validate examples/hello/compose.yaml
-composectl org list
-composectl stack push <stack-id> examples/hello/compose.yaml
-composectl deploy --env <env-id>
-composectl events --org <org-id>
+navarch health
+navarch validate examples/hello/compose.yaml
+navarch org list
+navarch stack push <stack-id> examples/hello/compose.yaml
+navarch deploy --env <env-id>
+navarch events --org <org-id>
 ```
 
-Config file (optional): `~/.config/composectl/config.yaml` with `url` and `token`.
+Config file (optional): `~/.config/navarch/config.yaml` with `url` and `token`.
 Flags override the environment; the environment overrides the file.
+
+The CLI was previously named `composectl`. `COMPOSECTL_URL`, `COMPOSECTL_TOKEN`,
+`COMPOSECTL_TOKEN_FILE`, `COMPOSECTL_AGENT_TOKEN`, `COMPOSECTL_CONFIG` and
+`~/.config/composectl/config.yaml` are still read at lower precedence, so an
+existing setup keeps working. Only the CLI was renamed — the Go module path,
+the control plane's own `COMPOSECTL_*` configuration, and the `cc-` container
+and label namespace are deliberately unchanged.
 
 Direct API requests require a bearer token:
 

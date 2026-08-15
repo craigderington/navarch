@@ -16,7 +16,7 @@ tidy: ## Resolve module dependencies
 .PHONY: build
 build: ## Build binaries into ./bin
 	CGO_ENABLED=0 go build -o bin/controlplane ./cmd/controlplane
-	CGO_ENABLED=0 go build -o bin/composectl ./cmd/composectl
+	CGO_ENABLED=0 go build -o bin/navarch ./cmd/navarch
 
 .PHONY: test
 test: ## Run tests

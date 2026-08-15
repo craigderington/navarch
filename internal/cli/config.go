@@ -9,13 +9,29 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// The CLI is named navarch; NAVARCH_* is the name for its environment. Each
+// variable keeps its COMPOSECTL_* predecessor as a lower-precedence fallback so
+// the rename does not fail closed on a shell profile that was set before it —
+// these carry the bearer token, and an unset token is an immediate hard error
+// rather than a degraded mode. The legacy half of each pair is removable once
+// nothing sets it; nothing else depends on the old names.
 const (
-	defaultURL    = "http://localhost:8417"
-	envURL        = "COMPOSECTL_URL"
-	envToken      = "COMPOSECTL_TOKEN"
-	envTokenFile  = "COMPOSECTL_TOKEN_FILE"
-	envAPIToken   = "COMPOSECTL_AGENT_TOKEN" // same token the stack already uses
-	envConfigPath = "COMPOSECTL_CONFIG"
+	defaultURL = "http://localhost:8417"
+
+	envURL       = "NAVARCH_URL"
+	envToken     = "NAVARCH_TOKEN"
+	envTokenFile = "NAVARCH_TOKEN_FILE"
+	// The shared token the dev stack already exports. It stays *below* the
+	// dedicated CLI token in the chain — that ordering is the existing
+	// behaviour and is preserved across the rename.
+	envAgentToken = "NAVARCH_AGENT_TOKEN"
+	envConfigPath = "NAVARCH_CONFIG"
+
+	envURLLegacy        = "COMPOSECTL_URL"
+	envTokenLegacy      = "COMPOSECTL_TOKEN"
+	envTokenFileLegacy  = "COMPOSECTL_TOKEN_FILE"
+	envAgentTokenLegacy = "COMPOSECTL_AGENT_TOKEN"
+	envConfigPathLegacy = "COMPOSECTL_CONFIG"
 )
 
 // Config is how composectl finds the control plane. Precedence, highest first:
@@ -31,25 +47,40 @@ func defaultConfig() Config {
 	return Config{URL: defaultURL, Output: "table"}
 }
 
-func loadConfigFile() Config {
-	path := os.Getenv(envConfigPath)
-	if path == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			path = filepath.Join(home, ".config", "composectl", "config.yaml")
-		}
+// configPaths lists candidate config files, new name first. The composectl
+// path is still read so the rename does not silently drop settings already on
+// disk — a config file that stops being consulted looks exactly like one whose
+// contents stopped taking effect, and neither reports anything.
+func configPaths() []string {
+	if p := firstEnv(envConfigPath, envConfigPathLegacy); p != "" {
+		return []string{p}
 	}
-	if path == "" {
-		return Config{}
-	}
-	b, err := os.ReadFile(path)
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return Config{}
+		return nil
 	}
-	var cfg Config
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
-		return Config{}
+	return []string{
+		filepath.Join(home, ".config", "navarch", "config.yaml"),
+		filepath.Join(home, ".config", "composectl", "config.yaml"),
 	}
-	return cfg
+}
+
+func loadConfigFile() Config {
+	for _, path := range configPaths() {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var cfg Config
+		if err := yaml.Unmarshal(b, &cfg); err != nil {
+			// A malformed file is not silently skipped in favour of the next
+			// candidate: that would apply the older config while the one the
+			// user just edited is the broken one.
+			return Config{}
+		}
+		return cfg
+	}
+	return Config{}
 }
 
 func resolveConfig(flags Config) (Config, error) {
@@ -68,13 +99,16 @@ func resolveConfig(flags Config) (Config, error) {
 		cfg.Output = file.Output
 	}
 
-	if v := firstEnv(envURL); v != "" {
+	if v := firstEnv(envURL, envURLLegacy); v != "" {
 		cfg.URL = v
 	}
-	if v := firstEnv(envToken, envAPIToken); v != "" {
+	// Ordering is two-dimensional and deliberate: the dedicated CLI token
+	// outranks the shared stack token (pre-existing behaviour), and within each
+	// of those tiers the new name outranks the legacy one.
+	if v := firstEnv(envToken, envTokenLegacy, envAgentToken, envAgentTokenLegacy); v != "" {
 		cfg.Token = v
 	}
-	if v := firstEnv(envTokenFile); v != "" {
+	if v := firstEnv(envTokenFile, envTokenFileLegacy); v != "" {
 		cfg.TokenFile = v
 	}
 

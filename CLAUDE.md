@@ -19,6 +19,48 @@ Go + Postgres. Terminal-first. Craig's project.
 
 ---
 
+## The name: Navarch
+
+**The product is Navarch. The CLI binary is `navarch`. Everything else still
+says composectl, on purpose** — the rename was scoped to what a user types, and
+the rest is deliberately deferred rather than half-finished. Do not "complete"
+it opportunistically; each remaining layer has a reason:
+
+| Layer | State | Why |
+|---|---|---|
+| CLI binary, help, usage strings, README | **renamed** | user-facing |
+| `NAVARCH_*` env vars, `~/.config/navarch/` | **renamed**, legacy read as fallback | see below |
+| Go module `github.com/craig/composectl` | unchanged | churns every import for no user-visible gain; one atomic commit whenever it's wanted |
+| `cc-` container/network/volume prefix, `cc.*` labels | unchanged | **this is the dangerous one** |
+| Control plane / agent `COMPOSECTL_*` vars | unchanged | set by `compose.yaml`, not by hand |
+| Postgres role + database `composectl` | unchanged | pure data migration, zero user-visible gain |
+
+**Why `cc-` must not be renamed casually.** The prefix and labels are not
+branding — nobody types them — and renaming them breaks three things at once:
+the agent adopts pinned containers by the *stable name*
+`cc-{env8}-pinned-{service}`, so a renamed scheme creates a second pinned
+container over the same volume; reconcile GC only sees `cc.env`-labelled
+containers, so every pre-rename container becomes invisible and leaks; and
+`RemoveEnv` matches volumes on that label, recreating the unlabelled-volume
+loose end above for every existing environment. If it is ever done, it belongs
+at a `make nuke` boundary with a manual sweep, or behind a dual-read window.
+
+**The env-var fallback is a real fallback, not decoration.** `NAVARCH_TOKEN`
+wins over `COMPOSECTL_TOKEN`, and both outrank `NAVARCH_AGENT_TOKEN` /
+`COMPOSECTL_AGENT_TOKEN` — the dedicated CLI token beating the shared stack
+token is pre-existing behaviour, preserved deliberately, so precedence is
+tier-first and new-over-legacy second. `~/.config/navarch/config.yaml` is read
+before `~/.config/composectl/config.yaml`. This exists because these variables
+carry the bearer token and an unset token is a hard failure, not a degraded
+mode. `TestEnvPrecedenceAcrossTheRename` covers both directions. The legacy
+half is removable once nothing sets it.
+
+`docs/navarch-brand-and-naming-guide.md` is gitignored and not present in the
+working tree; if it exists elsewhere it, not this table, is the authority on
+naming.
+
+---
+
 ## Quickstart
 
 ```bash
@@ -41,6 +83,7 @@ make nuke         # down + delete volumes
 ```
 cmd/controlplane      API server + scheduler/controller loops
 cmd/agent             node agent binary (Sprint 2)
+cmd/navarch           operator CLI binary (dir named for the binary, not the module)
 internal/spec         normalized DeploymentSpec — the platform's vocabulary
 internal/parser       the ONLY package importing compose-go
 internal/store        the ONLY package importing pgx
@@ -48,6 +91,11 @@ internal/api          thin handlers: decode, delegate, encode
 internal/rollout      scheduler + rollout controller (control-plane loops)
 internal/agent        node reconciliation loop (imports neither pgx nor compose-go)
 internal/agent/dockerd the ONLY package importing the Docker SDK
+internal/router       the ONLY package knowing Traefik's config shape
+internal/client       the ONLY package knowing the HTTP API's wire format
+internal/cli          argv parsing, output formatting; no HTTP of its own
+internal/secrets      age sealing/opening
+internal/metrics      Prometheus text-format registry
 internal/config       env-var config (control plane only)
 migrations/           golang-migrate SQL
 ```
@@ -63,6 +111,11 @@ the codebase:
   runtime could be swapped without touching reconcile logic.
 - Handlers decode, delegate, encode. Business logic belongs in store or
   parser, not in `internal/api`.
+- Only `internal/client` knows the API's wire format — URLs, envelopes,
+  status-code mapping. `internal/cli` parses argv and formats output; it must
+  never build an HTTP request itself. This is the boundary Sprint 5's TUI
+  depends on: a second front end is a second consumer of `client`, not a
+  second implementation of the protocol.
 
 Named volumes are created explicitly (`EnsureVolume`, with a `cc.env` label)
 rather than left to Docker's implicit creation on first mount. An implicit
@@ -607,9 +660,16 @@ unit tests ran green against all three bugs.
 `internal/parser` (16, pure), `internal/store` (~27), `internal/rollout`
 (scheduler + controller + reaper), `internal/api` (node, secret and preview
 handlers), `internal/agent` (reconcile logic, fake driver — pure),
-`internal/agent/dockerd` (against a real daemon). `internal/spec`,
-`internal/config`, and the catalog/deployment half of `internal/api` still
-have none.
+`internal/agent/dockerd` (against a real daemon), `internal/cli` (9, pure —
+argv, output, config precedence), `internal/client` (6, pure — `httptest`),
+`internal/router`, `internal/secrets`, `internal/metrics`, `internal/spec` and
+`internal/config`. The catalog/deployment half of `internal/api` still has none.
+
+A `router` unit test can only check the *bytes* written — whether Traefik
+accepts them is outside Go's reach, which is exactly how the empty-config bug
+survived a passing `TestSyncEmptyIsValid`. Config-shape changes want a real
+Traefik in the loop (`make demo` exercises the populated path; a stack with no
+deployments exercises the empty one — its log must stay clean).
 
 **Two live dependencies, both skip loudly when absent** — no fallbacks, by
 design. `store`/`rollout`/`api` tests need Postgres (dev stack on `5473`, or

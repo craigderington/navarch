@@ -16,7 +16,7 @@ func TestHelpAndUnknownCommand(t *testing.T) {
 	if code := Run([]string{"--help"}, &out, &errb); code != 0 {
 		t.Fatalf("help exit %d: %s", code, errb.String())
 	}
-	if !strings.Contains(out.String(), "composectl") || !strings.Contains(out.String(), "validate") {
+	if !strings.Contains(out.String(), "navarch") || !strings.Contains(out.String(), "validate") {
 		t.Fatalf("help missing commands:\n%s", out.String())
 	}
 	out.Reset()
@@ -124,7 +124,71 @@ func TestVersion(t *testing.T) {
 	if code := Run([]string{"version"}, &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
-	if !strings.Contains(out.String(), "composectl") {
+	if !strings.Contains(out.String(), "navarch") {
 		t.Fatalf("version: %s", out.String())
+	}
+}
+
+// The rename keeps COMPOSECTL_* working at lower precedence. Both halves need
+// covering: that the legacy name is still honoured at all, and that it loses to
+// the new one when both are set — a fallback that silently wins would make the
+// rename look applied while the old value is what reaches the wire.
+func TestEnvPrecedenceAcrossTheRename(t *testing.T) {
+	// Isolate from the developer's real config file and environment.
+	t.Setenv("HOME", t.TempDir())
+	for _, k := range []string{
+		envURL, envToken, envTokenFile, envAgentToken, envConfigPath,
+		envURLLegacy, envTokenLegacy, envTokenFileLegacy, envAgentTokenLegacy, envConfigPathLegacy,
+	} {
+		t.Setenv(k, "")
+	}
+
+	tests := []struct {
+		name      string
+		set       map[string]string
+		wantURL   string
+		wantToken string
+	}{
+		{
+			name:      "legacy names still work",
+			set:       map[string]string{envURLLegacy: "http://legacy:1", envTokenLegacy: "legacy-tok"},
+			wantURL:   "http://legacy:1",
+			wantToken: "legacy-tok",
+		},
+		{
+			name:      "new names win over legacy",
+			set:       map[string]string{envURL: "http://new:2", envURLLegacy: "http://legacy:1", envToken: "new-tok", envTokenLegacy: "legacy-tok"},
+			wantURL:   "http://new:2",
+			wantToken: "new-tok",
+		},
+		{
+			name:      "dedicated token outranks the shared stack token",
+			set:       map[string]string{envAgentToken: "agent-tok", envTokenLegacy: "legacy-tok"},
+			wantURL:   defaultURL,
+			wantToken: "legacy-tok",
+		},
+		{
+			name:      "shared stack token is used when no dedicated one is set",
+			set:       map[string]string{envAgentTokenLegacy: "legacy-agent-tok"},
+			wantURL:   defaultURL,
+			wantToken: "legacy-agent-tok",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.set {
+				t.Setenv(k, v)
+			}
+			cfg, err := resolveConfig(Config{})
+			if err != nil {
+				t.Fatalf("resolveConfig: %v", err)
+			}
+			if cfg.URL != tt.wantURL {
+				t.Errorf("URL = %q, want %q", cfg.URL, tt.wantURL)
+			}
+			if cfg.Token != tt.wantToken {
+				t.Errorf("Token = %q, want %q", cfg.Token, tt.wantToken)
+			}
+		})
 	}
 }
