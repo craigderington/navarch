@@ -397,6 +397,22 @@ these, so don't drift them): swappable container
 named volume `cc-{env8}-{volume}`. Labels: `cc.env`, `cc.deployment`,
 `cc.service`, `cc.swappable`. `env8` = `store.shortID(environmentID)`.
 
+**An empty router config is a file with no `http` section — never an empty
+one.** Traefik's parser refuses an element with no children, so `routers: {}`
+fails the *whole* file with `routers cannot be a standalone element`, and
+`http: {}` (what `omitempty` produces) fails identically. Critically, a
+rejected file is not read as "no routes": the file provider keeps the last
+config it accepted, so the withdrawal is silently ignored and a torn-down
+environment's hostname goes on routing — the stale-route case the preview
+hostname scheme exists to prevent. `Sync` therefore writes only its header
+comment when `len(routes) == 0`. Verified against `traefik:v3.3` with a live
+backend: the empty-map file and `http: {}` both leave the route serving 200;
+only the section-less file drops it to 404, and it logs nothing doing so.
+This also produced ~320 parse errors on a dev stack before its first
+deployment. Note what the old `TestSyncEmptyIsValid` asserted — that `Sync`
+returned nil and left a file behind — and why that let the bug through:
+"valid" has to mean *Traefik accepts it*, which no unit test can check.
+
 ---
 
 ## Sprint status
