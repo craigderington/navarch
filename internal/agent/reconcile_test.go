@@ -305,8 +305,13 @@ func TestReconcileRetriesFailedTeardownOnTheNextTick(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		_, failed := r.Reconcile(context.Background(), nil, nil, []string{"deadbeef"})
-		if len(failed) != 1 || failed[0] != "deadbeef" {
+		if len(failed) != 1 || failed[0].Env8 != "deadbeef" {
 			t.Fatalf("tick %d: want deadbeef reported failed, got %v", i, failed)
+		}
+		// The reason must travel with the env8; reporting only which
+		// environment failed leaves an unfixable teardown undiagnosable.
+		if failed[0].Err == nil || !strings.Contains(failed[0].Err.Error(), "volume busy") {
+			t.Fatalf("tick %d: want the driver's error surfaced, got %v", i, failed[0].Err)
 		}
 	}
 
@@ -364,7 +369,7 @@ func TestReconcileReportsFailedTeardown(t *testing.T) {
 
 	_, failed := r.Reconcile(context.Background(), nil, nil, []string{"deadbeef", "cafef00d"})
 
-	if len(failed) != 1 || failed[0] != "deadbeef" {
+	if len(failed) != 1 || failed[0].Env8 != "deadbeef" {
 		t.Fatalf("want deadbeef reported as failed, got %v", failed)
 	}
 	if len(f.removedEnvs) != 1 || f.removedEnvs[0] != "cafef00d" {

@@ -118,7 +118,14 @@ func NewReconciler(drv DockerDriver) *Reconciler {
 // retried within this call; the tombstone stays in teardownEnvs for its full
 // retention window, so the next tick tries again regardless of whether this
 // one's failure got logged.
-func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInstance, secrets map[string]dockerd.SecretSource, teardownEnvs []string) ([]Report, []string) {
+// TeardownFailure is one environment whose RemoveEnv call did not succeed,
+// carrying the reason so the caller can log something actionable.
+type TeardownFailure struct {
+	Env8 string
+	Err  error
+}
+
+func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInstance, secrets map[string]dockerd.SecretSource, teardownEnvs []string) ([]Report, []TeardownFailure) {
 	reports := make([]Report, 0, len(desired))
 	wanted := map[string]bool{} // container name → desired
 	envs := map[string]bool{}
@@ -179,15 +186,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired []store.DesiredInsta
 	// Teardown runs last: an environment being destroyed may also appear in
 	// desired (a tick straddling the reap), and destroying it after converging
 	// costs one wasted create rather than leaving a half-removed env behind.
-	var failedTeardowns []string
+	var failedTeardowns []TeardownFailure
 	for _, env8 := range teardownEnvs {
 		if r.tornDown[env8] {
 			continue
 		}
 		if err := r.drv.RemoveEnv(ctx, env8); err != nil {
 			// Not recorded: a teardown that failed has not happened, so the
-			// tombstone's next offer must still be acted on.
-			failedTeardowns = append(failedTeardowns, env8)
+			// tombstone's next offer must still be acted on. The error travels
+			// with the env8 — this used to report only which environment
+			// failed, which turned a teardown that could never succeed into a
+			// warning line repeating every two seconds with no way to tell why.
+			failedTeardowns = append(failedTeardowns, TeardownFailure{Env8: env8, Err: err})
 			continue
 		}
 		r.tornDown[env8] = true

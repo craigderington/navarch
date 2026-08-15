@@ -139,8 +139,8 @@ func (c *cpClient) reconcileTick(ctx context.Context, nodeID uuid.UUID, rec *Rec
 	// failure (permissions, a volume still in use by something unmanaged) must
 	// not stall the tick or hide the problem — it's logged and left for the
 	// tombstone's next offer, which arrives every tick for its 24h retention.
-	for _, env8 := range failedTeardowns {
-		log.Warn("env teardown failed", "env", env8)
+	for _, f := range failedTeardowns {
+		log.Warn("env teardown failed", "env", f.Env8, "err", f.Err)
 	}
 	if len(reports) > 0 {
 		if err := c.do(ctx, http.MethodPost, "/v1/nodes/"+nodeID.String()+"/report",
