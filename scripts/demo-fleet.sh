@@ -74,13 +74,24 @@ note "web2 -> $W2_NODE"
 [ "$W1_NODE" != "$W2_NODE" ] || fail "both ingress stacks landed on $W1_NODE — is placement scoring by spread?"
 
 step "Both serve traffic, including the one on the node with no router"
-for pair in "web1-$SUFFIX.example.com|$W1_NODE" "web2-$SUFFIX.example.com|$W2_NODE"; do
-  host=${pair%%|*}; node=${pair##*|}
-  code=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $host" "http://localhost:$GW_PORT/")
-  [ "$code" = "200" ] || fail "expected 200 for $host on $node, got $code"
+# `live` and `routable` are not the same instant. Promotion marks the deployment
+# live; the route appears when the controller's next tick resyncs the router and
+# Traefik reloads the file. A single curl here raced that and reported 404 — a
+# passing system looking broken, which is worse than a real failure because it
+# sends you hunting in the router. Retry to a deadline, as demo-preview does.
+serve_check() {
+  local host=$1 node=$2 deadline=$((SECONDS + 45)) code=000
+  while [ $SECONDS -lt $deadline ]; do
+    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Host: $host" "http://localhost:$GW_PORT/")
+    [ "$code" = "200" ] && break
+    sleep 2
+  done
+  [ "$code" = "200" ] || fail "expected 200 for $host on $node, got $code after 45s"
   if [ "$node" = "$ROUTER_NODE" ]; then note "$host on $node (the router's own node): HTTP 200"
   else note "$host on $node — no router there, served across the fleet: HTTP 200"; fi
-done
+}
+serve_check "web1-$SUFFIX.example.com" "$W1_NODE"
+serve_check "web2-$SUFFIX.example.com" "$W2_NODE"
 
 # The whole point of the slice: at least one of those was NOT the router's node.
 [ "$W1_NODE" != "$ROUTER_NODE" ] || [ "$W2_NODE" != "$ROUTER_NODE" ] \

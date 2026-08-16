@@ -62,44 +62,72 @@ withdraws correctly instead of being rejected and leaving stale routes live.
 
 ---
 
-## Status at break — C1 works, one open bug
+## C1 — DONE
 
-**Proven working:**
+Cross-node ingress works: a stack on the node with no router is served through
+the node that has one, and so is a stack on the router's own node, by the same
+address-and-port mechanism. `make demo`, `demo-fleet`, `demo-preview`,
+`demo-rollback` and `demo-failure` all pass; full suite green with 0 skips.
 
-- An ingress stack placed on node 2 (no router there) is served through the
-  ingress node: `HTTP 200`, body from a container inside `dind-b`.
-- `make demo-fleet` asserts it: two ingress stacks land on different nodes by
-  spread scoring, both return 200, and at least one is off the router node.
-- `make demo` still flips traffic between revisions, now via published ports.
-- Generated config targets addresses, one code path for local and remote:
-  `http://172.17.0.1:32769` (node 1), `http://172.18.0.4:32768` (node 2).
-- Slice B's `ingress=true` placement filter has been **removed** — it was
-  scaffolding for exactly this, and its test is replaced by one pinning the
-  removal.
-- Full suite green; boundary guard clean (check it with `command grep`, the
-  shell's grep alias mis-parses the pipeline and prints "unknown option -G"
-  while appearing to pass).
+### The bug that stopped this at the break: node 1 advertised an unreachable address
 
-**Open bug — `make demo-preview` fails at the curl step.**
+`COMPOSECTL_ADVERTISE_ADDR: host.docker.internal` with
+`extra_hosts: host.docker.internal:host-gateway` resolves to **docker0's**
+address, 172.17.0.1. That is the correct "how do I reach the host" answer for a
+container on the *default* bridge, and the wrong one for a container on a
+*user-defined* network — which is where both Traefik and the agent live. The
+measurement, taken from inside Traefik's namespace with nothing else running:
 
-Narrowed, not solved. For a preview environment:
+```
+172.18.0.1  (quartermaster_default gw, an attached scope-link subnet) -> 200
+172.19.0.1  (a revision network gw, which owned the default route)    -> timeout
+172.17.0.1  (docker0, not an attached subnet at all)                  -> timeout
+```
 
-- the agent reports a port and the route *is* written
-  (`r-02416a85` → `Host(pr-31396-main-31396-02416a85.preview.localhost)`),
-- the backend is reachable at that address from the host **and** from a
-  container on the compose network: `curl 172.17.0.1:32776` → `200`,
-- but the same request through Traefik times out: `HTTP 000`,
-- while a *non-preview* env on the same node, same mechanism, same daemon
-  returns `200` through Traefik in the same minute.
+Traffic to an address on no attached subnet leaves by the default route, and
+Docker's inter-bridge isolation drops it. So the target was never reachable —
+what varied was *which* interface owned the default route, and that changes
+every time the agent attaches Traefik to a new revision network or the GC
+removes one. Hence the maddening signature: the same node, the same mechanism,
+200 one minute and a timeout the next, apparently discriminating by router.
 
-So it is not connectivity and not the published port. The difference is
-something about that specific router — the preview hostname is far longer than
-the others and uses the `.preview.localhost` domain, which is the first thing to
-rule out. Next steps: raise Traefik's log level and read what it says about that
-router, and compare the two router entries as Traefik parsed them rather than as
-we wrote them.
+**Fix:** pin the compose network to `10.201.0.0/24` and have node 1 advertise
+its gateway, `10.201.0.1`. A gateway of an attached network is a *scope-link*
+route — reachable without consulting the default route at all, so it no longer
+matters which bridge wins that race. The subnet sits outside Docker's default
+pools (172.16-172.31, 192.168) so an auto-created revision network can never be
+allocated the same range.
 
-`demo-preview` was also made fleet-aware in this slice (it inspects the daemon of
-the node the preview was actually placed on, resolved *after* the deployment goes
-live — `home_node_id` is NULL until placement, so asking earlier always answers
-"the host"). That fix is correct and independent of the bug above.
+Verified after the fix, with a node-1 environment live and Traefik attached to
+its revision network — i.e. the default route *still* stolen by 172.19.0.1 —
+both nodes serve HTTP 200. The fix removes the dependency rather than the
+symptom.
+
+### `AttachRouterToNetwork` is now vestigial (do not fix here)
+
+Route generation is entirely address-based, so the router never needs to join a
+tenant network. The attach still happens for node-1 environments and still
+takes the default route with it — proven harmless now, but it is dead weight.
+Removing it would also obsolete the `isIngressRouter` exemption in
+`PruneRevisionNetworks` and the disconnect-unmanaged-containers logic in
+`RemoveEnv`, both of which exist only to cope with the router being attached to
+tenant networks. That is its own change with its own tests, not a rider on this
+one. It was investigated as a suspected cause of this bug and **ruled out**:
+the demos pass with the attach untouched.
+
+### A demo race, fixed in passing
+
+`demo-fleet` curled once, immediately after `wait --state live`. Promotion marks
+a deployment live; the route appears when the controller's next tick resyncs the
+router and Traefik reloads. The single shot lost that race and reported 404 for
+a route that was already in the file seconds later — a passing system that looks
+broken, which is worse than a real failure because it sends you hunting in the
+router. It now retries to a deadline, as `demo-preview` already did.
+
+### No unit test accompanies this fix
+
+Both defects are outside Go: one is a compose address, the other a shell race.
+The regression guard is the demo suite, and the fix makes node-1 routing
+deterministic where it previously depended on which bridge won the default
+route — the reason it passed often enough to look intermittent rather than
+broken.

@@ -125,12 +125,21 @@ services:
       COMPOSECTL_ORG: dev
       COMPOSECTL_NODE_HOSTNAME: dev-node-1
       COMPOSECTL_NODE_LABELS: ingress=true
-      # The router now connects to a node address and a published port, so this
-      # has to be an address *Traefik's container* can reach. This node's
-      # containers publish on the host, and 127.0.0.1 inside the agent container
-      # is not the host — host-gateway is. The agent resolves the name to the IP
-      # it registers, because advertise_addr is an INET column.
-      COMPOSECTL_ADVERTISE_ADDR: host.docker.internal
+      # The router connects to a node address and a published port, so this must
+      # be an address *Traefik's container* can reach. This node is the host
+      # itself, and the only host address a container on a user-defined network
+      # can reach is that network's own gateway — which is why the compose
+      # network below pins its subnet: an auto-allocated gateway would change
+      # between runs and could not be named here.
+      #
+      # `host.docker.internal:host-gateway` was the obvious choice and is wrong.
+      # It resolves to docker0's address (172.17.0.1), which is the right host
+      # address for a container on the *default* bridge and unreachable from one
+      # on a user-defined network — where both Traefik and this agent live. It
+      # appeared to work only when Docker happened to give Traefik a default
+      # route that reached it, so routing worked or timed out depending on which
+      # bridge won that race.
+      COMPOSECTL_ADVERTISE_ADDR: 10.201.0.1
       # Capacity is *reserved* from declared limits, not measured usage, and a
       # demo environment holds its reservation for as long as it is live —
       # nothing but a preview's TTL ever expires one. At the 8 GB default this
@@ -142,8 +151,6 @@ services:
       COMPOSECTL_AGENT_TOKEN: dev-token-change-me
       COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
       COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Identity must persist across restarts — a fresh keypair each boot
@@ -216,6 +223,21 @@ services:
       # keypair and the same node token — two rows in `nodes` that are one
       # identity, which defeats sealing secrets to the node that will run them.
       - age-identity-b:/identity
+
+# The subnet is pinned so node 1 can advertise this gateway as its address (see
+# COMPOSECTL_ADVERTISE_ADDR above): it is the one host address Traefik can reach
+# from a user-defined network, and an auto-allocated one would differ per run.
+#
+# 10.201.0.0/24 sits outside Docker's default allocation pools (172.16-172.31,
+# 192.168) on purpose. A subnet inside them could later be handed to an
+# auto-created revision network, and two bridges sharing a subnet is a fault
+# that shows up as traffic silently reaching the wrong container.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.201.0.0/24
+          gateway: 10.201.0.1
 
 volumes:
   pgdata:
