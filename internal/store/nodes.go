@@ -7,8 +7,10 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type RegisterNodeParams struct {
@@ -153,6 +155,60 @@ func (s *Store) DrainNode(ctx context.Context, nodeID uuid.UUID) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// UncordonNode returns a drained node to service. Draining was a one-way door
+// until this existed: DrainNode sets `draining`, Heartbeat's CASE preserves it,
+// and RegisterNode's upsert preserves it too, so not even reinstalling the agent
+// cleared the flag — the only way back was hand-written SQL against a live
+// database. A cordon an operator cannot lift is a worse tool than no cordon.
+//
+// The state it lands in is derived from the last heartbeat rather than declared.
+// Uncordoning removes an operator's *intent* not to schedule here; it says
+// nothing about whether the node is alive, and only the heartbeat knows that.
+// Declaring `ready` outright would put a node that has been silent for an hour
+// into that state in `navarch node list` — a lie on exactly the surface the
+// operator is watching, even though ListReadyNodes' own freshness filter would
+// have kept work off it. Declaring `unreachable` outright would libel a node
+// that is heartbeating perfectly well. So the CASE below asks the same question
+// MarkStaleNodesUnreachable and ListReadyNodes ask, with the same 30-second
+// window, and either answer is self-correcting: a live agent's next heartbeat
+// promotes `unreachable` to `ready` within one poll interval, and a dead one
+// stays `unreachable`, which is true.
+//
+// `retired` is refused rather than lifted. Heartbeat will not touch a retired
+// node (`WHERE state <> 'retired'`), so resurrecting one here would produce a
+// row claiming readiness that nothing can ever update again.
+//
+// Uncordoning a node that is not draining succeeds and changes nothing. The
+// caller asked for a node that is not cordoned and that is what they have; a
+// 404 here would report "no such node" for a node plainly in the listing.
+func (s *Store) UncordonNode(ctx context.Context, nodeID uuid.UUID) error {
+	return mapErr(s.tx(ctx, func(tx pgx.Tx) error {
+		var state NodeState
+		if err := tx.QueryRow(ctx,
+			`SELECT state FROM nodes WHERE id=$1 FOR UPDATE`, nodeID).Scan(&state); err != nil {
+			return err // pgx.ErrNoRows -> ErrNotFound via mapErr
+		}
+		if state == NodeRetired {
+			return fmt.Errorf("%w: node is retired and cannot be returned to service", ErrConflict)
+		}
+		if state != NodeDraining {
+			return nil
+		}
+		// The explicit ::node_state is not optional: every branch is an
+		// unknown-type literal, so Postgres resolves the CASE as text and then
+		// refuses to assign text to the enum column. Same trap documented on
+		// Heartbeat above, which is where it was first hit.
+		_, err := tx.Exec(ctx, `
+			UPDATE nodes SET state = (CASE
+			    WHEN last_heartbeat > now() - interval '30 seconds' THEN 'ready'
+			    ELSE 'unreachable'
+			END)::node_state
+			WHERE id=$1
+		`, nodeID)
+		return err
+	}))
 }
 
 func (s *Store) MarkStaleNodesUnreachable(ctx context.Context) error {

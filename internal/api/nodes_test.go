@@ -287,3 +287,74 @@ func TestRollbackInvalidEnvIsBadRequest(t *testing.T) {
 		t.Fatalf("expected 400 for a bad env id, got %d", rec.Code)
 	}
 }
+
+// Uncordon is an operator action, not an agent one. The distinction is not
+// cosmetic: nodeAgentPathID claims only heartbeat, desired-state and report, and
+// anything it does not claim falls through to the operator-token branch. A new
+// /v1/nodes/{id}/... route is exactly the shape that could land on the wrong
+// side of that split — which is how every per-node endpoint once returned 401
+// unconditionally — so the branch is pinned here rather than assumed.
+func TestUncordonIsAnOperatorEndpoint(t *testing.T) {
+	srv := testServer(t)
+	WithBearerToken("operator-token")(srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	org, err := srv.st.GetOrganizationBySlug(ctx, "dev")
+	if err != nil {
+		t.Fatalf("GetOrganizationBySlug: %v", err)
+	}
+	node, err := srv.st.RegisterNode(ctx, store.RegisterNodeParams{
+		OrgID: org.ID, Hostname: "uncordon-" + uuid.NewString()[:8],
+		AdvertiseAddr: "10.9.9.10", CPUMillis: 1000, MemoryBytes: 1 << 30,
+	})
+	if err != nil {
+		t.Fatalf("RegisterNode: %v", err)
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.st.Pool().Exec(c, `DELETE FROM nodes WHERE id=$1`, node.ID)
+	})
+	if err := srv.st.DrainNode(ctx, node.ID); err != nil {
+		t.Fatalf("DrainNode: %v", err)
+	}
+	path := "/v1/nodes/" + node.ID.String() + "/uncordon"
+
+	t.Run("a node token is refused", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("Authorization", "Bearer "+node.Token)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("a node must not be able to uncordon itself, got %d", rec.Code)
+		}
+	})
+
+	t.Run("the operator token works and reports the derived state", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("Authorization", "Bearer operator-token")
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		// The response reports what the row actually says, not a fixed "ready":
+		// the store derives the state from the last heartbeat, and an API that
+		// answered "ready" regardless would contradict the next node list.
+		var body map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		n, err := srv.st.GetNode(ctx, node.ID)
+		if err != nil {
+			t.Fatalf("GetNode: %v", err)
+		}
+		if body["status"] != string(n.State) {
+			t.Fatalf("reported %q but the row says %q", body["status"], n.State)
+		}
+		if n.State == store.NodeDraining {
+			t.Fatal("the node is still draining after a successful uncordon")
+		}
+	})
+}

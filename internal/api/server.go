@@ -233,6 +233,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/nodes", s.handleListNodes)
 	s.mux.HandleFunc("GET /v1/nodes/{id}", s.handleGetNode)
 	s.mux.HandleFunc("POST /v1/nodes/{id}/drain", s.handleDrainNode)
+	s.mux.HandleFunc("POST /v1/nodes/{id}/uncordon", s.handleUncordonNode)
 
 	// Secrets — encrypted at rest, plaintext never stored. The list response
 	// never includes values; see internal/secrets for the encrypt boundary.

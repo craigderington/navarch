@@ -525,7 +525,7 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 
 func cmdNode(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch node list|get|drain ...")
+		return usage("usage: navarch node list|get|drain|uncordon ...")
 	}
 	switch args[0] {
 	case "list":
@@ -582,8 +582,29 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		}
 		fmt.Fprintf(e.out, "draining\t%s\n", nodeID)
 		return nil
+	case "uncordon":
+		if err := need(args, 2, "usage: navarch node uncordon ORG/HOSTNAME"); err != nil {
+			return err
+		}
+		nodeID, err := e.resolveNode(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		// The reported state is whatever the control plane derived from the
+		// node's last heartbeat, not a fixed "ready" — an uncordoned node that
+		// has been silent comes back `unreachable`, and printing "ready" would
+		// contradict the next `node list`.
+		state, err := e.c.UncordonNode(ctx, nodeID)
+		if err != nil {
+			return err
+		}
+		if e.cfg.Output == "json" {
+			return printJSON(e.out, map[string]string{"status": state, "id": nodeID})
+		}
+		fmt.Fprintf(e.out, "%s\t%s\n", state, nodeID)
+		return nil
 	default:
-		return usage("usage: navarch node list|get|drain ...")
+		return usage("usage: navarch node list|get|drain|uncordon ...")
 	}
 }
 
