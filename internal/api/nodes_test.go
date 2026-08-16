@@ -35,7 +35,62 @@ func testServer(t *testing.T) *Server {
 	t.Cleanup(st.Close)
 	srv := NewServer(st, slogDiscard())
 	srv.BootstrapDevOrg(ctx)
+	cleanupDevNodes(t, st)
 	return srv
+}
+
+// cleanupDevNodes deletes every node this test adds to the bootstrapped "dev"
+// org, which is the same org the dev fleet and every demo run in.
+//
+// Left behind, those rows are not merely untidy. Placement scores by spread, so
+// a freshly registered fixture node — zero environments homed on it — is the
+// *most* attractive node in the fleet, and nothing drives it: the next demo's
+// deployment is placed there and sits in `scheduling` until the 30-second
+// heartbeat window closes and it is marked unreachable. That is a passing system
+// looking broken, on a surface where the honest failures are already subtle.
+// Slice A's scoring is what turned an old flakiness (see the comment on
+// TestSetSecretWithNoReadyNodeIsUnprocessable, which dodges this by using its
+// own org) into a hazard for anything sharing the database.
+//
+// Scoped by difference rather than by name so it covers registrations made
+// through the HTTP handler, where the test never holds the id, and any site
+// added later that this file does not know about.
+func cleanupDevNodes(t *testing.T, st *store.Store) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dev, err := st.GetOrganizationBySlug(ctx, "dev")
+	if err != nil {
+		return // no dev org, nothing this test can pollute
+	}
+	before := map[uuid.UUID]bool{}
+	if nodes, err := st.ListNodes(ctx, dev.ID); err == nil {
+		for _, n := range nodes {
+			before[n.ID] = true
+		}
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		nodes, err := st.ListNodes(c, dev.ID)
+		if err != nil {
+			return
+		}
+		for _, n := range nodes {
+			if before[n.ID] {
+				continue
+			}
+			// Instances first: service_instances.node_id has no ON DELETE
+			// CASCADE, the same ordering hazard the store fixtures document.
+			if _, err := st.Pool().Exec(c, `DELETE FROM service_instances WHERE node_id=$1`, n.ID); err != nil {
+				t.Errorf("cleanup instances for node %s: %v", n.ID, err)
+				continue
+			}
+			if _, err := st.Pool().Exec(c, `DELETE FROM nodes WHERE id=$1`, n.ID); err != nil {
+				t.Errorf("cleanup node %s: %v", n.ID, err)
+			}
+		}
+	})
 }
 
 // Every other test here builds a Server with no bearer token, which makes
