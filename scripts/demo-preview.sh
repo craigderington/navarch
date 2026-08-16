@@ -6,6 +6,9 @@
 # only the easy half.
 set -euo pipefail
 
+# Shared node->daemon resolution; see scripts/lib/fleet.sh.
+. "$(dirname "$0")/lib/fleet.sh"
+
 API=${API:-http://localhost:8417}
 API_TOKEN=${API_TOKEN:-dev-token-change-me}
 CURL_AUTH=(-H "Authorization: Bearer $API_TOKEN")
@@ -59,20 +62,6 @@ GW_PORT=$(docker compose config --format json | jq -r '.services.traefik.ports[]
 [ -n "$GW_PORT" ] || { echo "could not read traefik's published port from compose.yaml" >&2; exit 1; }
 GW=${GW:-http://localhost:$GW_PORT}
 
-# Which daemon holds this environment's containers? With a fleet, a preview is
-# placed by the scheduler, so the demo has to look where the platform actually
-# put it rather than assuming the host. Everything below inspects through this.
-node_docker() {
-  local env_id=$1 host
-  host=$(docker compose exec -T postgres psql -U composectl -d composectl -tAc \
-    "SELECT COALESCE(n.hostname,'') FROM environments e
-       LEFT JOIN nodes n ON n.id = e.home_node_id WHERE e.id = '$env_id'" | tr -d '[:space:]')
-  case "$host" in
-    dev-node-2) echo "docker compose exec -T dind-b docker" ;;
-    *)          echo "docker" ;;
-  esac
-}
-
 step "Using the bootstrapped dev org"
 ORG=$(api GET /v1/orgs | jq -r '.organizations[]|select(.slug=="dev")|.id')
 [ -n "$ORG" ] || { echo "dev org not found — is the control plane up?" >&2; exit 1; }
@@ -102,8 +91,9 @@ wait_state "$DEP" live
 # Only now is the placement known: home_node_id is set by the first placement,
 # so resolving the daemon any earlier always answers "the host" and every
 # container assertion below would look at a machine the preview is not on.
-DOCKER=$(node_docker "$ENV_ID")
-note "placed on the node reached via: $DOCKER"
+PREVIEW_NODE=$(fleet_node_for_env "$ENV_ID")
+DOCKER=$(fleet_docker_for_node "$PREVIEW_NODE") || exit 1
+note "placed on $PREVIEW_NODE, inspected via: $DOCKER"
 
 step "Curl through Traefik — the response carries staging's inherited secret"
 deadline=$((SECONDS + 30)); BODY=""

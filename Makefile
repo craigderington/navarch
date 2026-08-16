@@ -2,6 +2,9 @@
 DB_URL ?= postgres://composectl:composectl@localhost:5473/composectl?sslmode=disable
 MIGRATION_DB_URL ?= postgres://composectl:composectl@postgres:5432/composectl?sslmode=disable
 API    ?= http://localhost:8417
+# Every node's agent, for log tailing and for the stop/start dance the tests
+# need. Scaling the fleet means adding a node here and in compose.yaml.
+AGENTS ?= agent-1 agent-2
 API_TOKEN ?= dev-token-change-me
 
 .PHONY: help
@@ -89,4 +92,4 @@ demo-fleet: ## Two nodes, two daemons: ingress stack pinned to the router node, 
 
 .PHONY: agent-logs
 agent-logs: ## Tail the node agent logs
-	docker compose logs -f agent
+	docker compose logs -f $(AGENTS)
