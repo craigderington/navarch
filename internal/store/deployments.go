@@ -428,6 +428,10 @@ func (s *Store) ListLiveRoutes(ctx context.Context) ([]LiveRoute, error) {
 type PendingDeployment struct {
 	Deployment
 	OrgID uuid.UUID
+	// HomeNodeID is the node this environment's durable state already lives on,
+	// nil before its first placement. A deployment for a homed environment goes
+	// there or nowhere: its pinned container and named volumes cannot follow it.
+	HomeNodeID *uuid.UUID
 }
 
 // ListPendingDeployments returns deployments awaiting scheduling, oldest
@@ -446,7 +450,7 @@ func (s *Store) listPendingDeployments(ctx context.Context, orgID *uuid.UUID) ([
 	rows, err := s.pool.Query(ctx, `
 		SELECT d.id, d.environment_id, d.stack_version_id, d.revision, d.slot,
 		       d.project_name, d.state, d.resolved_spec, d.created_at, d.updated_at,
-		       a.org_id
+		       a.org_id, e.home_node_id
 		FROM deployments d
 		JOIN environments e ON e.id = d.environment_id
 		JOIN stacks s       ON s.id = e.stack_id
@@ -464,7 +468,7 @@ func (s *Store) listPendingDeployments(ctx context.Context, orgID *uuid.UUID) ([
 		var specJSON []byte
 		if err := rows.Scan(&p.ID, &p.EnvironmentID, &p.StackVersionID, &p.Revision,
 			&p.Slot, &p.ProjectName, &p.State, &specJSON, &p.CreatedAt, &p.UpdatedAt,
-			&p.OrgID); err != nil {
+			&p.OrgID, &p.HomeNodeID); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(specJSON, &p.ResolvedSpec); err != nil {

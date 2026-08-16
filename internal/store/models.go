@@ -61,7 +61,11 @@ type Environment struct {
 	// ExpiresAt passes. Non-ephemeral environments never expire.
 	Ephemeral bool       `json:"ephemeral"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	// HomeNodeID is the node holding this environment's durable state, set by
+	// its first placement and never changed. Every later deployment goes there:
+	// the pinned container and named volumes cannot follow it elsewhere.
+	HomeNodeID *uuid.UUID `json:"home_node_id,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 type DeploymentState string

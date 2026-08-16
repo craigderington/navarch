@@ -478,6 +478,35 @@ these, so don't drift them): swappable container
 named volume `cc-{env8}-{volume}`. Labels: `cc.env`, `cc.deployment`,
 `cc.service`, `cc.swappable`. `env8` = `store.shortID(environmentID)`.
 
+**An environment is bound to one node for its lifetime.**
+`environments.home_node_id` is set by the first placement, in the same
+transaction, and never changes. Every later deployment for that environment goes
+there or fails — `PlaceDeployment` refuses a contradicting node with
+`ErrConflict`, and the scheduler fails the deployment rather than looking
+elsewhere. **Falling back to another node when the home node is full is the
+data-loss bug wearing a helpful face:** the pinned container and named volumes
+cannot follow, so the agent would build a fresh pinned container over an *empty*
+volume, pass its health check, and be auto-promoted while the real data sat
+unreferenced on the original node — a rollout that reports success and loses the
+database. The check is enforced in the store, not only in the scheduler, for the
+same reason the deployment state machine is enforced in SQL: a buggy or racing
+scheduler must not be able to write a placement that contradicts durable state.
+`TestPlacementRefusesToMoveAHomedEnvironment` is the regression, verified to fail
+without the refusal.
+
+The column is `ON DELETE SET NULL` deliberately. RESTRICT is semantically purer,
+but deleting a node destroys the volumes it held, so unbinding is the honest
+outcome and re-homing the only recovery — and RESTRICT would wedge organization
+deletion, since environments cascade from stacks while nodes cascade from the
+org (the cascade-ordering hazard already recorded above).
+
+Placement for an *unbound* environment is scored, not first-fit: capacity is a
+hard filter, then fewest environments homed, then greatest free-capacity ratio
+(of the more constrained of cpu/memory), then node id ascending. The id
+tie-break exists so the same fleet state always yields the same choice — a
+scheduler whose output depends on Postgres row order cannot be asserted on, and
+its bugs reproduce only sometimes. `bestNode` is pure and table-tested.
+
 **The router joins the tenant's network; the tenant never joins a shared one.**
 Traefik reaches a revision's ingress container because the agent attaches the
 *router* to that revision network (`AttachRouterToNetwork`, locating the
@@ -584,7 +613,23 @@ would be permanent). `POST /v1/stacks/{stack}/versions` takes the compose
 file as the **raw body** (`curl --data-binary @compose.yaml`), authorship
 via `?created_by=`.
 
-**Sprint 4** — multi-node, WireGuard mesh, placement scoring
+**Sprint 4 — multi-node fleet. IN PROGRESS** (branch `sprint4-multi-node`).
+Design: `docs/superpowers/specs/2026-08-15-sprint4-multi-node-design.md`.
+Settled: a deployment is placed **whole onto one node** (no cross-node overlay,
+so the agent's container model is untouched); **one ingress node** reaches
+tenants over the mesh; the dev fleet is **Docker-in-Docker** so nodes are real
+separate daemons.
+
+- **Slice A — environment affinity + scored placement. DONE.** `home_node_id`,
+  refusal to relocate, spread-first scoring, secret recipients keyed to the home
+  node. It landed first because the affinity bug was live in the code and needed
+  only a second node to become data loss.
+- **Slice B** — the DinD dev fleet and per-node registration.
+- **Slice C** — WireGuard mesh and cross-node ingress. One fork still open: a
+  mesh-bound published port versus routed container subnets.
+- **Slice D** — drain and failover. Today `MarkStaleNodesUnreachable` flips a
+  node's state and does nothing about its deployments, which stay `live`.
+
 **Sprint 5** — Bubble Tea TUI, log aggregation, metrics
 
 **Post-review hardening. DONE.** Every API route except `/healthz` requires

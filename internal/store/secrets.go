@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -75,13 +76,30 @@ func (s *Store) DeleteSecret(ctx context.Context, envID uuid.UUID, key string) e
 	return mapErr(err)
 }
 
-// EncryptedSecretsForNode returns the latest-version ciphertext for every env
-// with an active deployment on the node, keyed by env8. The agent decrypts these
-// locally to build a per-env secret source.
-// RecipientsForEnvironment returns age recipients that should be able to
-// open this environment's secrets: nodes already running it, or every
-// ready node in the org if nothing is placed yet.
+// RecipientsForEnvironment returns the age recipients that should be able to
+// open this environment's secrets, narrowest first: its home node, then any node
+// already running it, then every ready node in the org when nothing is placed.
+//
+// The home node comes first because it is the only node a deployment for this
+// environment can ever be placed on, so sealing wider adds recipients that will
+// never need to decrypt. Before the binding existed this had to guess from
+// placement history, which is also why the fallbacks remain: an environment that
+// has never been deployed has no home yet, and its secrets must still be
+// writable ahead of the first rollout.
 func (s *Store) RecipientsForEnvironment(ctx context.Context, envID uuid.UUID) ([]string, error) {
+	var homeRecipient *string
+	if err := s.pool.QueryRow(ctx, `
+		SELECT n.age_recipient
+		FROM environments e
+		JOIN nodes n ON n.id = e.home_node_id
+		WHERE e.id = $1
+	`, envID).Scan(&homeRecipient); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, mapErr(err)
+	}
+	if homeRecipient != nil && *homeRecipient != "" {
+		return []string{*homeRecipient}, nil
+	}
+
 	rows, err := s.pool.Query(ctx, `
 		SELECT DISTINCT n.age_recipient
 		FROM nodes n

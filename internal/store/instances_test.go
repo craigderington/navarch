@@ -313,3 +313,121 @@ func TestRollbackRejectsMissingSecrets(t *testing.T) {
 }
 
 func errorsIs(err, target error) bool { return errors.Is(err, target) }
+
+// The data-loss regression. An environment's pinned container and named volumes
+// live on the node its first deployment was placed on. Before home_node_id,
+// nothing stopped revision 2 being placed elsewhere — where the agent would
+// build a fresh pinned container over an empty volume, pass health checks, and
+// be auto-promoted while the real data sat unreferenced on the original node.
+// The rollout reported success. Placement must refuse instead.
+func TestPlacementRefusesToMoveAHomedEnvironment(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	sv, err := st.CreateStackVersion(ctx, stack.ID, "raw", twoServiceSpec(), "t")
+	if err != nil {
+		t.Fatalf("CreateStackVersion: %v", err)
+	}
+	env, err := st.CreateEnvironment(ctx, CreateEnvironmentParams{StackID: stack.ID, Slug: "prod"})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	nodeA, nodeB := newNode(t, st, org.ID), newNode(t, st, org.ID)
+	insts := []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "nginx:alpine"}}
+
+	d1, err := st.CreateDeployment(ctx, CreateDeploymentParams{
+		EnvironmentID: env.ID, StackVersionID: sv.ID, ResolvedSpec: sv.Spec, CreatedBy: "t",
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	if err := st.PlaceDeployment(ctx, d1.ID, nodeA.ID, insts, 250, 256<<20); err != nil {
+		t.Fatalf("first placement: %v", err)
+	}
+
+	// First placement must have bound the environment.
+	got, err := st.GetEnvironment(ctx, env.ID)
+	if err != nil {
+		t.Fatalf("GetEnvironment: %v", err)
+	}
+	if got.HomeNodeID == nil || *got.HomeNodeID != nodeA.ID {
+		t.Fatalf("first placement must home the environment to %s, got %v", nodeA.ID, got.HomeNodeID)
+	}
+
+	// Retire the first so the partial unique index permits a second active
+	// deployment; the point under test is placement, not that constraint.
+	// Failed, not superseded: the state machine only allows superseding a live
+	// deployment, and this one never left scheduling.
+	if err := st.UpdateDeploymentState(ctx, d1.ID, DeployFailed, "retired by test"); err != nil {
+		t.Fatalf("retire first deployment: %v", err)
+	}
+	d2, err := st.CreateDeployment(ctx, CreateDeploymentParams{
+		EnvironmentID: env.ID, StackVersionID: sv.ID, ResolvedSpec: sv.Spec, CreatedBy: "t",
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment (second): %v", err)
+	}
+
+	err = st.PlaceDeployment(ctx, d2.ID, nodeB.ID, insts, 250, 256<<20)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("placing a homed environment on another node must be ErrConflict, got %v", err)
+	}
+
+	// And the binding is unchanged — a refused placement must not half-apply.
+	got, err = st.GetEnvironment(ctx, env.ID)
+	if err != nil {
+		t.Fatalf("GetEnvironment: %v", err)
+	}
+	if got.HomeNodeID == nil || *got.HomeNodeID != nodeA.ID {
+		t.Fatalf("home node must be unchanged after a refusal, got %v", got.HomeNodeID)
+	}
+
+	// The same deployment placed on the home node succeeds, proving the refusal
+	// was about the node and not about the deployment being unplaceable.
+	if err := st.PlaceDeployment(ctx, d2.ID, nodeA.ID, insts, 250, 256<<20); err != nil {
+		t.Fatalf("placement on the home node: %v", err)
+	}
+}
+
+func TestEnvironmentsHomedPerNode(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	sv, err := st.CreateStackVersion(ctx, stack.ID, "raw", twoServiceSpec(), "t")
+	if err != nil {
+		t.Fatalf("CreateStackVersion: %v", err)
+	}
+	nodeA, nodeB := newNode(t, st, org.ID), newNode(t, st, org.ID)
+	insts := []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "nginx:alpine"}}
+
+	// Two environments on A, one on B.
+	for i, node := range []*Node{nodeA, nodeA, nodeB} {
+		env, err := st.CreateEnvironment(ctx, CreateEnvironmentParams{
+			StackID: stack.ID, Slug: uniq("e"),
+		})
+		if err != nil {
+			t.Fatalf("CreateEnvironment %d: %v", i, err)
+		}
+		dep, err := st.CreateDeployment(ctx, CreateDeploymentParams{
+			EnvironmentID: env.ID, StackVersionID: sv.ID, ResolvedSpec: sv.Spec, CreatedBy: "t",
+		})
+		if err != nil {
+			t.Fatalf("CreateDeployment %d: %v", i, err)
+		}
+		if err := st.PlaceDeployment(ctx, dep.ID, node.ID, insts, 250, 256<<20); err != nil {
+			t.Fatalf("PlaceDeployment %d: %v", i, err)
+		}
+	}
+
+	homed, err := st.EnvironmentsHomedPerNode(ctx, org.ID)
+	if err != nil {
+		t.Fatalf("EnvironmentsHomedPerNode: %v", err)
+	}
+	if homed[nodeA.ID] != 2 || homed[nodeB.ID] != 1 {
+		t.Fatalf("want A=2 B=1, got %v", homed)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,4 +243,151 @@ func TestControllerAutoPromotes(t *testing.T) {
 	if dep.State != store.DeployLive {
 		t.Fatalf("expected live after auto-promote, got %s", dep.State)
 	}
+}
+
+// bestNode is pure, so the interesting cases need no database at all — which
+// matters because a scheduler is exactly the component whose behaviour must be
+// assertable without arranging a fleet.
+func TestBestNodeScoring(t *testing.T) {
+	// Ordered ids so the tie-break has a defined winner: a < b < c.
+	a := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	b := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	c := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	node := func(id uuid.UUID, cpu, allocCPU int, mem, allocMem int64) store.Node {
+		return store.Node{ID: id, CPUMillis: cpu, AllocCPUMillis: allocCPU,
+			MemoryBytes: mem, AllocMemoryBytes: allocMem}
+	}
+	const gb = 1 << 30
+
+	tests := []struct {
+		name  string
+		nodes []store.Node
+		homed map[uuid.UUID]int
+		want  *uuid.UUID
+	}{
+		{
+			name:  "no node with room is not a choice",
+			nodes: []store.Node{node(a, 1000, 900, 8*gb, 8*gb-1)},
+		},
+		{
+			name:  "capacity is a filter, not a preference",
+			nodes: []store.Node{node(a, 100, 0, 8*gb, 0), node(b, 8000, 0, 8*gb, 0)},
+			want:  &b, // a is roomier proportionally but cannot fit 750 millicpu
+		},
+		{
+			name:  "spread wins over free capacity",
+			nodes: []store.Node{node(a, 8000, 0, 16*gb, 0), node(b, 8000, 4000, 16*gb, 8*gb)},
+			homed: map[uuid.UUID]int{a: 3, b: 1},
+			want:  &b, // emptier by capacity is a, but b hosts fewer environments
+		},
+		{
+			name:  "free capacity breaks an equal spread",
+			nodes: []store.Node{node(a, 8000, 6000, 16*gb, 0), node(b, 8000, 0, 16*gb, 0)},
+			homed: map[uuid.UUID]int{a: 2, b: 2},
+			want:  &b,
+		},
+		{
+			name:  "the constrained resource decides the ratio",
+			nodes: []store.Node{node(a, 8000, 7900, 16*gb, 0), node(b, 8000, 4000, 16*gb, 8*gb)},
+			want:  &b, // a has memory to spare but almost no cpu
+		},
+		{
+			name:  "identical nodes fall back to the id, not to row order",
+			nodes: []store.Node{node(c, 8000, 0, 16*gb, 0), node(b, 8000, 0, 16*gb, 0), node(a, 8000, 0, 16*gb, 0)},
+			want:  &a,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bestNode(tt.nodes, tt.homed, 750, 768<<20)
+			switch {
+			case tt.want == nil && got != nil:
+				t.Fatalf("expected no node, got %s", got.ID)
+			case tt.want == nil:
+			case got == nil:
+				t.Fatalf("expected %s, got none", *tt.want)
+			case got.ID != *tt.want:
+				t.Fatalf("expected %s, got %s", *tt.want, got.ID)
+			}
+		})
+	}
+}
+
+// Reordering the input must not reorder the output. A scheduler that depends on
+// the order Postgres returned rows reproduces its bugs only sometimes.
+func TestBestNodeIsOrderIndependent(t *testing.T) {
+	a := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	b := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	const gb = 1 << 30
+	na := store.Node{ID: a, CPUMillis: 8000, MemoryBytes: 16 * gb}
+	nb := store.Node{ID: b, CPUMillis: 8000, MemoryBytes: 16 * gb}
+
+	first := bestNode([]store.Node{na, nb}, nil, 750, 768<<20)
+	second := bestNode([]store.Node{nb, na}, nil, 750, 768<<20)
+	if first == nil || second == nil || first.ID != second.ID {
+		t.Fatalf("scoring must not depend on input order: %v vs %v", first, second)
+	}
+}
+
+// The scheduler must not treat "the home node is full" as a reason to look
+// elsewhere. Relocating is the data-loss bug wearing a helpful face.
+func TestSchedulerFailsRatherThanMovingAHomedEnvironment(t *testing.T) {
+	st := testStore(t)
+	depID, nodeID, orgID := fixture(t, st)
+
+	sc := newSchedulerForOrg(st, discardLog(), orgID)
+	if err := sc.ScheduleOnce(ctx(t)); err != nil {
+		t.Fatalf("first ScheduleOnce: %v", err)
+	}
+	dep, _ := st.GetDeployment(ctx(t), depID)
+	if dep.State != store.DeployScheduling {
+		t.Fatalf("first deployment should be scheduling, got %s", dep.State)
+	}
+
+	// Retire it so a second deployment for the same environment is allowed.
+	if err := st.UpdateDeploymentState(ctx(t), depID, store.DeployFailed, "test"); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	// Fill the home node so only the roomy new node could host the rollout.
+	if _, err := st.Pool().Exec(ctx(t),
+		`UPDATE nodes SET alloc_cpu_millis = cpu_millis WHERE id=$1`, nodeID); err != nil {
+		t.Fatalf("fill home node: %v", err)
+	}
+	if _, err := st.RegisterNode(ctx(t), store.RegisterNodeParams{
+		OrgID: orgID, Hostname: "roomy-" + uuid.NewString()[:8], AdvertiseAddr: "10.0.0.7",
+		CPUMillis: 16000, MemoryBytes: 64 << 30,
+	}); err != nil {
+		t.Fatalf("register roomy node: %v", err)
+	}
+
+	second := secondDeploymentForSameEnv(t, st, depID)
+	if err := sc.ScheduleOnce(ctx(t)); err != nil {
+		t.Fatalf("second ScheduleOnce: %v", err)
+	}
+
+	got, _ := st.GetDeployment(ctx(t), second)
+	if got.State != store.DeployFailed {
+		t.Fatalf("a homed environment whose node is full must fail, got %s", got.State)
+	}
+	if !strings.Contains(got.FailureReason, "home node") {
+		t.Fatalf("failure reason should name the home node, got %q", got.FailureReason)
+	}
+}
+
+// secondDeploymentForSameEnv creates another deployment for the environment of
+// an existing one, so affinity tests do not need to rebuild the whole graph.
+func secondDeploymentForSameEnv(t *testing.T, st *store.Store, existing uuid.UUID) uuid.UUID {
+	t.Helper()
+	prev, err := st.GetDeployment(ctx(t), existing)
+	if err != nil {
+		t.Fatalf("GetDeployment: %v", err)
+	}
+	dep, err := st.CreateDeployment(ctx(t), store.CreateDeploymentParams{
+		EnvironmentID: prev.EnvironmentID, StackVersionID: prev.StackVersionID,
+		ResolvedSpec: prev.ResolvedSpec, CreatedBy: "t",
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	return dep.ID
 }

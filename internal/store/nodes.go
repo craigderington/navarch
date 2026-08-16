@@ -208,3 +208,36 @@ func (s *Store) queryNodes(ctx context.Context, sql string, args ...any) ([]Node
 	}
 	return out, rows.Err()
 }
+
+// EnvironmentsHomedPerNode counts the environments bound to each node in an
+// organization. It feeds the scheduler's spread term, and it counts *homed*
+// environments rather than running deployments on purpose: a binding outlives
+// any individual deployment, including a failed one, because the volumes it was
+// created under are what make it permanent.
+//
+// Nodes with no environments are absent from the map rather than present with
+// zero; the caller looks up a missing key as zero, which is what it means.
+func (s *Store) EnvironmentsHomedPerNode(ctx context.Context, orgID uuid.UUID) (map[uuid.UUID]int, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT e.home_node_id, count(*)
+		FROM environments e
+		JOIN stacks s       ON s.id = e.stack_id
+		JOIN applications a ON a.id = s.app_id
+		WHERE a.org_id = $1 AND e.home_node_id IS NOT NULL
+		GROUP BY e.home_node_id
+	`, orgID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := map[uuid.UUID]int{}
+	for rows.Next() {
+		var id uuid.UUID
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
