@@ -188,26 +188,50 @@ func (d *Driver) removeNetwork(ctx context.Context, name string) error {
 //
 // secrets is per-call, not a Driver field, because Sprint 3 resolves secrets
 // per-environment — a single Driver reconciles instances across many envs.
-func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets SecretSource) (string, bool, error) {
+func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets SecretSource) (Ensured, error) {
 	env, err := d.resolveEnv(cs.Env, cs.SecretEnv, secrets)
 	if err != nil {
-		return "", false, err
+		return Ensured{}, err
 	}
 	fingerprint, err := containerFingerprint(cs, env)
 	if err != nil {
-		return "", false, err
+		return Ensured{}, err
 	}
+	recreated := false
 	if existing, err := d.findByName(ctx, cs.Name); err != nil {
-		return "", false, err
+		return Ensured{}, err
 	} else if existing != "" {
 		inspected, err := d.cli.ContainerInspect(ctx, existing)
 		if err != nil {
-			return "", false, err
+			return Ensured{}, err
 		}
 		if inspected.Config.Labels[specFingerprintLabel] != fingerprint {
-			return "", false, fmt.Errorf("container %s configuration changed; automatic stateful recreation is not supported", cs.Name)
+			return Ensured{}, fmt.Errorf("container %s configuration changed; automatic stateful recreation is not supported", cs.Name)
 		}
-		return existing, false, nil
+		// Publish state is checked against the container instead of through the
+		// fingerprint, and the difference matters — see containerFingerprint for
+		// why it is excluded from the hash. An adopted container whose bindings
+		// disagree with the spec cannot be corrected in place: Docker fixes port
+		// bindings at create time.
+		//
+		// The bindings are read from HostConfig rather than NetworkSettings
+		// because findByName adopts stopped containers too (All: true), and a
+		// stopped container reports no active ports however it was created.
+		if have := publishedPort(inspected.HostConfig); have != cs.PublishPort {
+			if cs.Labels["cc.swappable"] != "true" {
+				return Ensured{}, fmt.Errorf("container %s publishes port %d but %d is required, and a pinned container is not replaced automatically", cs.Name, have, cs.PublishPort)
+			}
+			// Safe only because it is swappable: the platform already destroys
+			// and rebuilds these on every rollout, and the parser forbids one
+			// from mounting a writable named volume, so there is no state to
+			// lose. A pinned container reaches the branch above instead.
+			if err := d.StopRemove(ctx, existing); err != nil {
+				return Ensured{}, fmt.Errorf("replace %s to correct its published port: %w", cs.Name, err)
+			}
+			recreated = true
+		} else {
+			return Ensured{ID: existing}, nil
+		}
 	}
 
 	labels := make(map[string]string, len(cs.Labels)+1)
@@ -255,7 +279,7 @@ func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets 
 	if cs.PublishPort > 0 {
 		port, err := nat.NewPort("tcp", strconv.Itoa(cs.PublishPort))
 		if err != nil {
-			return "", false, fmt.Errorf("ingress port %d: %w", cs.PublishPort, err)
+			return Ensured{}, fmt.Errorf("ingress port %d: %w", cs.PublishPort, err)
 		}
 		cfg.ExposedPorts = nat.PortSet{port: struct{}{}}
 		publish = nat.PortMap{port: []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: "0"}}}
@@ -285,18 +309,60 @@ func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets 
 
 	created, err := d.cli.ContainerCreate(ctx, cfg, hostCfg, netCfg, nil, cs.Name)
 	if err != nil {
-		return "", false, fmt.Errorf("create %s: %w", cs.Name, err)
+		return Ensured{}, fmt.Errorf("create %s: %w", cs.Name, err)
 	}
 	if err := d.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
-		return "", false, fmt.Errorf("start %s: %w", cs.Name, err)
+		return Ensured{}, fmt.Errorf("start %s: %w", cs.Name, err)
 	}
-	return created.ID, true, nil
+	return Ensured{ID: created.ID, Created: !recreated, Recreated: recreated}, nil
+}
+
+// Ensured is the outcome of EnsureContainer. Recreated is separate from Created
+// because replacing a container that already existed is a disruptive act on a
+// possibly-live service, and the agent logs it — whereas creating one that was
+// never there is the ordinary path and says nothing.
+type Ensured struct {
+	ID        string
+	Created   bool
+	Recreated bool
+}
+
+// publishedPort reports the container-side port this container was created to
+// publish, 0 for none. Only one is ever published (the ingress service's), so
+// the first binding found is the answer.
+func publishedPort(hostCfg *container.HostConfig) int {
+	if hostCfg == nil {
+		return 0
+	}
+	for port, bindings := range hostCfg.PortBindings {
+		if len(bindings) == 0 {
+			continue
+		}
+		if n, err := strconv.Atoi(port.Port()); err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 func containerFingerprint(cs ContainerSpec, resolvedEnv map[string]string) (string, error) {
 	// Network and management labels are intentionally excluded: a pinned
 	// container joins each new revision network while its runtime configuration
 	// remains the same. Secret plaintext participates only through this hash.
+	//
+	// PublishPort is excluded too, and that exclusion is load-bearing rather
+	// than an oversight. Putting it in would make every container created
+	// before published-port routing existed fail adoption permanently — the
+	// mismatch branch is a hard error, not a rebuild, so the agent would error
+	// every tick on a healthy live deployment instead of converging. It is
+	// verified directly against the container's bindings in EnsureContainer
+	// instead, which is strictly stronger for a property Docker will tell you
+	// about: it also catches a binding lost for some reason nothing hashed.
+	//
+	// Do not "fix" this by adding the field. The hard error on a fingerprint
+	// mismatch is deliberate — it is what stops a rotated secret being claimed
+	// by an adopted container still running the old value, forcing the change
+	// through a new revision and its blue/green rollout instead.
 	v := struct {
 		Image       string
 		Env         map[string]string

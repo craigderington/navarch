@@ -18,7 +18,7 @@ import (
 type DockerDriver interface {
 	EnsureImage(ctx context.Context, ref string) (string, error)
 	EnsureNetwork(ctx context.Context, name string, labels map[string]string) (string, error)
-	EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (string, bool, error)
+	EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (dockerd.Ensured, error)
 	AttachNetwork(ctx context.Context, containerID, network string, aliases ...string) error
 	InspectHealth(ctx context.Context, containerID string) (dockerd.Health, error)
 	StopRemove(ctx context.Context, containerID string) error
@@ -46,6 +46,10 @@ type Report struct {
 	LastError    string
 	RestartCount int
 	SetStarted   bool
+	// Recreated is set when an existing container had to be replaced rather than
+	// adopted. Reported so the agent can log it: rebuilding a possibly-live
+	// container is disruptive, and nothing else would show it happened.
+	Recreated bool
 	// IngressPort is the host port Docker assigned to this instance's published
 	// ingress port, 0 for every other service. The control plane composes the
 	// route from this and the node's registered address — the agent reports the
@@ -265,10 +269,15 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 			return fail(err)
 		}
 	}
-	id, _, err := r.drv.EnsureContainer(ctx, cs, secrets)
+	ensured, err := r.drv.EnsureContainer(ctx, cs, secrets)
 	if err != nil {
 		return fail(err)
 	}
+	id := ensured.ID
+	// A replacement is worth a line in the log: it means a container that was
+	// already there had to be destroyed to correct its published port, which is
+	// a brief outage for that service and the only visible trace of it.
+	rep.Recreated = ensured.Recreated
 	// A pinned container is created once under its env network but must be
 	// reachable from every revision's network; attach it to this revision's.
 	if !di.Swappable {

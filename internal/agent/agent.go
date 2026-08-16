@@ -146,6 +146,12 @@ func (c *cpClient) reconcileTick(ctx context.Context, nodeID uuid.UUID, rec *Rec
 	for _, f := range failures {
 		log.Warn("env cleanup failed", "env", f.Env8, "op", f.Op, "err", f.Err)
 	}
+	for _, rep := range reports {
+		if rep.Recreated {
+			log.Warn("container replaced to correct its published port",
+				"instance", rep.InstanceID, "container", rep.ContainerID)
+		}
+	}
 	if len(reports) > 0 {
 		if err := c.do(ctx, http.MethodPost, "/v1/nodes/"+nodeID.String()+"/report",
 			map[string]any{"instances": toReportDTO(reports)}, nil); err != nil {
