@@ -50,6 +50,11 @@ type Report struct {
 	LastError    string
 	RestartCount int
 	SetStarted   bool
+	// IngressPort is the host port Docker assigned to this instance's published
+	// ingress port, 0 for every other service. The control plane composes the
+	// route from this and the node's registered address — the agent reports the
+	// port but never names the address, so it cannot point traffic at itself.
+	IngressPort int
 }
 
 type Reconciler struct {
@@ -290,6 +295,7 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 		return fail(err)
 	}
 	rep.RestartCount = h.RestartCount
+	rep.IngressPort = h.PublishedPort
 	rep.State, rep.HealthStatus = r.observe(di, h)
 	return rep
 }
@@ -411,12 +417,20 @@ func containerSpec(di store.DesiredInstance, name string) dockerd.ContainerSpec 
 			ReadOnly: m.ReadOnly,
 		})
 	}
+	// An ingress service is published on an ephemeral host port so the router can
+	// reach it by node address rather than by container name — the only form that
+	// works when the router is on a different node. The same path is taken when
+	// it is on the same node: one code path, so local and remote cannot drift.
+	publish := 0
+	if svc.Ingress != nil {
+		publish = svc.Ingress.Port
+	}
 	return dockerd.ContainerSpec{
 		Name: name, Image: svc.Image, Env: svc.Env, SecretEnv: svc.SecretEnv,
 		Cmd: svc.Command, Entrypoint: svc.Entrypoint, WorkingDir: svc.WorkingDir,
 		User: svc.User, Mounts: mounts, Health: svc.Health, Restart: svc.Restart,
 		CPUMillis: svc.Limits.CPUMillis, MemoryBytes: svc.Limits.MemoryBytes,
-		Network: di.ProjectName,
+		Network: di.ProjectName, PublishPort: publish,
 		Labels: map[string]string{
 			"cc.env": di.Env8, "cc.deployment": di.DeploymentID.String(),
 			"cc.service": di.ServiceName, "cc.swappable": boolStr(di.Swappable),

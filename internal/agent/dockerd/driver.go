@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/go-connections/nat"
 
 	"github.com/craig/composectl/internal/spec"
 )
@@ -72,6 +74,17 @@ type ContainerSpec struct {
 	Restart     string
 	CPUMillis   int
 	MemoryBytes int64
+	// PublishPort is the container port to publish on the host, set only for an
+	// ingress service. The host port is always 0 so Docker allocates it: there
+	// is no allocator here to collide, and the assignment is read back from the
+	// running container rather than predicted.
+	//
+	// This does not contradict the platform's rejection of `ports:` in tenant
+	// compose files. That rule stops a *tenant* claiming a fixed host port, which
+	// collides between revisions and between stacks. This is the platform
+	// publishing an ephemeral port so its own router can reach the container from
+	// another node — nothing a compose author can ask for or influence.
+	PublishPort int
 }
 
 func (d *Driver) EnsureImage(ctx context.Context, ref string) (string, error) {
@@ -236,6 +249,7 @@ func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets 
 		}
 	}
 
+	var publish nat.PortMap
 	binds := make([]string, 0, len(cs.Mounts))
 	for _, m := range cs.Mounts {
 		bind := m.Volume + ":" + m.Target
@@ -245,8 +259,21 @@ func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets 
 		binds = append(binds, bind)
 	}
 
+	// Host port 0 lets Docker allocate. Both halves are needed: ExposedPorts on
+	// the container config and PortBindings on the host config — binding without
+	// exposing silently publishes nothing.
+	if cs.PublishPort > 0 {
+		port, err := nat.NewPort("tcp", strconv.Itoa(cs.PublishPort))
+		if err != nil {
+			return "", false, fmt.Errorf("ingress port %d: %w", cs.PublishPort, err)
+		}
+		cfg.ExposedPorts = nat.PortSet{port: struct{}{}}
+		publish = nat.PortMap{port: []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: "0"}}}
+	}
+
 	hostCfg := &container.HostConfig{
 		Binds:         binds,
+		PortBindings:  publish,
 		RestartPolicy: restartPolicy(cs.Restart),
 		Resources: container.Resources{
 			NanoCPUs:   int64(cs.CPUMillis) * 1_000_000, // millicpu → nanocpu
@@ -316,6 +343,13 @@ type Health struct {
 	Status       string // "healthy" | "unhealthy" | "starting" | "" (none)
 	ExitCode     int
 	RestartCount int
+	// PublishedPort is the host port Docker assigned to this container's ingress
+	// port, 0 when nothing is published. It rides along on this inspect rather
+	// than taking a call of its own: reconcile already inspects every container
+	// on every tick, and a second round-trip per instance per tick to read one
+	// integer is a poor trade. The port is only knowable after the container
+	// exists, which is why it is observed here and not predicted at create time.
+	PublishedPort int
 }
 
 func (d *Driver) InspectHealth(ctx context.Context, containerID string) (Health, error) {
@@ -331,7 +365,34 @@ func (d *Driver) InspectHealth(ctx context.Context, containerID string) (Health,
 	if c.State.Health != nil {
 		h.Status = c.State.Health.Status
 	}
+	if c.NetworkSettings != nil {
+		h.PublishedPort = firstPublishedPort(c.NetworkSettings.Ports)
+	}
 	return h, nil
+}
+
+// firstPublishedPort reads back what Docker allocated. Only one port is ever
+// published per container, but Docker lists a binding per address family, so
+// IPv4 is preferred and any binding accepted — the two carry the same host port
+// and picking whichever came first would make the value depend on map order.
+func firstPublishedPort(ports nat.PortMap) int {
+	best := 0
+	for _, bindings := range ports {
+		for _, b := range bindings {
+			if b.HostPort == "" {
+				continue
+			}
+			n, err := strconv.Atoi(b.HostPort)
+			if err != nil || n <= 0 {
+				continue
+			}
+			if b.HostIP == "0.0.0.0" {
+				return n
+			}
+			best = n
+		}
+	}
+	return best
 }
 
 func (d *Driver) StopRemove(ctx context.Context, containerID string) error {

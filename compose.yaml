@@ -125,6 +125,12 @@ services:
       COMPOSECTL_ORG: dev
       COMPOSECTL_NODE_HOSTNAME: dev-node-1
       COMPOSECTL_NODE_LABELS: ingress=true
+      # The router now connects to a node address and a published port, so this
+      # has to be an address *Traefik's container* can reach. This node's
+      # containers publish on the host, and 127.0.0.1 inside the agent container
+      # is not the host — host-gateway is. The agent resolves the name to the IP
+      # it registers, because advertise_addr is an INET column.
+      COMPOSECTL_ADVERTISE_ADDR: host.docker.internal
       # Capacity is *reserved* from declared limits, not measured usage, and a
       # demo environment holds its reservation for as long as it is live —
       # nothing but a preview's TTL ever expires one. At the 8 GB default this
@@ -136,6 +142,8 @@ services:
       COMPOSECTL_AGENT_TOKEN: dev-token-change-me
       COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
       COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Identity must persist across restarts — a fresh keypair each boot
@@ -196,6 +204,10 @@ services:
       COMPOSECTL_ORG: dev
       COMPOSECTL_NODE_HOSTNAME: dev-node-2
       COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-16384}
+      # This node's containers publish inside the dind-b container's network
+      # namespace, so that container's own address on the compose network is
+      # where the router reaches them.
+      COMPOSECTL_ADVERTISE_ADDR: dind-b
       COMPOSECTL_AGENT_TOKEN: dev-token-change-me
       COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
       COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token

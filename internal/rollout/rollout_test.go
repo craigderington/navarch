@@ -392,49 +392,17 @@ func secondDeploymentForSameEnv(t *testing.T, st *store.Store, existing uuid.UUI
 	return dep.ID
 }
 
-// A stack with an ingress service is only servable from a node running the
-// router, because the router reaches a tenant by joining its revision network
-// and can only do that on its own daemon. Placing it elsewhere would produce a
-// deployment that goes live while its hostname resolves to nothing — a success
-// report for something nobody can reach.
-func TestSchedulerRefusesIngressStackWithNoIngressNode(t *testing.T) {
+// Slice B constrained an ingress stack to the node running the router, because
+// the router could only reach a tenant by joining its revision network on a
+// shared daemon. Slice C removed that: the router connects to a node address and
+// a published port, so any node can host one. This pins the removal — a
+// reintroduced filter would fail here rather than quietly stranding capacity.
+func TestIngressStackMayBePlacedOnANodeWithoutARouter(t *testing.T) {
 	st := testStore(t)
-	depID, _, orgID := fixture(t, st)
+	depID, nodeID, orgID := fixture(t, st)
 	setSpecIngress(t, st, depID)
 
-	// The fixture's node advertises no labels, so nothing in the fleet can serve
-	// ingress.
-	sc := newSchedulerForOrg(st, discardLog(), orgID)
-	if err := sc.ScheduleOnce(ctx(t)); err != nil {
-		t.Fatalf("ScheduleOnce: %v", err)
-	}
-
-	dep, _ := st.GetDeployment(ctx(t), depID)
-	if dep.State != store.DeployFailed {
-		t.Fatalf("expected failed, got %s", dep.State)
-	}
-	if !strings.Contains(dep.FailureReason, "ingress") {
-		t.Fatalf("the reason should say what is missing, got %q", dep.FailureReason)
-	}
-}
-
-// And the constraint outranks spread: an ingress stack goes to the labelled
-// node even when an emptier one is available, because the emptier one cannot
-// serve it at all.
-func TestSchedulerSendsIngressStackToTheLabelledNode(t *testing.T) {
-	st := testStore(t)
-	depID, plainNodeID, orgID := fixture(t, st)
-	setSpecIngress(t, st, depID)
-
-	ingressNode, err := st.RegisterNode(ctx(t), store.RegisterNodeParams{
-		OrgID: orgID, Hostname: "router-" + uuid.NewString()[:8], AdvertiseAddr: "10.0.0.8",
-		CPUMillis: 8000, MemoryBytes: 16 << 30,
-		Labels: map[string]string{"ingress": "true"},
-	})
-	if err != nil {
-		t.Fatalf("register ingress node: %v", err)
-	}
-
+	// The fixture's node advertises no labels at all.
 	sc := newSchedulerForOrg(st, discardLog(), orgID)
 	if err := sc.ScheduleOnce(ctx(t)); err != nil {
 		t.Fatalf("ScheduleOnce: %v", err)
@@ -444,12 +412,8 @@ func TestSchedulerSendsIngressStackToTheLabelledNode(t *testing.T) {
 	if dep.State != store.DeployScheduling {
 		t.Fatalf("expected scheduling, got %s (%s)", dep.State, dep.FailureReason)
 	}
-	desired, _ := st.DesiredStateForNode(ctx(t), ingressNode.ID)
-	if len(desired) == 0 {
-		t.Fatal("the ingress stack must be placed on the node advertising ingress=true")
-	}
-	if plain, _ := st.DesiredStateForNode(ctx(t), plainNodeID); len(plain) != 0 {
-		t.Fatalf("nothing should have been placed on the node without a router, got %d", len(plain))
+	if desired, _ := st.DesiredStateForNode(ctx(t), nodeID); len(desired) == 0 {
+		t.Fatal("the ingress stack should have been placed on the unlabelled node")
 	}
 }
 

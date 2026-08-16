@@ -11,7 +11,7 @@ func TestSyncWritesTraefikConfig(t *testing.T) {
 	dir := t.TempDir()
 	r := New(dir)
 	if err := r.Sync([]Route{
-		{Key: "abc12345", Hostname: "prod.example.com", ServiceContainer: "cc-abc12345-r1-blue-api", Port: 80},
+		{Key: "abc12345", Hostname: "prod.example.com", Target: "10.0.0.4", Port: 32770},
 	}); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -22,7 +22,7 @@ func TestSyncWritesTraefikConfig(t *testing.T) {
 	out := string(b)
 	for _, want := range []string{
 		"Host(`prod.example.com`)",
-		"http://cc-abc12345-r1-blue-api:80",
+		"http://10.0.0.4:32770",
 		"entryPoints",
 	} {
 		if !strings.Contains(out, want) {
@@ -34,7 +34,7 @@ func TestSyncWritesTraefikConfig(t *testing.T) {
 func TestSyncRejectsUnsafeHostname(t *testing.T) {
 	dir := t.TempDir()
 	err := New(dir).Sync([]Route{
-		{Key: "abc12345", Hostname: "x.com`) || Host(`y.com", ServiceContainer: "cc-abc12345-r1-blue-api", Port: 80},
+		{Key: "abc12345", Hostname: "x.com`) || Host(`y.com", Target: "10.0.0.4", Port: 32770},
 	})
 	if err == nil {
 		t.Fatal("expected unsafe hostname to be rejected")
@@ -66,5 +66,19 @@ func TestSyncEmptyWritesNoHTTPSection(t *testing.T) {
 		if strings.Contains(string(body), banned) {
 			t.Fatalf("empty config must not contain %q, got:\n%s", banned, body)
 		}
+	}
+}
+
+// The target is interpolated into the generated config exactly as the hostname
+// is, so it needs the same alphabet guard. A node address arrives from the
+// database rather than from a request, but "this value came from somewhere
+// trusted" is the assumption that stops being true first.
+func TestSyncRejectsUnsafeTarget(t *testing.T) {
+	dir := t.TempDir()
+	err := New(dir).Sync([]Route{
+		{Key: "abc12345", Hostname: "prod.example.com", Target: "10.0.0.4\nmalicious: true", Port: 80},
+	})
+	if err == nil {
+		t.Fatal("expected an unsafe target to be rejected")
 	}
 }

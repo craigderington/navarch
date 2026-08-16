@@ -202,6 +202,7 @@ func toReportDTO(reports []Report) []map[string]any {
 			"instance_id": r.InstanceID, "state": string(r.State),
 			"container_id": r.ContainerID, "health_status": r.HealthStatus,
 			"last_error": r.LastError, "restart_count": r.RestartCount, "set_started": r.SetStarted,
+			"ingress_port": r.IngressPort,
 		}
 	}
 	return out

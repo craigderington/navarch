@@ -59,6 +59,20 @@ GW_PORT=$(docker compose config --format json | jq -r '.services.traefik.ports[]
 [ -n "$GW_PORT" ] || { echo "could not read traefik's published port from compose.yaml" >&2; exit 1; }
 GW=${GW:-http://localhost:$GW_PORT}
 
+# Which daemon holds this environment's containers? With a fleet, a preview is
+# placed by the scheduler, so the demo has to look where the platform actually
+# put it rather than assuming the host. Everything below inspects through this.
+node_docker() {
+  local env_id=$1 host
+  host=$(docker compose exec -T postgres psql -U composectl -d composectl -tAc \
+    "SELECT COALESCE(n.hostname,'') FROM environments e
+       LEFT JOIN nodes n ON n.id = e.home_node_id WHERE e.id = '$env_id'" | tr -d '[:space:]')
+  case "$host" in
+    dev-node-2) echo "docker compose exec -T dind-b docker" ;;
+    *)          echo "docker" ;;
+  esac
+}
+
 step "Using the bootstrapped dev org"
 ORG=$(api GET /v1/orgs | jq -r '.organizations[]|select(.slug=="dev")|.id')
 [ -n "$ORG" ] || { echo "dev org not found — is the control plane up?" >&2; exit 1; }
@@ -85,6 +99,12 @@ note "env=$ENV_ID  env8=$ENV8  host=$HOST  deployment=$DEP"
 step "Poll until the preview deployment is live"
 wait_state "$DEP" live
 
+# Only now is the placement known: home_node_id is set by the first placement,
+# so resolving the daemon any earlier always answers "the host" and every
+# container assertion below would look at a machine the preview is not on.
+DOCKER=$(node_docker "$ENV_ID")
+note "placed on the node reached via: $DOCKER"
+
 step "Curl through Traefik — the response carries staging's inherited secret"
 deadline=$((SECONDS + 30)); BODY=""
 while [ $SECONDS -lt $deadline ]; do
@@ -99,11 +119,11 @@ grep -qF "Name: $SECRET_VALUE" <<<"$BODY" \
 note "confirmed: the preview served staging's decrypted secret — inheritance proven end to end, not just a copied row"
 
 step "Topology before expiry — this is what teardown has to destroy"
-docker ps -a --filter "label=cc.env=$ENV8" --format '  {{.Names}}  {{.Status}}' | sort
-docker volume ls --filter "label=cc.env=$ENV8" --format '  {{.Name}}'
-[ -n "$(docker ps -a --filter "label=cc.env=$ENV8" --filter "label=cc.swappable=false" -q)" ] \
+$DOCKER ps -a --filter "label=cc.env=$ENV8" --format '  {{.Names}}  {{.Status}}' | sort
+$DOCKER volume ls --filter "label=cc.env=$ENV8" --format '  {{.Name}}'
+[ -n "$($DOCKER ps -a --filter "label=cc.env=$ENV8" --filter "label=cc.swappable=false" -q)" ] \
   || { echo "FAIL: no pinned container exists to prove teardown against — the demo would pass vacuously" >&2; exit 1; }
-[ -n "$(docker volume ls --filter "label=cc.env=$ENV8" -q)" ] \
+[ -n "$($DOCKER volume ls --filter "label=cc.env=$ENV8" -q)" ] \
   || { echo "FAIL: no labelled volume exists to prove teardown against — the demo would pass vacuously" >&2; exit 1; }
 
 step "Force expiry"
@@ -120,8 +140,8 @@ in_catalog=true containers_left=1 volumes_left=1
 while [ $SECONDS -lt $deadline ]; do
   api GET "/v1/stacks/$STACK/envs" | jq -e ".environments[] | select(.id==\"$ENV_ID\")" >/dev/null 2>&1 \
     && in_catalog=true || in_catalog=false
-  containers_left=$(docker ps -a --filter "label=cc.env=$ENV8" -q | wc -l)
-  volumes_left=$(docker volume ls --filter "label=cc.env=$ENV8" -q | wc -l)
+  containers_left=$($DOCKER ps -a --filter "label=cc.env=$ENV8" -q | wc -l)
+  volumes_left=$($DOCKER volume ls --filter "label=cc.env=$ENV8" -q | wc -l)
   if [ "$in_catalog" = false ] && [ "$containers_left" -eq 0 ] && [ "$volumes_left" -eq 0 ]; then
     break
   fi
@@ -139,12 +159,12 @@ if [ "$in_catalog" = true ]; then
 fi
 if [ "$containers_left" -ne 0 ]; then
   echo "FAIL: containers labelled cc.env=$ENV8 survive teardown (pinned container not destroyed?)" >&2
-  docker ps -a --filter "label=cc.env=$ENV8" >&2
+  $DOCKER ps -a --filter "label=cc.env=$ENV8" >&2
   fail=true
 fi
 if [ "$volumes_left" -ne 0 ]; then
   echo "FAIL: volumes labelled cc.env=$ENV8 survive teardown" >&2
-  docker volume ls --filter "label=cc.env=$ENV8" >&2
+  $DOCKER volume ls --filter "label=cc.env=$ENV8" >&2
   fail=true
 fi
 [ "$fail" = false ] || exit 1

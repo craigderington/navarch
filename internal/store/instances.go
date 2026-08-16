@@ -193,6 +193,11 @@ type ObservedInstance struct {
 	LastError    string
 	RestartCount int
 	SetStarted   bool
+	// IngressPort is the host port the agent observed Docker assign to this
+	// instance's published ingress port. Zero means "nothing published", which
+	// includes "not an ingress service" and "container not up yet" — the router
+	// omits a route it has no port for rather than guessing one.
+	IngressPort int
 }
 
 func (s *Store) ReportInstance(ctx context.Context, nodeID, instanceID uuid.UUID, o ObservedInstance) error {
@@ -204,9 +209,10 @@ func (s *Store) ReportInstance(ctx context.Context, nodeID, instanceID uuid.UUID
 			last_error    = NULLIF($5,''),
 			restart_count = $6,
 			started_at    = CASE WHEN $7 AND started_at IS NULL THEN now() ELSE started_at END,
+			ingress_port  = NULLIF($9, 0),
 			updated_at    = now()
 		WHERE id = $1 AND node_id = $8
-	`, instanceID, o.State, o.ContainerID, o.HealthStatus, o.LastError, o.RestartCount, o.SetStarted, nodeID)
+	`, instanceID, o.State, o.ContainerID, o.HealthStatus, o.LastError, o.RestartCount, o.SetStarted, nodeID, o.IngressPort)
 	if err != nil {
 		return mapErr(err)
 	}

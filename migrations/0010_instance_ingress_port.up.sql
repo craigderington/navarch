@@ -1,0 +1,13 @@
+-- The router used to reach a tenant by container name on its own Docker daemon,
+-- which stops working the moment the tenant runs on another node. It now targets
+-- the node's address and a port the agent published for the ingress container.
+--
+-- The port is reported, the address is registered: the agent reports what Docker
+-- assigned (host port 0, so Docker allocates and there is no allocator here to
+-- collide), while the address comes from the nodes row the control plane already
+-- holds. An agent that could also name its own address could redirect another
+-- tenant's traffic to itself.
+--
+-- Nullable because it is only ever set for an ingress service, and only once the
+-- container exists: a route with no port yet is omitted rather than guessed.
+ALTER TABLE service_instances ADD COLUMN ingress_port INTEGER;

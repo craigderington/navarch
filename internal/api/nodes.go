@@ -127,6 +127,7 @@ type reportRequest struct {
 		LastError    string    `json:"last_error,omitempty"`
 		RestartCount int       `json:"restart_count,omitempty"`
 		SetStarted   bool      `json:"set_started,omitempty"`
+		IngressPort  int       `json:"ingress_port,omitempty"`
 	} `json:"instances"`
 }
 
@@ -147,6 +148,7 @@ func (s *Server) handleInstanceReport(w http.ResponseWriter, r *http.Request) {
 			State: store.InstanceState(in.State), ContainerID: in.ContainerID,
 			HealthStatus: in.HealthStatus, LastError: in.LastError,
 			RestartCount: in.RestartCount, SetStarted: in.SetStarted,
+			IngressPort: in.IngressPort,
 		})
 		// A vanished row is not a failure, and it is routine: the agent
 		// reconciles at the top of its tick and reports at the bottom, so a

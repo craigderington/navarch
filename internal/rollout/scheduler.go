@@ -88,28 +88,18 @@ func (sc *Scheduler) place(ctx context.Context, dep store.PendingDeployment) err
 		return sc.commit(ctx, dep, home.ID, peakCPU, peakMemory)
 	}
 
-	// A stack with an ingress service can only be served from a node running the
-	// platform's router: the router reaches a tenant by joining its revision
-	// network, which it can only do on its own Docker daemon. Placing such a
-	// stack anywhere else yields a deployment that goes healthy and live while
-	// its hostname resolves to nothing. Slice C's mesh is what removes this
-	// restriction; until then it is a placement constraint, stated rather than
-	// hoped for.
-	candidates := nodes
-	if _, hasIngress := dep.ResolvedSpec.IngressService(); hasIngress {
-		candidates = nodesWithLabel(nodes, ingressLabel, "true")
-		if len(candidates) == 0 {
-			return sc.st.UpdateDeploymentState(ctx, dep.ID, store.DeployFailed,
-				"this stack has an ingress service and no ready node advertises "+
-					ingressLabel+"=true; label the node running the router")
-		}
-	}
-
+	// An ingress service no longer constrains placement. It did in Slice B, when
+	// the router could only reach a tenant by joining its revision network on a
+	// shared daemon — so an ingress stack had to land on the node running the
+	// router. The router now connects to the node's address and a published
+	// port, which works from anywhere in the fleet, so any node can host an
+	// ingress stack as long as *some* node runs a router. The ingress label
+	// survives as a record of where the router is; it is no longer a filter.
 	homed, err := sc.st.EnvironmentsHomedPerNode(ctx, dep.OrgID)
 	if err != nil {
 		return err
 	}
-	chosen := bestNode(candidates, homed, peakCPU, peakMemory)
+	chosen := bestNode(nodes, homed, peakCPU, peakMemory)
 	if chosen == nil {
 		reason := fmt.Sprintf("no ready node has %d bytes and %d millicpu free for the rollout", peakMemory, peakCPU)
 		return sc.st.UpdateDeploymentState(ctx, dep.ID, store.DeployFailed, reason)
@@ -198,19 +188,4 @@ func freeRatio(n *store.Node) float64 {
 		cpu = float64(n.FreeCPUMillis()) / float64(n.CPUMillis)
 	}
 	return min(mem, cpu)
-}
-
-// ingressLabel marks a node that runs the platform's ingress router. The agent
-// advertises it via COMPOSECTL_NODE_LABELS; the dev stack sets it on the node
-// whose Docker daemon Traefik lives in.
-const ingressLabel = "ingress"
-
-func nodesWithLabel(nodes []store.Node, key, value string) []store.Node {
-	var out []store.Node
-	for _, n := range nodes {
-		if n.Labels[key] == value {
-			out = append(out, n)
-		}
-	}
-	return out
 }
