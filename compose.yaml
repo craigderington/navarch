@@ -150,11 +150,25 @@ services:
     networks:
       - default
 
-  # ------------------------------------------------------------------ node 1
+  # ---------------------------------------------------------------- the fleet
   # dind-N is the daemon, agent-N drives it, and dev-node-N is what it registers
   # as. That correspondence is a convention the demo scripts depend on: they
   # derive a node's daemon from its hostname by suffix rather than carrying a
   # lookup table that grows a line per node.
+  #
+  # On COMPOSECTL_NODE_MEMORY_MB, which every node sets to the same value: it is
+  # a SCHEDULING number, reserved from a stack's declared limits rather than
+  # measured from anything, and unrelated to what the node can really run. So the
+  # figure to keep honest is the FLEET-WIDE total, not the per-node one. Two
+  # nodes at 16 GB already advertised 32 GB on a 30 GB box; four at 16 GB would
+  # advertise 64 GB, and a scheduler that can never refuse work for capacity has
+  # lost a real signal — the one that correctly caught a full node and read, at
+  # first, like a bug. Holding the fleet total near 32 GB means ~32768/N per
+  # node: 8192 at four nodes. Raise NAVARCH_NODE_MEMORY_MB if a bigger stack
+  # needs the headroom, and remember `make nuke` is what actually frees it,
+  # since a live environment holds its reservation until its instances are gone.
+
+  # ------------------------------------------------------------------ node 1
   dind-1:
     <<: *dind
     volumes:
@@ -175,7 +189,7 @@ services:
       COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
       COMPOSECTL_ORG: dev
       COMPOSECTL_NODE_HOSTNAME: dev-node-1
-      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-16384}
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-8192}
       # This node's containers publish inside the dind-1 container's network
       # namespace, so that container's own address on the compose network is
       # where the router reaches them. The agent resolves the name to the IP it
@@ -212,13 +226,65 @@ services:
       COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
       COMPOSECTL_ORG: dev
       COMPOSECTL_NODE_HOSTNAME: dev-node-2
-      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-16384}
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-8192}
       COMPOSECTL_ADVERTISE_ADDR: dind-2
       COMPOSECTL_AGENT_TOKEN: dev-token-change-me
       COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
       COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token
     volumes:
       - age-identity-2:/identity
+
+  # ------------------------------------------------------------------ node 3
+  dind-3:
+    <<: *dind
+    volumes:
+      - dind-3-data:/var/lib/docker
+
+  agent-3:
+    <<: *agent
+    depends_on:
+      controlplane:
+        condition: service_healthy
+      dind-3:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://dind-3:2375
+      COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
+      COMPOSECTL_ORG: dev
+      COMPOSECTL_NODE_HOSTNAME: dev-node-3
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-8192}
+      COMPOSECTL_ADVERTISE_ADDR: dind-3
+      COMPOSECTL_AGENT_TOKEN: dev-token-change-me
+      COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
+      COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token
+    volumes:
+      - age-identity-3:/identity
+
+  # ------------------------------------------------------------------ node 4
+  dind-4:
+    <<: *dind
+    volumes:
+      - dind-4-data:/var/lib/docker
+
+  agent-4:
+    <<: *agent
+    depends_on:
+      controlplane:
+        condition: service_healthy
+      dind-4:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://dind-4:2375
+      COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
+      COMPOSECTL_ORG: dev
+      COMPOSECTL_NODE_HOSTNAME: dev-node-4
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-8192}
+      COMPOSECTL_ADVERTISE_ADDR: dind-4
+      COMPOSECTL_AGENT_TOKEN: dev-token-change-me
+      COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
+      COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token
+    volumes:
+      - age-identity-4:/identity
 
 # The subnet is pinned for predictable addressing: every node advertises a
 # 10.201.0.x address, so a route target in the generated Traefik config is
@@ -243,5 +309,9 @@ volumes:
   traefik-dynamic:
   age-identity-1:
   age-identity-2:
+  age-identity-3:
+  age-identity-4:
   dind-1-data:
   dind-2-data:
+  dind-3-data:
+  dind-4-data:

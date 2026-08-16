@@ -4,7 +4,7 @@ MIGRATION_DB_URL ?= postgres://composectl:composectl@postgres:5432/composectl?ss
 API    ?= http://localhost:8417
 # Every node's agent, for log tailing and for the stop/start dance the tests
 # need. Scaling the fleet means adding a node here and in compose.yaml.
-AGENTS ?= agent-1 agent-2
+AGENTS ?= agent-1 agent-2 agent-3 agent-4
 API_TOKEN ?= dev-token-change-me
 
 .PHONY: help
