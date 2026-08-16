@@ -62,7 +62,8 @@ func TestEnsureContainerCreatesAndAdopts(t *testing.T) {
 		Cmd:    []string{"sh", "-c", "sleep 30"},
 		Labels: labels, Network: netName, MemoryBytes: 64 << 20,
 	}
-	id, created, err := d.EnsureContainer(ctx, cs, nil)
+	res, err := d.EnsureContainer(ctx, cs, nil)
+	id, created := res.ID, res.Created
 	if err != nil {
 		t.Fatalf("EnsureContainer: %v", err)
 	}
@@ -77,7 +78,8 @@ func TestEnsureContainerCreatesAndAdopts(t *testing.T) {
 	})
 
 	// Second call adopts the existing container rather than creating a new one.
-	id2, created2, err := d.EnsureContainer(ctx, cs, nil)
+	res2, err := d.EnsureContainer(ctx, cs, nil)
+	id2, created2 := res2.ID, res2.Created
 	if err != nil {
 		t.Fatalf("EnsureContainer (adopt): %v", err)
 	}
@@ -87,7 +89,7 @@ func TestEnsureContainerCreatesAndAdopts(t *testing.T) {
 
 	changed := cs
 	changed.Cmd = []string{"sh", "-c", "sleep 60"}
-	if _, _, err := d.EnsureContainer(ctx, changed, nil); err == nil {
+	if _, err := d.EnsureContainer(ctx, changed, nil); err == nil {
 		t.Fatal("expected changed runtime configuration to reject adoption")
 	}
 
@@ -238,7 +240,7 @@ func TestEnsureVolumeAndRemoveEnv(t *testing.T) {
 		Cmd:    []string{"sh", "-c", "sleep 30"},
 		Labels: labels, Network: netName, MemoryBytes: 64 << 20,
 	}
-	if _, _, err := d.EnsureContainer(ctx, cs, nil); err != nil {
+	if _, err := d.EnsureContainer(ctx, cs, nil); err != nil {
 		t.Fatalf("EnsureContainer: %v", err)
 	}
 
@@ -312,7 +314,7 @@ func TestRemoveEnvDisconnectsUnmanagedContainersFromEnvNetworks(t *testing.T) {
 	}
 
 	// Stands in for Traefik: attached to the revision network, no cc.env label.
-	id, _, err := d.EnsureContainer(ctx, ContainerSpec{
+	ensured, err := d.EnsureContainer(ctx, ContainerSpec{
 		Name: routerName, Image: "busybox:latest",
 		Cmd:         []string{"sh", "-c", "sleep 60"},
 		Labels:      map[string]string{"cc.role": "ingress-router"},
@@ -322,6 +324,7 @@ func TestRemoveEnvDisconnectsUnmanagedContainersFromEnvNetworks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureContainer (router): %v", err)
 	}
+	id := ensured.ID
 	routerID = id
 
 	if err := d.RemoveEnv(ctx, env8); err != nil {
@@ -390,7 +393,7 @@ func TestPruneRevisionNetworksDisconnectsTheIngressRouter(t *testing.T) {
 	if _, err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
 		t.Fatalf("EnsureImage: %v", err)
 	}
-	id, _, err := d.EnsureContainer(ctx, ContainerSpec{
+	ensured, err := d.EnsureContainer(ctx, ContainerSpec{
 		Name: "router-" + env8, Image: "busybox:latest",
 		Cmd:         []string{"sh", "-c", "sleep 60"},
 		Labels:      map[string]string{"cc.role": "ingress-router"},
@@ -400,6 +403,7 @@ func TestPruneRevisionNetworksDisconnectsTheIngressRouter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureContainer (router): %v", err)
 	}
+	id := ensured.ID
 	routerID = id
 	// The router is on both, exactly as it is after a flip.
 	if err := d.AttachNetwork(ctx, routerID, liveNet); err != nil {
@@ -463,7 +467,7 @@ func TestPruneRevisionNetworksStillRefusesForeignContainers(t *testing.T) {
 	if _, err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
 		t.Fatalf("EnsureImage: %v", err)
 	}
-	id, _, err := d.EnsureContainer(ctx, ContainerSpec{
+	ensured, err := d.EnsureContainer(ctx, ContainerSpec{
 		Name: "foreign-" + env8, Image: "busybox:latest",
 		Cmd:         []string{"sh", "-c", "sleep 60"},
 		Labels:      map[string]string{"someone": "else"},
@@ -473,6 +477,7 @@ func TestPruneRevisionNetworksStillRefusesForeignContainers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureContainer: %v", err)
 	}
+	id := ensured.ID
 	foreignID = id
 
 	err = d.PruneRevisionNetworks(ctx, env8, map[string]bool{})
@@ -481,5 +486,118 @@ func TestPruneRevisionNetworksStillRefusesForeignContainers(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "refusing to prune") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// The upgrade defect, reproduced. A container created before published-port
+// routing existed has an unchanged fingerprint — PublishPort is deliberately
+// not hashed — so adoption succeeded and handed back a container with no
+// published port. firstPublishedPort then reported 0, ReportInstance stored
+// NULL, and the router silently dropped that hostname's route while the
+// deployment stayed live and healthy. Adoption now compares the container's
+// bindings against the spec and replaces a swappable container that disagrees.
+func TestEnsureContainerReplacesSwappableWithWrongPublishedPort(t *testing.T) {
+	d := testDriver(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	env8 := "test" + uuid.NewString()[:4]
+	name := "cc-" + env8 + "-r1-blue-api"
+	netName := "cc-" + env8 + "-r1-blue"
+
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = d.RemoveEnv(c, env8)
+	})
+	if _, err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
+	}
+	if _, err := d.EnsureNetwork(ctx, netName, map[string]string{"cc.env": env8}); err != nil {
+		t.Fatalf("EnsureNetwork: %v", err)
+	}
+
+	// Exactly what the old agent produced: swappable, ingress, no PublishPort.
+	old := ContainerSpec{
+		Name: name, Image: "busybox:latest",
+		Cmd:         []string{"sh", "-c", "sleep 120"},
+		Labels:      map[string]string{"cc.env": env8, "cc.service": "api", "cc.swappable": "true"},
+		Network:     netName,
+		MemoryBytes: 64 << 20,
+	}
+	before, err := d.EnsureContainer(ctx, old, nil)
+	if err != nil {
+		t.Fatalf("EnsureContainer (pre-upgrade): %v", err)
+	}
+	if h, err := d.InspectHealth(ctx, before.ID); err != nil {
+		t.Fatalf("InspectHealth: %v", err)
+	} else if h.PublishedPort != 0 {
+		t.Fatalf("the pre-upgrade container should publish nothing, got %d", h.PublishedPort)
+	}
+
+	// The new agent wants the same container, now publishing.
+	upgraded := old
+	upgraded.PublishPort = 80
+	after, err := d.EnsureContainer(ctx, upgraded, nil)
+	if err != nil {
+		t.Fatalf("EnsureContainer (post-upgrade): %v", err)
+	}
+	if !after.Recreated {
+		t.Fatalf("the container must be replaced, not adopted: %+v", after)
+	}
+	if after.ID == before.ID {
+		t.Fatal("Recreated was reported but the container id did not change")
+	}
+	h, err := d.InspectHealth(ctx, after.ID)
+	if err != nil {
+		t.Fatalf("InspectHealth: %v", err)
+	}
+	if h.PublishedPort == 0 {
+		t.Fatal("the replacement must publish a port — this is the route the router needs")
+	}
+
+	// And it settles: a second pass adopts rather than replacing again, or the
+	// agent would rebuild this container on every tick forever.
+	steady, err := d.EnsureContainer(ctx, upgraded, nil)
+	if err != nil {
+		t.Fatalf("EnsureContainer (steady state): %v", err)
+	}
+	if steady.Recreated || steady.Created || steady.ID != after.ID {
+		t.Fatalf("a correct container must be adopted unchanged, got %+v", steady)
+	}
+}
+
+// The replacement is licensed by swappability, not by convenience. A pinned
+// container holds durable state — the parser forbids a swappable service from
+// mounting a writable named volume, which is exactly what makes the one safe to
+// rebuild and the other not.
+func TestEnsureContainerRefusesToReplaceAPinnedContainer(t *testing.T) {
+	d := testDriver(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	env8 := "test" + uuid.NewString()[:4]
+	name := "cc-" + env8 + "-pinned-db"
+
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = d.RemoveEnv(c, env8)
+	})
+	if _, err := d.EnsureImage(ctx, "busybox:latest"); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
+	}
+	pinned := ContainerSpec{
+		Name: name, Image: "busybox:latest",
+		Cmd:         []string{"sh", "-c", "sleep 120"},
+		Labels:      map[string]string{"cc.env": env8, "cc.service": "db", "cc.swappable": "false"},
+		MemoryBytes: 64 << 20,
+	}
+	if _, err := d.EnsureContainer(ctx, pinned, nil); err != nil {
+		t.Fatalf("EnsureContainer: %v", err)
+	}
+
+	wantsPort := pinned
+	wantsPort.PublishPort = 5432
+	if _, err := d.EnsureContainer(ctx, wantsPort, nil); err == nil {
+		t.Fatal("a pinned container must not be replaced to change its published port")
 	}
 }

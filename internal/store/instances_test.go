@@ -191,6 +191,16 @@ func TestListLiveRoutes(t *testing.T) {
 	if _, err := st.PromoteDeployment(testCtx(t), dep.ID); err != nil {
 		t.Fatalf("promote: %v", err)
 	}
+	// Report the published port the way the agent does. Without this the route
+	// comes back with PublishedPort == 0, which the controller DISCARDS — this
+	// test used to assert only the spec-side fields and so passed on a route
+	// that would never have been served, and would have kept passing if
+	// NodeAddr and PublishedPort were deleted from the struct outright.
+	if err := st.ReportInstance(testCtx(t), node.ID, instanceIDFor(t, st, dep.ID, "api"),
+		ObservedInstance{State: InstanceRunning, ContainerID: "c-api", IngressPort: 32768}); err != nil {
+		t.Fatalf("ReportInstance: %v", err)
+	}
+
 	routes, err := st.ListLiveRoutes(testCtx(t))
 	if err != nil {
 		t.Fatalf("ListLiveRoutes: %v", err)
@@ -205,11 +215,64 @@ func TestListLiveRoutes(t *testing.T) {
 			if r.ProjectName == "" || r.Env8 == "" {
 				t.Fatalf("route missing project context: %+v", r)
 			}
+			// What the router actually connects to. The container name is not
+			// usable as a target once the tenant can be on another node.
+			if r.PublishedPort != 32768 {
+				t.Fatalf("route must carry the reported host port, got %+v", r)
+			}
+			if r.NodeAddr == "" {
+				t.Fatalf("route must carry the node's registered address, got %+v", r)
+			}
 		}
 	}
 	if !found {
 		t.Fatalf("live route not found in %+v", routes)
 	}
+}
+
+// A live deployment whose agent has not reported a port yet must still come
+// back, so the controller can tell "not ready to route" from "not live" and
+// omit the route rather than inventing a target for it.
+func TestListLiveRoutesReturnsRouteBeforeThePortIsReported(t *testing.T) {
+	st := testStore(t)
+	dep, node := deployFixture(t, st)
+	_, _ = st.Pool().Exec(testCtx(t),
+		`UPDATE environments SET hostname='unreported.example.com' WHERE id=(SELECT environment_id FROM deployments WHERE id=$1)`, dep.ID)
+	_ = st.CreateServiceInstances(testCtx(t), dep.ID, node.ID, []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "x"}})
+	for _, s := range []DeploymentState{DeployScheduling, DeployStarting, DeployHealthy} {
+		if err := st.UpdateDeploymentState(testCtx(t), dep.ID, s, ""); err != nil {
+			t.Fatalf("advance %s: %v", s, err)
+		}
+	}
+	if _, err := st.PromoteDeployment(testCtx(t), dep.ID); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+
+	routes, err := st.ListLiveRoutes(testCtx(t))
+	if err != nil {
+		t.Fatalf("ListLiveRoutes: %v", err)
+	}
+	for _, r := range routes {
+		if r.Hostname == "unreported.example.com" {
+			if r.PublishedPort != 0 {
+				t.Fatalf("no port has been reported, so none should be claimed: %+v", r)
+			}
+			return
+		}
+	}
+	t.Fatal("a live deployment must appear even before its port is reported")
+}
+
+// instanceIDFor finds the instance row for one service of a deployment.
+func instanceIDFor(t *testing.T, st *Store, depID uuid.UUID, service string) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := st.Pool().QueryRow(testCtx(t),
+		`SELECT id FROM service_instances WHERE deployment_id=$1 AND service_name=$2`,
+		depID, service).Scan(&id); err != nil {
+		t.Fatalf("find instance %s: %v", service, err)
+	}
+	return id
 }
 
 // driveToLive takes a deployment from pending to live: writes instances,

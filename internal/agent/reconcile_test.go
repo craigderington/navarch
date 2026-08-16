@@ -33,6 +33,14 @@ type fakeDriver struct {
 	// that never happened.
 	removeEnvCalls []string
 
+	// publishPorts records ContainerSpec.PublishPort per created container, in
+	// creation order, so a test can assert which services asked to publish.
+	publishPorts []int
+
+	// recreate makes EnsureContainer report a replacement rather than a plain
+	// creation, so the reporting path can be exercised without a real daemon.
+	recreate bool
+
 	// volumesAtCreate captures len(volumes) at the moment EnsureContainer runs,
 	// so tests can assert EnsureVolume happened first without adding a shared
 	// call-order log just for one assertion.
@@ -45,13 +53,14 @@ func (f *fakeDriver) EnsureImage(ctx context.Context, ref string) (string, error
 func (f *fakeDriver) EnsureNetwork(ctx context.Context, name string, l map[string]string) (string, error) {
 	return "net-" + name, nil
 }
-func (f *fakeDriver) EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (string, bool, error) {
+func (f *fakeDriver) EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (dockerd.Ensured, error) {
 	f.volumesAtCreate = len(f.volumes)
 	f.created = append(f.created, cs.Name)
+	f.publishPorts = append(f.publishPorts, cs.PublishPort)
 	if secrets != nil {
 		f.lastSecretValue, _ = secrets.Get("name")
 	}
-	return "id-" + cs.Name, true, nil
+	return dockerd.Ensured{ID: "id-" + cs.Name, Created: !f.recreate, Recreated: f.recreate}, nil
 }
 func (f *fakeDriver) AttachNetwork(ctx context.Context, id, net string, a ...string) error {
 	f.attached = append(f.attached, id+"->"+net)
@@ -470,5 +479,64 @@ func TestReconcileCreatesVolumeBeforeContainer(t *testing.T) {
 	}
 	if f.volumesAtCreate != 1 {
 		t.Fatalf("EnsureVolume must be called before EnsureContainer, but only %d volume(s) existed when the container was created", f.volumesAtCreate)
+	}
+}
+
+// Only an ingress service publishes. A pinned database that quietly acquired a
+// published port would be reachable from outside its revision network, which is
+// the isolation the whole networking design exists to keep.
+func TestOnlyIngressServicesPublishAPort(t *testing.T) {
+	f := &fakeDriver{health: map[string]dockerd.Health{}}
+	r := NewReconciler(f)
+	api := desired("api", true, dockerd.Health{})
+	api.Service.Ingress = &spec.Ingress{Port: 8080}
+	db := desired("db", false, dockerd.Health{})
+
+	r.Reconcile(context.Background(), []store.DesiredInstance{api, db}, nil, nil)
+
+	if len(f.created) != len(f.publishPorts) {
+		t.Fatalf("bookkeeping mismatch: created=%v publishPorts=%v", f.created, f.publishPorts)
+	}
+	for i, name := range f.created {
+		want := 0
+		if strings.HasSuffix(name, "-api") {
+			want = 8080 // the container port from the spec, not the host port
+		}
+		if f.publishPorts[i] != want {
+			t.Errorf("%s published %d, want %d", name, f.publishPorts[i], want)
+		}
+	}
+}
+
+// The host port Docker assigned has to survive the trip from the driver's
+// observation to the report the control plane composes the route from. Nothing
+// else carries it: an ingress container whose port is dropped here is live,
+// healthy and unroutable.
+func TestReportCarriesTheObservedIngressPort(t *testing.T) {
+	d := desired("api", true, dockerd.Health{})
+	d.Service.Ingress = &spec.Ingress{Port: 80}
+	f := &fakeDriver{health: map[string]dockerd.Health{
+		"id-cc-env12345-r1-blue-api": {Running: true, PublishedPort: 32768},
+	}}
+	r := NewReconciler(f)
+
+	reports, _ := r.Reconcile(context.Background(), []store.DesiredInstance{d}, nil, nil)
+	if len(reports) != 1 {
+		t.Fatalf("want one report, got %d", len(reports))
+	}
+	if reports[0].IngressPort != 32768 {
+		t.Fatalf("IngressPort = %d, want the port the driver observed (32768)", reports[0].IngressPort)
+	}
+}
+
+// A replacement must be reported, because it is the only trace that a container
+// which was already running got destroyed and rebuilt.
+func TestReportSurfacesARecreatedContainer(t *testing.T) {
+	f := &fakeDriver{health: map[string]dockerd.Health{}, recreate: true}
+	r := NewReconciler(f)
+	reports, _ := r.Reconcile(context.Background(),
+		[]store.DesiredInstance{desired("api", true, dockerd.Health{})}, nil, nil)
+	if len(reports) != 1 || !reports[0].Recreated {
+		t.Fatalf("a replacement must reach the report, got %+v", reports)
 	}
 }
