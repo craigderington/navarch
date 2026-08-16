@@ -27,7 +27,14 @@ test: ## Run tests
 
 .PHONY: up
 up: ## Start the dev stack
-	docker compose up -d --build
+	# --remove-orphans is not tidiness. Renaming a service leaves the old
+	# container running, and a stale agent keeps registering: RegisterNode
+	# upserts by (org_id, hostname), so an orphan and its replacement fight over
+	# one node row, alternately publishing their own advertise address. Routes
+	# then point at whichever won last. The fleet rename from `agent`/`dind-b` to
+	# `agent-N`/`dind-N` produced exactly that, and it was invisible until
+	# someone looked at `docker ps` rather than at the node list.
+	docker compose up -d --build --remove-orphans
 
 .PHONY: down
 down: ## Stop the dev stack

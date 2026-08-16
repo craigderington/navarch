@@ -543,6 +543,35 @@ unprunable. `isIngressRouter` and `RemoveEnv`'s unconditional disconnect survive
 that removal on purpose: endpoints created before it still exist on any upgraded
 daemon, and they are what let those networks converge instead of leaking.
 
+**`PublishPort` is deliberately outside the container fingerprint, and verified
+against the container instead.** The fingerprint hashes resolved runtime config
+*including secret plaintext*, and a mismatch is a hard error rather than a
+rebuild — that error is what stops a rotated secret being claimed by an adopted
+container still running the old value, forcing the change through a new revision
+and its blue/green rollout. Adding `PublishPort` to it would make every container
+created before published-port routing fail adoption permanently, so the agent
+would error every tick on a healthy live deployment instead of converging.
+`EnsureContainer` compares the adopted container's `HostConfig.PortBindings`
+against the spec instead — create-time bindings, because `findByName` adopts
+stopped containers too and a stopped one reports no active ports however it was
+created. A container that disagrees is **replaced only if swappable**; the parser
+forbids those from mounting a writable named volume, which is exactly what makes
+one safe to rebuild and a pinned one not. Replacements are reported through
+`Ensured{ID, Created, Recreated}` and logged by the agent, because rebuilding a
+possibly-live container is disruptive and nothing else would show it happened.
+Before this, an upgraded agent adopted its existing ingress containers, they
+published nothing, `ingress_port` went NULL and the router silently dropped every
+route while the deployments stayed live and healthy.
+
+**`make up` passes `--remove-orphans`, and that is load-bearing.** Renaming a
+service leaves the old container running, and a stale agent keeps registering:
+`RegisterNode` upserts by `(org_id, hostname)`, so an orphan and its replacement
+fight over one node row, alternately publishing their own advertise address, and
+routes point at whichever won last. The four-node rename produced exactly that —
+an orphan `agent` driving the *host* daemon while `agent-1` drove `dind-1`, both
+claiming `dev-node-1`. It is invisible in `navarch node list`, which shows one
+healthy node either way.
+
 **Draining is reversible; the state a node returns to is derived, not declared.**
 `DrainNode` sets `draining`, and both `Heartbeat` and `RegisterNode` preserve it
 — deliberately, so an agent restart cannot silently un-cordon a node an operator
