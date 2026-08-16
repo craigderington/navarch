@@ -71,12 +71,16 @@ services:
       - traefik-dynamic:/dynamic
 
   # Traefik routes the env hostname to the live revision's ingress container.
-  # It watches the file-provider dir the control plane writes, and the agent
-  # attaches it to each revision network so it can reach that revision's
-  # ingress container by name. The movement is deliberately one-way — the
-  # router joins the tenant's network, the tenant never joins a shared one —
-  # so two fleets have no network in common. The agent finds this container by
-  # its cc.role label below.
+  # It watches the file-provider dir the control plane writes, and reaches each
+  # tenant at its node's address and the port the agent published for it. It
+  # joins no tenant network and no tenant joins a shared one, in either
+  # direction, which is what keeps a node's networks its own and lets a tenant
+  # on any node be served from here.
+  #
+  # The cc.role label below is still load-bearing, though nothing attaches this
+  # container to tenant networks any more: it is how the agent recognises a
+  # leftover router endpoint as its own and disconnects it, rather than reading
+  # it as a foreign container and refusing to prune the network under it.
   traefik:
     image: traefik:v3.3
     command:

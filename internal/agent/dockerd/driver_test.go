@@ -352,14 +352,18 @@ func TestRemoveEnvDisconnectsUnmanagedContainersFromEnvNetworks(t *testing.T) {
 	}
 }
 
-// A superseded revision's network keeps a router endpoint: the agent attached
-// the router while that revision was live and nothing detaches it when the
-// revision is torn down. The router carries no cc.env label, so the
-// unmanaged-container guard used to refuse the prune outright and the network
-// survived for the life of the environment — one per revision, each holding an
-// address block, until the pool ran out and rollouts could no longer create a
-// network. Verified non-vacuous: without the isIngressRouter exemption this
-// fails with "refusing to prune network ...: unmanaged container ... attached".
+// A revision network can still hold a router endpoint, and pruning must not be
+// blocked by it. The agent no longer attaches the router anywhere — routing is
+// address-based — but nothing detaches what was attached before that changed,
+// so any daemon upgraded across it has a router on every revision network it
+// once served. The router carries no cc.env label, so the unmanaged-container
+// guard used to refuse the prune outright and the network survived for the life
+// of the environment: one per revision, each holding an address block, until the
+// pool ran out and rollouts could no longer create a network.
+//
+// That is why the exemption outlived the attach rather than being deleted with
+// it. Verified non-vacuous: without isIngressRouter this fails with
+// "refusing to prune network ...: unmanaged container ... is attached".
 func TestPruneRevisionNetworksDisconnectsTheIngressRouter(t *testing.T) {
 	d := testDriver(t)
 	ctx := context.Background()

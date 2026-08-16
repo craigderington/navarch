@@ -20,10 +20,6 @@ type DockerDriver interface {
 	EnsureNetwork(ctx context.Context, name string, labels map[string]string) (string, error)
 	EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (string, bool, error)
 	AttachNetwork(ctx context.Context, containerID, network string, aliases ...string) error
-	// AttachRouterToNetwork connects the platform ingress proxy to a
-	// revision network so it can reach that revision's ingress container
-	// without putting tenant containers on a shared mesh.
-	AttachRouterToNetwork(ctx context.Context, network string) error
 	InspectHealth(ctx context.Context, containerID string) (dockerd.Health, error)
 	StopRemove(ctx context.Context, containerID string) error
 	ListManaged(ctx context.Context, env8 string) ([]dockerd.Managed, error)
@@ -280,13 +276,12 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 			return fail(err)
 		}
 	}
-	// Traefik joins the revision network; tenant ingress stays off any
-	// shared mesh so one fleet cannot talk to another.
-	if di.Service.Ingress != nil {
-		if err := r.drv.AttachRouterToNetwork(ctx, di.ProjectName); err != nil {
-			return fail(err)
-		}
-	}
+	// An ingress service needs nothing further here. The router used to be
+	// attached to this revision's network so it could reach the container by
+	// name, which only ever worked while the two shared a daemon; it now
+	// connects to the node's address and the port published above, so the
+	// tenant joins no shared network and the router joins no tenant one.
+	// Neither direction, which is what makes a node's networks its own.
 
 	rep.ContainerID = id
 	rep.SetStarted = true
