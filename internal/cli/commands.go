@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/craig/composectl/internal/client"
@@ -544,9 +546,10 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		}
 		rows := make([][]string, 0, len(nodes))
 		for _, n := range nodes {
-			rows = append(rows, []string{n.ID, n.Hostname, n.State, n.AdvertiseAddr, strconv.Itoa(n.CPUMillis)})
+			rows = append(rows, []string{n.ID, n.Hostname, n.State, n.AdvertiseAddr,
+				strconv.Itoa(n.CPUMillis), formatLabels(n.Labels)})
 		}
-		return emit(e, nodes, []string{"ID", "HOSTNAME", "STATE", "ADDR", "CPU_MILLIS"}, rows)
+		return emit(e, nodes, []string{"ID", "HOSTNAME", "STATE", "ADDR", "CPU_MILLIS", "LABELS"}, rows)
 	case "get":
 		if err := need(args, 2, "usage: navarch node get ORG/HOSTNAME"); err != nil {
 			return err
@@ -559,8 +562,8 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		if err != nil {
 			return err
 		}
-		return emitOne(e, n, []string{"ID", "HOSTNAME", "STATE", "ADDR"},
-			[]string{n.ID, n.Hostname, n.State, n.AdvertiseAddr})
+		return emitOne(e, n, []string{"ID", "HOSTNAME", "STATE", "ADDR", "LABELS"},
+			[]string{n.ID, n.Hostname, n.State, n.AdvertiseAddr, formatLabels(n.Labels)})
 	case "drain":
 		if err := need(args, 2, "usage: navarch node drain ORG/HOSTNAME"); err != nil {
 			return err
@@ -714,4 +717,23 @@ func splitOnce(s, sep string) (string, string, bool) {
 		i++
 	}
 	return s, "", false
+}
+
+// formatLabels renders node labels for a table cell, sorted so the same node
+// always prints the same way — map iteration order would otherwise make the
+// output of two identical `node list` calls differ.
+func formatLabels(l map[string]string) string {
+	if len(l) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(l))
+	for k := range l {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+l[k])
+	}
+	return strings.Join(parts, ",")
 }

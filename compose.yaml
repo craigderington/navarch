@@ -102,10 +102,16 @@ services:
     networks:
       - default
 
+  # ------------------------------------------------------------------ node 1
   # Node agent: reconciles the host Docker daemon to the control plane's desired
   # state. It creates sibling containers on the host daemon via the mounted
   # socket. The platform already rejects bind mounts, so there are no host-path
   # translation traps — only named volumes, which the host daemon owns.
+  #
+  # This is the ingress node: Traefik above runs on the same daemon, which is
+  # the only way it can join a tenant's revision network. `ingress=true` is what
+  # the scheduler places against — a stack with an ingress service is sent here
+  # until the mesh makes ingress node-independent.
   agent:
     build:
       context: .
@@ -118,6 +124,15 @@ services:
       COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
       COMPOSECTL_ORG: dev
       COMPOSECTL_NODE_HOSTNAME: dev-node-1
+      COMPOSECTL_NODE_LABELS: ingress=true
+      # Capacity is *reserved* from declared limits, not measured usage, and a
+      # demo environment holds its reservation for as long as it is live —
+      # nothing but a preview's TTL ever expires one. At the 8 GB default this
+      # node fills after about six runs and the next rollout fails with "no
+      # ready node has ... free", which reads like a bug and is not one. Every
+      # ingress stack lands here, so it is the node that fills first.
+      # `make nuke` is still the real reset.
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-16384}
       COMPOSECTL_AGENT_TOKEN: dev-token-change-me
       COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
       COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token
@@ -127,7 +142,72 @@ services:
       # would make every existing secret's ciphertext undecryptable.
       - age-identity:/identity
 
+  # ------------------------------------------------------------------ node 2
+  # A second node on its own Docker daemon. Docker-in-Docker rather than a
+  # second agent against the host socket, for two reasons: the agent's GC is
+  # env-scoped rather than node-scoped, so co-tenant agents on one daemon would
+  # delete each other's containers; and a shared daemon cannot exercise the mesh
+  # at all, which is the whole point of the node existing before Slice C.
+  #
+  # privileged is required by dind. This is dev infrastructure on a dev box, not
+  # a tenant container — the platform's own rejection of `privileged` applies to
+  # compose files it deploys, which is a different thing entirely.
+  dind-b:
+    image: docker:27-dind
+    privileged: true
+    environment:
+      # Plain TCP, reachable only on the compose network. Certificates here
+      # would protect a socket nothing outside this file can address.
+      DOCKER_TLS_CERTDIR: ""
+    # Explicit resolver, because the default chain does not survive nesting on a
+    # systemd-resolved host: this container gets Docker's embedded DNS
+    # (127.0.0.11), which forwards to the host's docker0 address, which forwards
+    # to the 127.0.0.53 stub — and the pull fails with "server misbehaving"
+    # while a direct query to any real resolver from the same container works.
+    # Only this dev-fleet daemon is affected; override with NAVARCH_DIND_DNS if
+    # this box should not be asking a public resolver.
+    dns:
+      - ${NAVARCH_DIND_DNS:-1.1.1.1}
+    command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    volumes:
+      - dind-b-data:/var/lib/docker
+
+  agent-b:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: agent
+    depends_on:
+      controlplane:
+        condition: service_healthy
+      dind-b:
+        condition: service_healthy
+    environment:
+      # No socket mount: this agent reaches its daemon over the network, which
+      # is what makes it a different host rather than a second view of this one.
+      DOCKER_HOST: tcp://dind-b:2375
+      COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
+      COMPOSECTL_ORG: dev
+      COMPOSECTL_NODE_HOSTNAME: dev-node-2
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-16384}
+      COMPOSECTL_AGENT_TOKEN: dev-token-change-me
+      COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
+      COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token
+    volumes:
+      # Its own identity volume. Sharing one would give both nodes the same age
+      # keypair and the same node token — two rows in `nodes` that are one
+      # identity, which defeats sealing secrets to the node that will run them.
+      - age-identity-b:/identity
+
 volumes:
   pgdata:
   traefik-dynamic:
   age-identity:
+  age-identity-b:
+  dind-b-data:

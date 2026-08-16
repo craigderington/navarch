@@ -32,6 +32,10 @@ type Config struct {
 	PollInterval    time.Duration
 	IdentityFile    string
 	NodeTokenFile   string
+	// Labels advertise what this node can do, and the scheduler places against
+	// them. `ingress=true` marks a node running the platform's router: until the
+	// mesh lands, a stack with an ingress service is only servable there.
+	Labels map[string]string
 }
 
 // Run registers this node and then reconciles on a ticker until ctx is done.
@@ -89,7 +93,7 @@ func (c *cpClient) register(ctx context.Context, cfg Config) (uuid.UUID, error) 
 	err := c.do(ctx, http.MethodPost, "/v1/nodes/register", map[string]any{
 		"org": cfg.Org, "hostname": cfg.Hostname, "advertise_addr": cfg.AdvertiseAddr,
 		"cpu_millis": cfg.CPUMillis, "memory_bytes": cfg.MemoryBytes, "agent_version": "sprint2-a",
-		"age_recipient": c.id.Recipient(),
+		"age_recipient": c.id.Recipient(), "labels": cfg.Labels,
 	}, &out)
 	if err != nil {
 		return uuid.Nil, err

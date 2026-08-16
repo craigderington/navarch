@@ -1,0 +1,32 @@
+# A stack with no ingress service, which is the point: it can be placed on any
+# node in the fleet, including one with no router. Every other runnable example
+# has an ingress service and is therefore pinned to the ingress node until the
+# mesh lands, so none of them can demonstrate that placement spreads at all.
+#
+# Real images, because the fleet demo actually runs this on a second Docker
+# daemon inside dind-b — where nothing is cached, so both images are small on
+# purpose.
+
+services:
+  worker:
+    image: alpine:3.20
+    # Something long-running with no port and no healthcheck: the reconciler's
+    # no-healthcheck debounce is what decides this is running, which is the
+    # ordinary path for a background worker.
+    command: ["sh", "-c", "while true; do echo working; sleep 5; done"]
+    depends_on:
+      - queue
+    environment:
+      QUEUE_URL: redis://queue:6379
+    x-composectl:
+      rollout: swap
+
+  queue:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # pin, not swap: worker addresses it as redis://queue:6379, so duplicating it
+    # blue/green would give each revision its own queue — the coordination split
+    # that made rollout mode a declared field. It owns no disk, which is exactly
+    # the case the old writable-volume inference got wrong.
+    x-composectl:
+      rollout: pin

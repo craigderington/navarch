@@ -94,6 +94,7 @@ make health
 make validate     # parse examples/webapp, see classification
 make demo         # agent-driven rollout to healthy, over HTTP, real containers
 make demo-failure # bad image → failed, prior deployment untouched
+make demo-fleet   # two nodes, two daemons: ingress pinned, worker spread
 make agent-logs   # tail the node agent
 make psql         # database shell
 make logs         # tail control plane
@@ -478,6 +479,27 @@ these, so don't drift them): swappable container
 named volume `cc-{env8}-{volume}`. Labels: `cc.env`, `cc.deployment`,
 `cc.service`, `cc.swappable`. `env8` = `store.shortID(environmentID)`.
 
+**A stack with an ingress service can only run on a node advertising
+`ingress=true`.** The router reaches a tenant by joining that tenant's revision
+network, which it can only do on its own Docker daemon — so an ingress stack
+placed on a node with no router goes healthy, goes live, and serves nothing,
+while its hostname resolves to a container the router cannot reach. The
+scheduler filters candidates on the label and fails the deployment with a
+reason naming what is missing, rather than placing it somewhere it cannot work.
+The label is advertisement: the agent sends `COMPOSECTL_NODE_LABELS` at
+registration, malformed entries are dropped rather than aborting startup (a node
+that refuses to start takes its capacity with it, while a missing label is a
+placement the scheduler explains). Slice C's mesh is what lifts this
+restriction; until then it is stated rather than hoped for.
+
+**Node capacity is reserved from declared limits, not measured usage**, and a
+live environment holds its reservation until its instances are deleted — nothing
+but a preview's TTL expires one on its own. A dev box therefore fills up over a
+session of demo runs, and the next rollout fails with "no ready node has …
+free", which reads like a bug and is not one. The dev nodes advertise 16 GB
+(`NAVARCH_NODE_MEMORY_MB`) to push that wall out; `make nuke` is the real reset.
+Every ingress stack lands on node 1, so it fills first.
+
 **An environment is bound to one node for its lifetime.**
 `environments.home_node_id` is set by the first placement, in the same
 transaction, and never changes. Every later deployment for that environment goes
@@ -624,7 +646,14 @@ separate daemons.
   refusal to relocate, spread-first scoring, secret recipients keyed to the home
   node. It landed first because the affinity bug was live in the code and needed
   only a second node to become data loss.
-- **Slice B** — the DinD dev fleet and per-node registration.
+- **Slice B — the dev fleet. DONE.** `dind-b` + `agent-b` give node 2 its own
+  Docker daemon (`DOCKER_HOST`, no socket mount, its own age identity), nodes
+  advertise capabilities via `COMPOSECTL_NODE_LABELS`, and the scheduler places
+  against them. `make demo-fleet` proves an ingress stack lands on the router
+  node while a no-ingress stack spreads to the other *and runs on that node's
+  daemon*. Node 1 stays on the host daemon this slice: moving Traefik into DinD
+  means solving cross-node ingress, which is Slice C's subject, and would leave
+  `make demo` broken in between.
 - **Slice C** — WireGuard mesh and cross-node ingress. One fork still open: a
   mesh-bound published port versus routed container subnets.
 - **Slice D** — drain and failover. Today `MarkStaleNodesUnreachable` flips a

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,7 @@ func LoadConfig() (Config, error) {
 		PollInterval:    time.Duration(intEnv("COMPOSECTL_POLL_SECONDS", 2)) * time.Second,
 		IdentityFile:    identity,
 		NodeTokenFile:   envOr("COMPOSECTL_NODE_TOKEN_FILE", filepath.Join(filepath.Dir(identity), "node.token")),
+		Labels:          parseLabels(os.Getenv("COMPOSECTL_NODE_LABELS")),
 	}
 	if cfg.ControlPlaneURL == "" {
 		return Config{}, fmt.Errorf("COMPOSECTL_CONTROLPLANE_URL is required")
@@ -54,4 +56,30 @@ func intEnv(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// parseLabels reads COMPOSECTL_NODE_LABELS in the form "k=v,k2=v2".
+//
+// Malformed entries are dropped rather than rejected: a node label is
+// advertisement, and the scheduler's job is to place against what a node claims
+// it can do. A typo therefore costs that capability — the node is simply not
+// chosen for work needing it — which is a failure the scheduler reports, rather
+// than an agent that refuses to start and takes its capacity with it.
+func parseLabels(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, part := range strings.Split(s, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if !ok || k == "" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

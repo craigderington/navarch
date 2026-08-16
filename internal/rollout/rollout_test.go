@@ -391,3 +391,79 @@ func secondDeploymentForSameEnv(t *testing.T, st *store.Store, existing uuid.UUI
 	}
 	return dep.ID
 }
+
+// A stack with an ingress service is only servable from a node running the
+// router, because the router reaches a tenant by joining its revision network
+// and can only do that on its own daemon. Placing it elsewhere would produce a
+// deployment that goes live while its hostname resolves to nothing — a success
+// report for something nobody can reach.
+func TestSchedulerRefusesIngressStackWithNoIngressNode(t *testing.T) {
+	st := testStore(t)
+	depID, _, orgID := fixture(t, st)
+	setSpecIngress(t, st, depID)
+
+	// The fixture's node advertises no labels, so nothing in the fleet can serve
+	// ingress.
+	sc := newSchedulerForOrg(st, discardLog(), orgID)
+	if err := sc.ScheduleOnce(ctx(t)); err != nil {
+		t.Fatalf("ScheduleOnce: %v", err)
+	}
+
+	dep, _ := st.GetDeployment(ctx(t), depID)
+	if dep.State != store.DeployFailed {
+		t.Fatalf("expected failed, got %s", dep.State)
+	}
+	if !strings.Contains(dep.FailureReason, "ingress") {
+		t.Fatalf("the reason should say what is missing, got %q", dep.FailureReason)
+	}
+}
+
+// And the constraint outranks spread: an ingress stack goes to the labelled
+// node even when an emptier one is available, because the emptier one cannot
+// serve it at all.
+func TestSchedulerSendsIngressStackToTheLabelledNode(t *testing.T) {
+	st := testStore(t)
+	depID, plainNodeID, orgID := fixture(t, st)
+	setSpecIngress(t, st, depID)
+
+	ingressNode, err := st.RegisterNode(ctx(t), store.RegisterNodeParams{
+		OrgID: orgID, Hostname: "router-" + uuid.NewString()[:8], AdvertiseAddr: "10.0.0.8",
+		CPUMillis: 8000, MemoryBytes: 16 << 30,
+		Labels: map[string]string{"ingress": "true"},
+	})
+	if err != nil {
+		t.Fatalf("register ingress node: %v", err)
+	}
+
+	sc := newSchedulerForOrg(st, discardLog(), orgID)
+	if err := sc.ScheduleOnce(ctx(t)); err != nil {
+		t.Fatalf("ScheduleOnce: %v", err)
+	}
+
+	dep, _ := st.GetDeployment(ctx(t), depID)
+	if dep.State != store.DeployScheduling {
+		t.Fatalf("expected scheduling, got %s (%s)", dep.State, dep.FailureReason)
+	}
+	desired, _ := st.DesiredStateForNode(ctx(t), ingressNode.ID)
+	if len(desired) == 0 {
+		t.Fatal("the ingress stack must be placed on the node advertising ingress=true")
+	}
+	if plain, _ := st.DesiredStateForNode(ctx(t), plainNodeID); len(plain) != 0 {
+		t.Fatalf("nothing should have been placed on the node without a router, got %d", len(plain))
+	}
+}
+
+// setSpecIngress marks the fixture deployment's resolved spec as having an
+// ingress service. Done in SQL because the spec is stored resolved: rebuilding
+// the whole catalog graph to change one field would test the fixture, not the
+// scheduler.
+func setSpecIngress(t *testing.T, st *store.Store, depID uuid.UUID) {
+	t.Helper()
+	if _, err := st.Pool().Exec(ctx(t), `
+		UPDATE deployments
+		SET resolved_spec = jsonb_set(resolved_spec, '{services,api,ingress}', '{"port":80}'::jsonb)
+		WHERE id = $1
+	`, depID); err != nil {
+		t.Fatalf("set ingress on spec: %v", err)
+	}
+}

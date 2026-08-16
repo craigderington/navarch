@@ -83,6 +83,10 @@ demo-secrets: ## Set + deploy a secret end to end: ciphertext at rest, plaintext
 demo-preview: ## Create a preview env with inherited secrets, then watch it expire and get reaped
 	@API_TOKEN=$(API_TOKEN) ./scripts/demo-preview.sh
 
+.PHONY: demo-fleet
+demo-fleet: ## Two nodes, two daemons: ingress stack pinned to the router node, worker stack spread to the other
+	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-fleet.sh
+
 .PHONY: agent-logs
 agent-logs: ## Tail the node agent logs
 	docker compose logs -f agent
