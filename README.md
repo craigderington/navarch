@@ -1,26 +1,52 @@
-# composectl
+# Navarch
 
 A container platform for **Docker Compose stacks**, not single containers.
-composectl treats an entire stack as the deployable unit, with immutable
-versions, health-gated blue/green rollouts, rollback, encrypted secrets, and
-ephemeral preview environments.
+Navarch treats an entire stack as the deployable unit, with immutable versions,
+health-gated blue/green rollouts, rollback, encrypted secrets, ephemeral preview
+environments, and placement across a multi-node fleet.
 
-The repository is currently being developed under the Quartermaster project
-name; binaries, environment variables, labels, and the Go module still use the
-original `composectl` identity.
+## Naming
+
+The product is **Navarch** and the operator CLI is **`navarch`**. Several
+internal identifiers still read `composectl`, and that is deliberate rather than
+an unfinished rename — each one is either invisible to users or expensive to
+change for no user-visible gain:
+
+| Name | Value | Why |
+|---|---|---|
+| Product, CLI binary | `Navarch`, `navarch` | what a user says and types |
+| CLI environment, config | `NAVARCH_*`, `~/.config/navarch/` | user-facing; `COMPOSECTL_*` still read at lower precedence |
+| Go module | `github.com/craig/composectl` | renaming churns every import for nothing a user sees |
+| Control plane / agent env | `COMPOSECTL_*` | set by `compose.yaml`, not by hand |
+| Container, network, volume prefix | `cc-`, labels `cc.*` | **not branding** — see below |
+| Compose extension key | `x-composectl.rollout`, `x-composectl.ingress` | it is in every user's compose file; renaming it breaks all of them |
+| Postgres role and database | `composectl` | a data migration with no user-visible gain |
+
+The `cc-` prefix is the one that looks most like an oversight and is the most
+deliberate. Nobody types it; it is a namespace. Renaming it would break three
+things at once: the agent adopts pinned containers by the stable name
+`cc-{env8}-pinned-{service}`, so a new scheme would start a *second* container
+over the same volume; garbage collection only sees `cc.env`-labelled containers,
+so every existing one would become invisible and leak; and teardown matches
+volumes on that label. It buys nothing and risks data.
 
 ## Current status
 
-The single-node platform loop is implemented end to end:
+The platform loop is implemented end to end across a multi-node fleet:
 
 - Compose parsing into a normalized, versioned deployment specification
 - Strict rejection of unsupported Compose behavior
 - Postgres-backed catalog and append-only deployment history
-- Node-agent reconciliation against Docker Engine
+- Node-agent reconciliation against Docker Engine, one agent per node
 - Health-gated blue/green promotion and rollback
 - Traefik file-provider routing
 - Age-encrypted, per-environment secrets
 - Preview environments with inherited secrets, TTL expiry, and durable teardown
+- Scored placement across a fleet, with each environment bound to the node
+  holding its durable state
+- Cross-node ingress: a stack is reachable regardless of which node runs it
+- On-demand container logs, fetched through the agent poll and never stored
+- A read-only terminal dashboard (`navarch tui`)
 - Shared bearer authentication for the development API
 
 Only `blue_green` is currently supported. Requests for `rolling` or `recreate`
@@ -90,11 +116,12 @@ Config file (optional): `~/.config/navarch/config.yaml` with `url` and `token`.
 Flags override the environment; the environment overrides the file.
 
 The CLI was previously named `composectl`. `COMPOSECTL_URL`, `COMPOSECTL_TOKEN`,
-`COMPOSECTL_TOKEN_FILE`, `COMPOSECTL_AGENT_TOKEN`, `COMPOSECTL_CONFIG` and
-`~/.config/composectl/config.yaml` are still read at lower precedence, so an
-existing setup keeps working. Only the CLI was renamed — the Go module path,
-the control plane's own `COMPOSECTL_*` configuration, and the `cc-` container
-and label namespace are deliberately unchanged.
+`COMPOSECTL_TOKEN_FILE`, `COMPOSECTL_AGENT_TOKEN` and `COMPOSECTL_CONFIG`, along
+with `~/.config/composectl/config.yaml`, are still read at lower precedence, so
+an existing setup keeps working. These variables carry the bearer token, and an
+unset token is a hard failure rather than a degraded mode — a rename that failed
+closed on someone's shell profile would be a poor trade for a cosmetic gain. See
+[Naming](#naming) for what else deliberately still reads `composectl`.
 
 Direct API requests require a bearer token:
 
