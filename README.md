@@ -156,16 +156,37 @@ compose content, environment values, and secrets are not metric labels.
 
 ## The core idea: swappable vs pinned
 
-Blue/green runs two revisions at once. Services holding durable state cannot be
-duplicated safely, so the parser classifies every service:
+Blue/green runs two revisions at once, and some services must not be duplicated.
+**Every service declares which it is — the platform does not infer it:**
 
-| Classification | Trigger | Rollout behavior |
+```yaml
+x-composectl:
+  rollout: swap   # duplicated blue/green
+  # rollout: pin  # one instance, shared across revisions
+```
+
+| Classification | Declared | Rollout behavior |
 |---|---|---|
-| **swappable** | no writable named volume | duplicated during blue/green |
-| **pinned** | mounts a writable named volume | one container shared across revisions |
+| **swappable** | `rollout: swap` | duplicated during blue/green |
+| **pinned** | `rollout: pin` | one container shared across revisions |
 
-Read-only named-volume mounts remain swappable. Peak rollout capacity counts
-swappable services twice and pinned services once, for both CPU and memory.
+**Omitting it is a parse error.** There is no default, deliberately: the author
+who does not realise blue/green changes cardinality is exactly the one an
+optional field fails to protect.
+
+This used to be inferred — writable named volume meant pinned — and that computed
+the wrong property. A writable volume answers *"would two writers corrupt this
+filesystem?"*; blue/green needs *"may this run twice?"*. They come apart at the
+effect-singleton: a scheduler, cron runner or broker that owns no local state but
+whose correctness assumes one instance. The sharpest case is a Redis run with no
+persistence: it mounts nothing, so it was duplicated, and since each revision has
+its own network, every revision got its own keyspace — two holders of "the" lock,
+both succeeding.
+
+The volume rule survives as a constraint rather than a definition: `rollout: swap`
+on a service mounting a *writable* named volume is rejected. Read-only mounts are
+exempt. Peak rollout capacity counts swappable services twice and pinned once,
+for both CPU and memory.
 
 Pinned containers are intentionally not recreated automatically. A deployment
 that changes or removes an existing pinned service is rejected. The agent also
