@@ -205,7 +205,46 @@ func (s *Server) handleDrainNode(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "draining"})
+
+	// Cordoning is the part that always works; evacuation is best-effort, and
+	// the difference has to reach the operator. Refusing to drain a node holding
+	// three databases would make drain useless exactly when it is most wanted —
+	// the operator taking a machine down for maintenance still needs new work to
+	// stop landing on it. Draining silently and leaving them behind is worse:
+	// they would believe the node was empty.
+	//
+	// So the response is a manifest. An environment with nothing durable is
+	// released here and the scheduler will place its next deployment elsewhere by
+	// score; one with a pinned service or a named volume stays, with the reason.
+	homed, err := s.st.EnvironmentsHomedOnNode(ctx, id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	released := []map[string]any{}
+	stranded := []map[string]any{}
+	for _, h := range homed {
+		path := h.AppSlug + "/" + h.StackSlug + "/" + h.Slug
+		if len(h.DurableReasons) > 0 {
+			stranded = append(stranded, map[string]any{
+				"id": h.ID, "path": path, "reasons": h.DurableReasons,
+			})
+			continue
+		}
+		if err := s.st.ReleaseEnvironmentHome(ctx, h.ID); err != nil {
+			// A release that fails is stranded for a different reason, and
+			// saying so beats aborting the whole drain: the cordon has already
+			// taken effect and the other environments still deserve their answer.
+			stranded = append(stranded, map[string]any{
+				"id": h.ID, "path": path, "reasons": []string{err.Error()},
+			})
+			continue
+		}
+		released = append(released, map[string]any{"id": h.ID, "path": path})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "draining", "released": released, "stranded": stranded,
+	})
 }
 
 // handleUncordonNode lifts a drain. It reports the state the node actually

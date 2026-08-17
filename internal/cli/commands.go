@@ -402,8 +402,9 @@ func cmdDeployment(ctx context.Context, e env, args []string) error {
 		if err != nil {
 			return err
 		}
-		return emitOne(e, d, []string{"ID", "REV", "SLOT", "STATE", "PROJECT"},
-			[]string{d.ID, strconv.Itoa(d.Revision), d.Slot, d.State, d.ProjectName})
+		return emitOne(e, d, []string{"ID", "REV", "SLOT", "STATE", "NODE", "PROJECT"},
+			[]string{d.ID, strconv.Itoa(d.Revision), d.Slot, d.State,
+				nodeStatus(d.HomeNode, d.HomeNodeState), d.ProjectName})
 	default:
 		return usage("usage: navarch deployment list|get ...")
 	}
@@ -574,15 +575,30 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := e.c.DrainNode(ctx, nodeID); err != nil {
+		res, err := e.c.DrainNode(ctx, nodeID)
+		if err != nil {
 			return err
 		}
 		// Report the resolved id, not what was typed: after a rename the two
 		// differ, and the id is what identifies the node that was drained.
 		if e.cfg.Output == "json" {
-			return printJSON(e.out, map[string]string{"status": "draining", "id": nodeID})
+			return printJSON(e.out, res)
 		}
 		fmt.Fprintf(e.out, "draining\t%s\n", nodeID)
+		for _, r := range res.Released {
+			fmt.Fprintf(e.out, "released\t%s\n", r.Path)
+		}
+		// Exit stays zero: the node IS cordoned, which is what drain promises.
+		// Stranded environments are the expected outcome for anything holding
+		// durable state, not an error — but they are printed every time, because
+		// an operator who believes a node is empty will act on that belief.
+		for _, sd := range res.Stranded {
+			fmt.Fprintf(e.out, "stranded\t%s\t%s\n", sd.Path, strings.Join(sd.Reasons, "; "))
+		}
+		if len(res.Stranded) > 0 {
+			fmt.Fprintf(e.out, "\n%d environment(s) could not be moved; the node is cordoned but not empty.\n",
+				len(res.Stranded))
+		}
 		return nil
 	case "uncordon":
 		if err := need(args, 2, "usage: navarch node uncordon ORG/HOSTNAME"); err != nil {
@@ -904,4 +920,26 @@ func homeNode(hostname string) string {
 		return "unplaced"
 	}
 	return hostname
+}
+
+// nodeStatus renders the node behind a deployment, flagging it when the control
+// plane cannot currently reach it.
+//
+// This is the other half of the bargain that keeps `state` honest. A deployment
+// on a silent node stays `live`, because it very likely is — so the reader has
+// to be able to see the doubt somewhere, and this is where. "dev-node-2!" says
+// the deployment is fine as far as anyone knows and nobody has heard from the
+// machine; a bare hostname says everything is answering.
+func nodeStatus(hostname, state string) string {
+	switch {
+	case hostname == "":
+		return "unplaced"
+	case state == "" || state == "ready":
+		return hostname
+	default:
+		// e.g. "dev-node-2 (unreachable)" — the state is named rather than
+		// reduced to a symbol, because "draining" and "unreachable" call for
+		// completely different reactions from whoever is reading.
+		return hostname + " (" + state + ")"
+	}
 }

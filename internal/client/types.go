@@ -75,8 +75,14 @@ type Deployment struct {
 	PeakMemoryBytes int64      `json:"peak_memory_bytes,omitempty"`
 	PromotedAt      *time.Time `json:"promoted_at,omitempty"`
 	SupersededAt    *time.Time `json:"superseded_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	// HomeNode and HomeNodeState describe the node behind this deployment.
+	// Reported next to State rather than folded into it: a deployment on a node
+	// the control plane cannot reach is still live, and saying otherwise would
+	// assert something about a world nobody can currently see.
+	HomeNode      string    `json:"home_node,omitempty"`
+	HomeNodeState string    `json:"home_node_state,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type Node struct {
@@ -164,4 +170,19 @@ type LogPage struct {
 	Chunks  []LogChunk  `json:"chunks"`
 	Cursor  int64       `json:"cursor"`
 	Dropped bool        `json:"dropped"`
+}
+
+// DrainResult is what a drain actually achieved. Stranded environments are not
+// a failure: the node is cordoned either way, and an environment holding a
+// pinned service or a named volume has nowhere to go by design.
+type DrainResult struct {
+	Status   string       `json:"status"`
+	Released []DrainedEnv `json:"released"`
+	Stranded []DrainedEnv `json:"stranded"`
+}
+
+type DrainedEnv struct {
+	ID      string   `json:"id"`
+	Path    string   `json:"path"`
+	Reasons []string `json:"reasons,omitempty"`
 }

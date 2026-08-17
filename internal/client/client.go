@@ -335,8 +335,16 @@ func (c *Client) GetNode(ctx context.Context, id string) (*Node, error) {
 	return &out, nil
 }
 
-func (c *Client) DrainNode(ctx context.Context, id string) error {
-	return c.doJSON(ctx, http.MethodPost, "/v1/nodes/"+id+"/drain", map[string]any{}, &map[string]string{})
+// DrainNode cordons a node and evacuates what it safely can, returning what
+// moved and what did not. A node with stranded environments still drained — the
+// cordon is the part that always works — so this returns a manifest rather than
+// an error for the stranded case.
+func (c *Client) DrainNode(ctx context.Context, id string) (*DrainResult, error) {
+	var out DrainResult
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/nodes/"+id+"/drain", map[string]any{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // UncordonNode lifts a drain and returns the state the node landed in, which
