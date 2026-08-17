@@ -389,3 +389,41 @@ type HomedEnvironment struct {
 	Slug           string    `json:"slug"`
 	DurableReasons []string  `json:"durable_reasons,omitempty"`
 }
+
+// InstanceFailure is why one instance of a deployment did not come up.
+type InstanceFailure struct {
+	ServiceName string
+	State       InstanceState
+	LastError   string
+}
+
+// FailedInstances returns the instances that stopped a rollout, with the error
+// the agent recorded.
+//
+// The agent has always written this to last_error; nothing ever read it. The
+// controller failed deployments with a bare "an instance failed to start" and
+// then DeleteInstances removed the rows, so the one description of what actually
+// went wrong was destroyed microseconds after being written. That cost two
+// separate investigations of the same intermittent failure, both of which ended
+// at "the agent logs are silent and the evidence is gone".
+func (s *Store) FailedInstances(ctx context.Context, deploymentID uuid.UUID) ([]InstanceFailure, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT service_name, state, COALESCE(last_error,'')
+		FROM service_instances
+		WHERE deployment_id=$1 AND state IN ('failed','unhealthy')
+		ORDER BY service_name
+	`, deploymentID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := []InstanceFailure{}
+	for rows.Next() {
+		var f InstanceFailure
+		if err := rows.Scan(&f.ServiceName, &f.State, &f.LastError); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}

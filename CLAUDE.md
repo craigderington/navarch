@@ -583,6 +583,20 @@ an orphan `agent` driving the *host* daemon while `agent-1` drove `dind-1`, both
 claiming `dev-node-1`. It is invisible in `navarch node list`, which shows one
 healthy node either way.
 
+**A failed rollout must carry the agent's reason, because the evidence is
+deleted moments later.** The agent records why a container did not come up in
+`service_instances.last_error`; the controller failed deployments with a bare
+"an instance failed to start" and `DeleteInstances` then removed the rows, so the
+only description of the cause was destroyed microseconds after being written.
+`failureReason` reads `FailedInstances` *before* the state transition and folds
+service names and errors into `failure_reason`. It degrades rather than fails —
+if the detail cannot be read the deployment is still failed with the generic
+reason, because losing the explanation must not also lose the transition. An
+unhealthy instance carries no error at all (a container that runs and fails its
+healthcheck), so the reason names the service and its state rather than inventing
+a cause. This exists because one intermittent failure was investigated twice and
+both attempts ended at "the agent logs are silent and the evidence is gone".
+
 **Routes follow node reachability, on their own threshold.** `ListLiveRoutes`
 serves a live deployment only when its environment's home node is `ready` and has
 heartbeated within `COMPOSECTL_ROUTE_STRAND_SECONDS` (default 120). Both

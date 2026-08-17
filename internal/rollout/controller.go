@@ -2,7 +2,9 @@ package rollout
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -144,7 +146,11 @@ func (c *Controller) advance(ctx context.Context, dep store.Deployment) error {
 
 	switch {
 	case failed > 0:
-		return c.st.UpdateDeploymentState(ctx, dep.ID, store.DeployFailed, "an instance failed to start")
+		// Read the reason BEFORE failing the deployment: the controller deletes
+		// the instance rows on the way out, and the agent's description of what
+		// went wrong lives only there. "an instance failed to start" on its own
+		// is true of every possible cause and useful for none of them.
+		return c.st.UpdateDeploymentState(ctx, dep.ID, store.DeployFailed, c.failureReason(ctx, dep.ID))
 	case dep.State == store.DeployScheduling && pending == 0:
 		// Every instance has a container (moved past pending) → starting.
 		return c.st.UpdateDeploymentState(ctx, dep.ID, store.DeployStarting, "")
@@ -164,4 +170,29 @@ func (c *Controller) advance(ctx context.Context, dep store.Deployment) error {
 		return nil
 	}
 	return nil
+}
+
+// failureReason turns the instance-level errors into something an operator can
+// act on. It degrades rather than fails: if the detail cannot be read, the
+// caller still gets the generic reason and the deployment is still failed —
+// losing the explanation must not also lose the state transition.
+func (c *Controller) failureReason(ctx context.Context, depID uuid.UUID) string {
+	const generic = "an instance failed to start"
+	failures, err := c.st.FailedInstances(ctx, depID)
+	if err != nil || len(failures) == 0 {
+		return generic
+	}
+	parts := make([]string, 0, len(failures))
+	for _, f := range failures {
+		switch {
+		case f.LastError != "":
+			parts = append(parts, fmt.Sprintf("%s: %s", f.ServiceName, f.LastError))
+		default:
+			// Unhealthy with no error is a real case — a container that runs and
+			// fails its healthcheck reports no error at all — so name the service
+			// and its state rather than inventing a cause.
+			parts = append(parts, fmt.Sprintf("%s: %s", f.ServiceName, f.State))
+		}
+	}
+	return generic + ": " + strings.Join(parts, "; ")
 }

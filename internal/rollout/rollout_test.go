@@ -431,3 +431,68 @@ func setSpecIngress(t *testing.T, st *store.Store, depID uuid.UUID) {
 		t.Fatalf("set ingress on spec: %v", err)
 	}
 }
+
+// The agent records why a container did not come up; nothing read it. The
+// controller failed deployments with a bare "an instance failed to start" and
+// DeleteInstances then removed the rows, destroying the only description of the
+// cause microseconds after it was written. An intermittent failure was
+// investigated twice and both times ended at "the agent logs are silent and the
+// evidence is gone" — this is what makes the third time different.
+func TestFailureReasonCarriesTheAgentsError(t *testing.T) {
+	st := testStore(t)
+	depID, nodeID, orgID := fixture(t, st)
+	if err := newSchedulerForOrg(st, discardLog(), orgID).ScheduleOnce(ctx(t)); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+
+	desired, _ := st.DesiredStateForNode(ctx(t), nodeID)
+	for i, d := range desired {
+		obs := store.ObservedInstance{State: store.InstanceRunning, ContainerID: "c", HealthStatus: "healthy", SetStarted: true}
+		if i == 0 {
+			// What the agent actually writes when EnsureImage fails.
+			obs = store.ObservedInstance{
+				State:     store.InstanceFailed,
+				LastError: `pull nginx:alpine: manifest unknown`,
+			}
+		}
+		if err := st.ReportInstance(ctx(t), nodeID, d.InstanceID, obs); err != nil {
+			t.Fatalf("report: %v", err)
+		}
+	}
+
+	if err := newControllerForOrg(st, discardLog(), nil, orgID).ReconcileOnce(ctx(t)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	dep, _ := st.GetDeployment(ctx(t), depID)
+	if dep.State != store.DeployFailed {
+		t.Fatalf("expected failed, got %s", dep.State)
+	}
+	if !strings.Contains(dep.FailureReason, "manifest unknown") {
+		t.Fatalf("the agent's error must survive into the deployment: %q", dep.FailureReason)
+	}
+	if !strings.Contains(dep.FailureReason, desired[0].ServiceName) {
+		t.Fatalf("the reason must name which service failed: %q", dep.FailureReason)
+	}
+}
+
+// A container that runs and fails its healthcheck reports no error at all, so
+// the reason must still say which service and what state rather than inventing
+// a cause or falling back to the generic message.
+func TestFailureReasonNamesAnUnhealthyServiceWithNoError(t *testing.T) {
+	st := testStore(t)
+	depID, nodeID, orgID := fixture(t, st)
+	_ = newSchedulerForOrg(st, discardLog(), orgID).ScheduleOnce(ctx(t))
+	desired, _ := st.DesiredStateForNode(ctx(t), nodeID)
+	for _, d := range desired {
+		if err := st.ReportInstance(ctx(t), nodeID, d.InstanceID, store.ObservedInstance{
+			State: store.InstanceUnhealthy, ContainerID: "c", HealthStatus: "unhealthy",
+		}); err != nil {
+			t.Fatalf("report: %v", err)
+		}
+	}
+	_ = newControllerForOrg(st, discardLog(), nil, orgID).ReconcileOnce(ctx(t))
+	dep, _ := st.GetDeployment(ctx(t), depID)
+	if !strings.Contains(dep.FailureReason, "unhealthy") {
+		t.Fatalf("an unhealthy instance with no error must still be described: %q", dep.FailureReason)
+	}
+}
