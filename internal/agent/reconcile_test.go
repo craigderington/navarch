@@ -27,12 +27,19 @@ type fakeDriver struct {
 	removeEnvErrs   map[string]error // env8 -> error RemoveEnv should return for it
 	prunedNetworks  []string
 	pruneErrs       map[string]error
-	routerNets      []string
 
 	// removeEnvCalls records every RemoveEnv invocation including the failing
 	// ones, which removedEnvs (successes only) cannot distinguish from a call
 	// that never happened.
 	removeEnvCalls []string
+
+	// publishPorts records ContainerSpec.PublishPort per created container, in
+	// creation order, so a test can assert which services asked to publish.
+	publishPorts []int
+
+	// recreate makes EnsureContainer report a replacement rather than a plain
+	// creation, so the reporting path can be exercised without a real daemon.
+	recreate bool
 
 	// volumesAtCreate captures len(volumes) at the moment EnsureContainer runs,
 	// so tests can assert EnsureVolume happened first without adding a shared
@@ -43,20 +50,17 @@ type fakeDriver struct {
 func (f *fakeDriver) EnsureImage(ctx context.Context, ref string) (string, error) {
 	return ref, nil
 }
-func (f *fakeDriver) AttachRouterToNetwork(ctx context.Context, network string) error {
-	f.routerNets = append(f.routerNets, network)
-	return nil
-}
 func (f *fakeDriver) EnsureNetwork(ctx context.Context, name string, l map[string]string) (string, error) {
 	return "net-" + name, nil
 }
-func (f *fakeDriver) EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (string, bool, error) {
+func (f *fakeDriver) EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (dockerd.Ensured, error) {
 	f.volumesAtCreate = len(f.volumes)
 	f.created = append(f.created, cs.Name)
+	f.publishPorts = append(f.publishPorts, cs.PublishPort)
 	if secrets != nil {
 		f.lastSecretValue, _ = secrets.Get("name")
 	}
-	return "id-" + cs.Name, true, nil
+	return dockerd.Ensured{ID: "id-" + cs.Name, Created: !f.recreate, Recreated: f.recreate}, nil
 }
 func (f *fakeDriver) AttachNetwork(ctx context.Context, id, net string, a ...string) error {
 	f.attached = append(f.attached, id+"->"+net)
@@ -236,22 +240,23 @@ func TestHealthMappingExitedFails(t *testing.T) {
 	}
 }
 
-func TestReconcileAttachesRouterToRevisionNetwork(t *testing.T) {
+// An ingress service joins no network beyond the revision network it is created
+// on, and nothing is attached to that network on its behalf either. Traffic
+// reaches it at its node's address and its published port, so neither the
+// tenant nor the router crosses into the other's networking.
+//
+// This assertion has now outlived two mechanisms. It first named the shared
+// `cc-ingress` network the Sprint 2 plan called for, then asserted the router
+// was attached here instead. Both are gone; what survives is the property that
+// mattered underneath them — no shared network in either direction — which is
+// why it is stated as the absence of *any* extra attachment rather than as the
+// absence of a particular one.
+func TestIngressServiceJoinsNoNetworkBeyondItsRevision(t *testing.T) {
 	f := &fakeDriver{health: map[string]dockerd.Health{}}
 	r := NewReconciler(f)
 	d := desired("api", true, dockerd.Health{})
 	d.Service.Ingress = &spec.Ingress{Port: 80}
 	r.Reconcile(context.Background(), []store.DesiredInstance{d}, nil, nil)
-	if len(f.routerNets) != 1 || f.routerNets[0] != d.ProjectName {
-		t.Fatalf("router must join the revision network, got %v", f.routerNets)
-	}
-	// Traffic reaches a tenant by moving the router onto the tenant's network,
-	// never by moving the tenant onto a shared one. A swappable ingress is
-	// created on its revision network and must be attached to nothing further:
-	// asserting on the absence of *any* extra attachment states that property
-	// directly. This used to name the shared `cc-ingress` network the Sprint 2
-	// plan called for, which meant it stopped guarding anything the moment that
-	// network was removed.
 	if len(f.attached) != 0 {
 		t.Fatalf("a swappable ingress must join no network beyond its revision's, got attaches=%v", f.attached)
 	}
@@ -474,5 +479,64 @@ func TestReconcileCreatesVolumeBeforeContainer(t *testing.T) {
 	}
 	if f.volumesAtCreate != 1 {
 		t.Fatalf("EnsureVolume must be called before EnsureContainer, but only %d volume(s) existed when the container was created", f.volumesAtCreate)
+	}
+}
+
+// Only an ingress service publishes. A pinned database that quietly acquired a
+// published port would be reachable from outside its revision network, which is
+// the isolation the whole networking design exists to keep.
+func TestOnlyIngressServicesPublishAPort(t *testing.T) {
+	f := &fakeDriver{health: map[string]dockerd.Health{}}
+	r := NewReconciler(f)
+	api := desired("api", true, dockerd.Health{})
+	api.Service.Ingress = &spec.Ingress{Port: 8080}
+	db := desired("db", false, dockerd.Health{})
+
+	r.Reconcile(context.Background(), []store.DesiredInstance{api, db}, nil, nil)
+
+	if len(f.created) != len(f.publishPorts) {
+		t.Fatalf("bookkeeping mismatch: created=%v publishPorts=%v", f.created, f.publishPorts)
+	}
+	for i, name := range f.created {
+		want := 0
+		if strings.HasSuffix(name, "-api") {
+			want = 8080 // the container port from the spec, not the host port
+		}
+		if f.publishPorts[i] != want {
+			t.Errorf("%s published %d, want %d", name, f.publishPorts[i], want)
+		}
+	}
+}
+
+// The host port Docker assigned has to survive the trip from the driver's
+// observation to the report the control plane composes the route from. Nothing
+// else carries it: an ingress container whose port is dropped here is live,
+// healthy and unroutable.
+func TestReportCarriesTheObservedIngressPort(t *testing.T) {
+	d := desired("api", true, dockerd.Health{})
+	d.Service.Ingress = &spec.Ingress{Port: 80}
+	f := &fakeDriver{health: map[string]dockerd.Health{
+		"id-cc-env12345-r1-blue-api": {Running: true, PublishedPort: 32768},
+	}}
+	r := NewReconciler(f)
+
+	reports, _ := r.Reconcile(context.Background(), []store.DesiredInstance{d}, nil, nil)
+	if len(reports) != 1 {
+		t.Fatalf("want one report, got %d", len(reports))
+	}
+	if reports[0].IngressPort != 32768 {
+		t.Fatalf("IngressPort = %d, want the port the driver observed (32768)", reports[0].IngressPort)
+	}
+}
+
+// A replacement must be reported, because it is the only trace that a container
+// which was already running got destroyed and rebuilt.
+func TestReportSurfacesARecreatedContainer(t *testing.T) {
+	f := &fakeDriver{health: map[string]dockerd.Health{}, recreate: true}
+	r := NewReconciler(f)
+	reports, _ := r.Reconcile(context.Background(),
+		[]store.DesiredInstance{desired("api", true, dockerd.Health{})}, nil, nil)
+	if len(reports) != 1 || !reports[0].Recreated {
+		t.Fatalf("a replacement must reach the report, got %+v", reports)
 	}
 }

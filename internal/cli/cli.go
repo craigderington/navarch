@@ -302,7 +302,7 @@ Commands:
   promote ID           Manually promote a healthy deployment
   rollback             Re-deploy an earlier revision
   secret               Set, list, and delete environment secrets
-  node                 List, get, and drain nodes
+  node                 List, get, drain, and uncordon nodes
   events               Organization audit timeline
   wait ID              Block until a deployment reaches a state
   version              Print CLI version

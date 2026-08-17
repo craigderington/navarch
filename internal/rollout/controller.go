@@ -89,11 +89,18 @@ func (c *Controller) syncRouter(ctx context.Context) error {
 	}
 	rr := make([]router.Route, 0, len(routes))
 	for _, lr := range routes {
+		// No address or no reported port means the agent has not brought the
+		// ingress container up yet. Omit the route rather than inventing a
+		// target: a wrong one would send this hostname's traffic somewhere,
+		// while a missing one simply is not served until the next resync.
+		if lr.NodeAddr == "" || lr.PublishedPort == 0 {
+			continue
+		}
 		rr = append(rr, router.Route{
-			Key:              lr.Env8,
-			Hostname:         lr.Hostname,
-			ServiceContainer: lr.ProjectName + "-" + lr.IngressService,
-			Port:             lr.IngressPort,
+			Key:      lr.Env8,
+			Hostname: lr.Hostname,
+			Target:   lr.NodeAddr,
+			Port:     lr.PublishedPort,
 		})
 	}
 	return c.rtr.Sync(rr)

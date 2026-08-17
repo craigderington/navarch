@@ -2,6 +2,9 @@
 DB_URL ?= postgres://composectl:composectl@localhost:5473/composectl?sslmode=disable
 MIGRATION_DB_URL ?= postgres://composectl:composectl@postgres:5432/composectl?sslmode=disable
 API    ?= http://localhost:8417
+# Every node's agent, for log tailing and for the stop/start dance the tests
+# need. Scaling the fleet means adding a node here and in compose.yaml.
+AGENTS ?= agent-1 agent-2 agent-3 agent-4
 API_TOKEN ?= dev-token-change-me
 
 .PHONY: help
@@ -24,7 +27,14 @@ test: ## Run tests
 
 .PHONY: up
 up: ## Start the dev stack
-	docker compose up -d --build
+	# --remove-orphans is not tidiness. Renaming a service leaves the old
+	# container running, and a stale agent keeps registering: RegisterNode
+	# upserts by (org_id, hostname), so an orphan and its replacement fight over
+	# one node row, alternately publishing their own advertise address. Routes
+	# then point at whichever won last. The fleet rename from `agent`/`dind-b` to
+	# `agent-N`/`dind-N` produced exactly that, and it was invisible until
+	# someone looked at `docker ps` rather than at the node list.
+	docker compose up -d --build --remove-orphans
 
 .PHONY: down
 down: ## Stop the dev stack
@@ -83,6 +93,10 @@ demo-secrets: ## Set + deploy a secret end to end: ciphertext at rest, plaintext
 demo-preview: ## Create a preview env with inherited secrets, then watch it expire and get reaped
 	@API_TOKEN=$(API_TOKEN) ./scripts/demo-preview.sh
 
+.PHONY: demo-fleet
+demo-fleet: ## Two nodes, two daemons: ingress stack pinned to the router node, worker stack spread to the other
+	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-fleet.sh
+
 .PHONY: agent-logs
 agent-logs: ## Tail the node agent logs
-	docker compose logs -f agent
+	docker compose logs -f $(AGENTS)

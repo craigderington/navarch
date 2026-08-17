@@ -2,6 +2,46 @@
 # Ports are deliberately non-standard to avoid colliding with other
 # projects already bound to the 3000/5000/8000/9000 ranges.
 
+# Every node in the dev fleet is a Docker-in-Docker daemon with an agent driving
+# it, and they are identical apart from the four things that MUST differ per
+# node: hostname, advertise address, identity volume and daemon data volume.
+# These anchors hold the identical part so the differences are the only thing
+# written out per node — with four nodes, spelling them out in full would bury
+# the four lines that actually distinguish them in a hundred that do not.
+#
+# privileged is required by dind. This is dev infrastructure on a dev box, not a
+# tenant container — the platform's own rejection of `privileged` applies to
+# compose files it deploys, which is a different thing entirely.
+x-dind: &dind
+  image: docker:27-dind
+  privileged: true
+  environment:
+    # Plain TCP, reachable only on the compose network. Certificates here would
+    # protect a socket nothing outside this file can address.
+    DOCKER_TLS_CERTDIR: ""
+  # Explicit resolver, because the default chain does not survive nesting on a
+  # systemd-resolved host: this container gets Docker's embedded DNS
+  # (127.0.0.11), which forwards to the host's docker0 address, which forwards
+  # to the 127.0.0.53 stub — and the pull fails with "server misbehaving" while
+  # a direct query to any real resolver from the same container works. Only
+  # these dev-fleet daemons are affected; override with NAVARCH_DIND_DNS if this
+  # box should not be asking a public resolver.
+  dns:
+    - ${NAVARCH_DIND_DNS:-1.1.1.1}
+  command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+  healthcheck:
+    test: ["CMD", "docker", "info"]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 10s
+
+x-agent: &agent
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile
+    target: agent
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -71,12 +111,20 @@ services:
       - traefik-dynamic:/dynamic
 
   # Traefik routes the env hostname to the live revision's ingress container.
-  # It watches the file-provider dir the control plane writes, and the agent
-  # attaches it to each revision network so it can reach that revision's
-  # ingress container by name. The movement is deliberately one-way — the
-  # router joins the tenant's network, the tenant never joins a shared one —
-  # so two fleets have no network in common. The agent finds this container by
-  # its cc.role label below.
+  # It watches the file-provider dir the control plane writes, and reaches each
+  # tenant at its node's address and the port the agent published for it.
+  #
+  # It runs BESIDE the fleet, not on it: no node's daemon hosts this container,
+  # and it joins no tenant network. That is only possible because routing is
+  # address-based — when the router had to join a tenant's revision network to
+  # reach it, it had to share that tenant's daemon, and one node was special
+  # forever. Nothing here needs to change to add a node.
+  #
+  # The cc.role label is still load-bearing, though nothing attaches this
+  # container to tenant networks any more: it is how an agent recognises a
+  # leftover router endpoint as the platform's own and disconnects it, rather
+  # than reading it as a foreign container and refusing to prune the network
+  # under it. Only daemons that predate that change can have such endpoints.
   traefik:
     image: traefik:v3.3
     command:
@@ -102,32 +150,168 @@ services:
     networks:
       - default
 
-  # Node agent: reconciles the host Docker daemon to the control plane's desired
-  # state. It creates sibling containers on the host daemon via the mounted
-  # socket. The platform already rejects bind mounts, so there are no host-path
-  # translation traps — only named volumes, which the host daemon owns.
-  agent:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
-      target: agent
+  # ---------------------------------------------------------------- the fleet
+  # dind-N is the daemon, agent-N drives it, and dev-node-N is what it registers
+  # as. That correspondence is a convention the demo scripts depend on: they
+  # derive a node's daemon from its hostname by suffix rather than carrying a
+  # lookup table that grows a line per node.
+  #
+  # On COMPOSECTL_NODE_MEMORY_MB, which every node sets to the same value: it is
+  # a SCHEDULING number, reserved from a stack's declared limits rather than
+  # measured from anything, and unrelated to what the node can really run. So the
+  # figure to keep honest is the FLEET-WIDE total, not the per-node one. Two
+  # nodes at 16 GB already advertised 32 GB on a 30 GB box; four at 16 GB would
+  # advertise 64 GB, and a scheduler that can never refuse work for capacity has
+  # lost a real signal — the one that correctly caught a full node and read, at
+  # first, like a bug. Holding the fleet total near 32 GB means ~32768/N per
+  # node: 8192 at four nodes. Raise NAVARCH_NODE_MEMORY_MB if a bigger stack
+  # needs the headroom, and remember `make nuke` is what actually frees it,
+  # since a live environment holds its reservation until its instances are gone.
+
+  # ------------------------------------------------------------------ node 1
+  dind-1:
+    <<: *dind
+    volumes:
+      - dind-1-data:/var/lib/docker
+
+  agent-1:
+    <<: *agent
     depends_on:
       controlplane:
         condition: service_healthy
+      dind-1:
+        condition: service_healthy
     environment:
+      # No socket mount anywhere in this file: every agent reaches its daemon
+      # over the network, which is what makes each a different host rather than
+      # another view of the same one.
+      DOCKER_HOST: tcp://dind-1:2375
       COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
       COMPOSECTL_ORG: dev
       COMPOSECTL_NODE_HOSTNAME: dev-node-1
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-8192}
+      # This node's containers publish inside the dind-1 container's network
+      # namespace, so that container's own address on the compose network is
+      # where the router reaches them. The agent resolves the name to the IP it
+      # registers, because advertise_addr is an INET column.
+      COMPOSECTL_ADVERTISE_ADDR: dind-1
       COMPOSECTL_AGENT_TOKEN: dev-token-change-me
       COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
       COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      # Identity must persist across restarts — a fresh keypair each boot
-      # would make every existing secret's ciphertext undecryptable.
-      - age-identity:/identity
+      # Its own identity volume, and this is the one thing that must never be
+      # shared between nodes. Two agents on one volume register the same age
+      # recipient, so ciphertext sealed to node A is decryptable by node B by
+      # construction — the narrowing in RecipientsForEnvironment still happens
+      # and the property it buys is gone. They would also clobber each other's
+      # node token, which fails only on the *next* restart, when an agent loads
+      # the other node's token and starts 401ing.
+      - age-identity-1:/identity
+
+  # ------------------------------------------------------------------ node 2
+  dind-2:
+    <<: *dind
+    volumes:
+      - dind-2-data:/var/lib/docker
+
+  agent-2:
+    <<: *agent
+    depends_on:
+      controlplane:
+        condition: service_healthy
+      dind-2:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://dind-2:2375
+      COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
+      COMPOSECTL_ORG: dev
+      COMPOSECTL_NODE_HOSTNAME: dev-node-2
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-8192}
+      COMPOSECTL_ADVERTISE_ADDR: dind-2
+      COMPOSECTL_AGENT_TOKEN: dev-token-change-me
+      COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
+      COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token
+    volumes:
+      - age-identity-2:/identity
+
+  # ------------------------------------------------------------------ node 3
+  dind-3:
+    <<: *dind
+    volumes:
+      - dind-3-data:/var/lib/docker
+
+  agent-3:
+    <<: *agent
+    depends_on:
+      controlplane:
+        condition: service_healthy
+      dind-3:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://dind-3:2375
+      COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
+      COMPOSECTL_ORG: dev
+      COMPOSECTL_NODE_HOSTNAME: dev-node-3
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-8192}
+      COMPOSECTL_ADVERTISE_ADDR: dind-3
+      COMPOSECTL_AGENT_TOKEN: dev-token-change-me
+      COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
+      COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token
+    volumes:
+      - age-identity-3:/identity
+
+  # ------------------------------------------------------------------ node 4
+  dind-4:
+    <<: *dind
+    volumes:
+      - dind-4-data:/var/lib/docker
+
+  agent-4:
+    <<: *agent
+    depends_on:
+      controlplane:
+        condition: service_healthy
+      dind-4:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://dind-4:2375
+      COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
+      COMPOSECTL_ORG: dev
+      COMPOSECTL_NODE_HOSTNAME: dev-node-4
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-8192}
+      COMPOSECTL_ADVERTISE_ADDR: dind-4
+      COMPOSECTL_AGENT_TOKEN: dev-token-change-me
+      COMPOSECTL_AGE_IDENTITY_FILE: /identity/age.key
+      COMPOSECTL_NODE_TOKEN_FILE: /identity/node.token
+    volumes:
+      - age-identity-4:/identity
+
+# The subnet is pinned for predictable addressing: every node advertises a
+# 10.201.0.x address, so a route target in the generated Traefik config is
+# recognisable as a fleet address at a glance. It was originally pinned because
+# node 1 ran on the host daemon and had to advertise this gateway — the one host
+# address a container on a user-defined network can reach — and that reason is
+# gone now that no node is the host.
+#
+# 10.201.0.0/24 sits outside Docker's default allocation pools (172.16-172.31,
+# 192.168) on purpose. A subnet inside them could later be handed to an
+# auto-created network, and two bridges sharing a subnet is a fault that shows
+# up as traffic silently reaching the wrong container.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.201.0.0/24
+          gateway: 10.201.0.1
 
 volumes:
   pgdata:
   traefik-dynamic:
-  age-identity:
+  age-identity-1:
+  age-identity-2:
+  age-identity-3:
+  age-identity-4:
+  dind-1-data:
+  dind-2-data:
+  dind-3-data:
+  dind-4-data:

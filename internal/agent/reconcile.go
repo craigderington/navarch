@@ -18,12 +18,8 @@ import (
 type DockerDriver interface {
 	EnsureImage(ctx context.Context, ref string) (string, error)
 	EnsureNetwork(ctx context.Context, name string, labels map[string]string) (string, error)
-	EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (string, bool, error)
+	EnsureContainer(ctx context.Context, cs dockerd.ContainerSpec, secrets dockerd.SecretSource) (dockerd.Ensured, error)
 	AttachNetwork(ctx context.Context, containerID, network string, aliases ...string) error
-	// AttachRouterToNetwork connects the platform ingress proxy to a
-	// revision network so it can reach that revision's ingress container
-	// without putting tenant containers on a shared mesh.
-	AttachRouterToNetwork(ctx context.Context, network string) error
 	InspectHealth(ctx context.Context, containerID string) (dockerd.Health, error)
 	StopRemove(ctx context.Context, containerID string) error
 	ListManaged(ctx context.Context, env8 string) ([]dockerd.Managed, error)
@@ -50,6 +46,15 @@ type Report struct {
 	LastError    string
 	RestartCount int
 	SetStarted   bool
+	// Recreated is set when an existing container had to be replaced rather than
+	// adopted. Reported so the agent can log it: rebuilding a possibly-live
+	// container is disruptive, and nothing else would show it happened.
+	Recreated bool
+	// IngressPort is the host port Docker assigned to this instance's published
+	// ingress port, 0 for every other service. The control plane composes the
+	// route from this and the node's registered address — the agent reports the
+	// port but never names the address, so it cannot point traffic at itself.
+	IngressPort int
 }
 
 type Reconciler struct {
@@ -264,10 +269,15 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 			return fail(err)
 		}
 	}
-	id, _, err := r.drv.EnsureContainer(ctx, cs, secrets)
+	ensured, err := r.drv.EnsureContainer(ctx, cs, secrets)
 	if err != nil {
 		return fail(err)
 	}
+	id := ensured.ID
+	// A replacement is worth a line in the log: it means a container that was
+	// already there had to be destroyed to correct its published port, which is
+	// a brief outage for that service and the only visible trace of it.
+	rep.Recreated = ensured.Recreated
 	// A pinned container is created once under its env network but must be
 	// reachable from every revision's network; attach it to this revision's.
 	if !di.Swappable {
@@ -275,13 +285,12 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 			return fail(err)
 		}
 	}
-	// Traefik joins the revision network; tenant ingress stays off any
-	// shared mesh so one fleet cannot talk to another.
-	if di.Service.Ingress != nil {
-		if err := r.drv.AttachRouterToNetwork(ctx, di.ProjectName); err != nil {
-			return fail(err)
-		}
-	}
+	// An ingress service needs nothing further here. The router used to be
+	// attached to this revision's network so it could reach the container by
+	// name, which only ever worked while the two shared a daemon; it now
+	// connects to the node's address and the port published above, so the
+	// tenant joins no shared network and the router joins no tenant one.
+	// Neither direction, which is what makes a node's networks its own.
 
 	rep.ContainerID = id
 	rep.SetStarted = true
@@ -290,6 +299,7 @@ func (r *Reconciler) ensure(ctx context.Context, di store.DesiredInstance, name 
 		return fail(err)
 	}
 	rep.RestartCount = h.RestartCount
+	rep.IngressPort = h.PublishedPort
 	rep.State, rep.HealthStatus = r.observe(di, h)
 	return rep
 }
@@ -411,12 +421,20 @@ func containerSpec(di store.DesiredInstance, name string) dockerd.ContainerSpec 
 			ReadOnly: m.ReadOnly,
 		})
 	}
+	// An ingress service is published on an ephemeral host port so the router can
+	// reach it by node address rather than by container name — the only form that
+	// works when the router is on a different node. The same path is taken when
+	// it is on the same node: one code path, so local and remote cannot drift.
+	publish := 0
+	if svc.Ingress != nil {
+		publish = svc.Ingress.Port
+	}
 	return dockerd.ContainerSpec{
 		Name: name, Image: svc.Image, Env: svc.Env, SecretEnv: svc.SecretEnv,
 		Cmd: svc.Command, Entrypoint: svc.Entrypoint, WorkingDir: svc.WorkingDir,
 		User: svc.User, Mounts: mounts, Health: svc.Health, Restart: svc.Restart,
 		CPUMillis: svc.Limits.CPUMillis, MemoryBytes: svc.Limits.MemoryBytes,
-		Network: di.ProjectName,
+		Network: di.ProjectName, PublishPort: publish,
 		Labels: map[string]string{
 			"cc.env": di.Env8, "cc.deployment": di.DeploymentID.String(),
 			"cc.service": di.ServiceName, "cc.swappable": boolStr(di.Swappable),

@@ -42,16 +42,40 @@ func insertInstancesTx(ctx context.Context, tx pgx.Tx, deploymentID, nodeID uuid
 
 // PlaceDeployment reserves node capacity and writes instances in one
 // transaction so two pending rollouts cannot both see the same free space.
+//
+// It also binds the environment to this node the first time, and refuses any
+// later placement that would contradict that binding. The check belongs here
+// rather than only in the scheduler for the reason the deployment state machine
+// is enforced in SQL: a buggy or racing scheduler must not be able to write a
+// placement that contradicts durable state. Two schedulers placing two
+// deployments of one environment concurrently is what the row lock is for.
 func (s *Store) PlaceDeployment(ctx context.Context, depID, nodeID uuid.UUID, insts []NewInstance, peakCPU int, peakMem int64) error {
 	return s.tx(ctx, func(tx pgx.Tx) error {
 		var state DeploymentState
+		var envID uuid.UUID
 		if err := tx.QueryRow(ctx, `
-			SELECT state FROM deployments WHERE id=$1 FOR UPDATE
-		`, depID).Scan(&state); err != nil {
+			SELECT state, environment_id FROM deployments WHERE id=$1 FOR UPDATE
+		`, depID).Scan(&state, &envID); err != nil {
 			return err
 		}
 		if state != DeployPending {
 			return nil
+		}
+		// Locked before the capacity read: the binding decides which node's
+		// capacity is even the right one to check.
+		var home *uuid.UUID
+		if err := tx.QueryRow(ctx, `
+			SELECT home_node_id FROM environments WHERE id=$1 FOR UPDATE
+		`, envID).Scan(&home); err != nil {
+			return err
+		}
+		if home != nil && *home != nodeID {
+			// Deliberately not a relocation. The environment's pinned container
+			// and named volumes are on the home node and cannot follow; placing
+			// here would build a new pinned container over an empty volume and
+			// report success.
+			return fmt.Errorf("%w: environment is homed to node %s, cannot place on %s",
+				ErrConflict, *home, nodeID)
 		}
 		var cpu, mem int64
 		var allocCPU int
@@ -67,6 +91,16 @@ func (s *Store) PlaceDeployment(ctx context.Context, depID, nodeID uuid.UUID, in
 		}
 		if err := insertInstancesTx(ctx, tx, depID, nodeID, insts); err != nil {
 			return err
+		}
+		if home == nil {
+			// First placement binds the environment. In the same transaction as
+			// the instance rows, so a rollout that fails afterwards still leaves
+			// the binding that its volumes will have been created under.
+			if _, err := tx.Exec(ctx, `
+				UPDATE environments SET home_node_id=$2 WHERE id=$1
+			`, envID, nodeID); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE nodes
@@ -159,6 +193,11 @@ type ObservedInstance struct {
 	LastError    string
 	RestartCount int
 	SetStarted   bool
+	// IngressPort is the host port the agent observed Docker assign to this
+	// instance's published ingress port. Zero means "nothing published", which
+	// includes "not an ingress service" and "container not up yet" — the router
+	// omits a route it has no port for rather than guessing one.
+	IngressPort int
 }
 
 func (s *Store) ReportInstance(ctx context.Context, nodeID, instanceID uuid.UUID, o ObservedInstance) error {
@@ -170,9 +209,10 @@ func (s *Store) ReportInstance(ctx context.Context, nodeID, instanceID uuid.UUID
 			last_error    = NULLIF($5,''),
 			restart_count = $6,
 			started_at    = CASE WHEN $7 AND started_at IS NULL THEN now() ELSE started_at END,
+			ingress_port  = NULLIF($9, 0),
 			updated_at    = now()
 		WHERE id = $1 AND node_id = $8
-	`, instanceID, o.State, o.ContainerID, o.HealthStatus, o.LastError, o.RestartCount, o.SetStarted, nodeID)
+	`, instanceID, o.State, o.ContainerID, o.HealthStatus, o.LastError, o.RestartCount, o.SetStarted, nodeID, o.IngressPort)
 	if err != nil {
 		return mapErr(err)
 	}

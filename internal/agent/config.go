@@ -2,10 +2,12 @@ package agent
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -30,6 +32,7 @@ func LoadConfig() (Config, error) {
 		PollInterval:    time.Duration(intEnv("COMPOSECTL_POLL_SECONDS", 2)) * time.Second,
 		IdentityFile:    identity,
 		NodeTokenFile:   envOr("COMPOSECTL_NODE_TOKEN_FILE", filepath.Join(filepath.Dir(identity), "node.token")),
+		Labels:          parseLabels(os.Getenv("COMPOSECTL_NODE_LABELS")),
 	}
 	if cfg.ControlPlaneURL == "" {
 		return Config{}, fmt.Errorf("COMPOSECTL_CONTROLPLANE_URL is required")
@@ -37,6 +40,11 @@ func LoadConfig() (Config, error) {
 	if cfg.AgentToken == "" {
 		return Config{}, fmt.Errorf("COMPOSECTL_AGENT_TOKEN is required")
 	}
+	addr, err := resolveAdvertiseAddr(cfg.AdvertiseAddr)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.AdvertiseAddr = addr
 	return cfg, nil
 }
 
@@ -54,4 +62,64 @@ func intEnv(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// parseLabels reads COMPOSECTL_NODE_LABELS in the form "k=v,k2=v2".
+//
+// Malformed entries are dropped rather than rejected: a node label is
+// advertisement, and the scheduler's job is to place against what a node claims
+// it can do. A typo therefore costs that capability — the node is simply not
+// chosen for work needing it — which is a failure the scheduler reports, rather
+// than an agent that refuses to start and takes its capacity with it.
+func parseLabels(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, part := range strings.Split(s, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if !ok || k == "" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// resolveAdvertiseAddr turns the configured advertise address into an IP.
+//
+// The column is INET, and the value has to be an address the control plane can
+// hand to the router as a connect target — but the most convenient thing to
+// configure is often a name: a container's service name on a compose network, a
+// node's DNS record. Resolving here keeps the schema honest without making the
+// operator look up an address that something else already knows.
+//
+// A value that is already an IP literal is returned untouched, and a name that
+// does not resolve is an error rather than a fallback: registering an address
+// this node is not reachable at produces routes that point at nothing, which
+// looks like a routing bug anywhere except here.
+func resolveAdvertiseAddr(addr string) (string, error) {
+	if addr == "" {
+		return "", nil
+	}
+	if net.ParseIP(addr) != nil {
+		return addr, nil
+	}
+	ips, err := net.LookupIP(addr)
+	if err != nil {
+		return "", fmt.Errorf("resolve advertise address %q: %w", addr, err)
+	}
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			return v4.String(), nil
+		}
+	}
+	if len(ips) > 0 {
+		return ips[0].String(), nil
+	}
+	return "", fmt.Errorf("advertise address %q resolved to nothing", addr)
 }

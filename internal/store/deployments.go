@@ -383,7 +383,14 @@ type LiveRoute struct {
 	ProjectName    string
 	IngressService string
 	Hostname       string
-	IngressPort    int
+	IngressPort    int // the container port the spec declares
+	// NodeAddr and PublishedPort are where the router must actually connect:
+	// the node's registered address and the host port its agent reported. The
+	// container name is no longer usable as a target — it only resolves on the
+	// daemon the container runs on, which stops being the router's daemon the
+	// moment a stack is placed on another node.
+	NodeAddr      string
+	PublishedPort int
 }
 
 // ListLiveRoutes returns one route per live deployment whose environment has a
@@ -392,9 +399,18 @@ type LiveRoute struct {
 // router stays free of the spec type and pgx.
 func (s *Store) ListLiveRoutes(ctx context.Context) ([]LiveRoute, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT d.environment_id, d.project_name, COALESCE(e.hostname,''), d.resolved_spec
+		SELECT d.environment_id, d.project_name, COALESCE(e.hostname,''), d.resolved_spec,
+		       COALESCE(host(n.advertise_addr), ''), COALESCE(si.ingress_port, 0)
 		FROM deployments d
 		JOIN environments e ON e.id = d.environment_id
+		-- Only the ingress service ever has a published port, so this selects
+		-- exactly one instance without naming the service. LEFT so a live
+		-- deployment whose agent has not reported yet still comes back and is
+		-- skipped by the caller, rather than vanishing here for a reason the
+		-- caller cannot distinguish from "not live".
+		LEFT JOIN service_instances si
+		       ON si.deployment_id = d.id AND si.ingress_port IS NOT NULL
+		LEFT JOIN nodes n ON n.id = si.node_id
 		WHERE d.state = 'live' AND e.hostname IS NOT NULL AND e.hostname <> ''
 	`)
 	if err != nil {
@@ -404,9 +420,10 @@ func (s *Store) ListLiveRoutes(ctx context.Context) ([]LiveRoute, error) {
 	out := []LiveRoute{}
 	for rows.Next() {
 		var envID uuid.UUID
-		var project, hostname string
+		var project, hostname, nodeAddr string
+		var publishedPort int
 		var specJSON []byte
-		if err := rows.Scan(&envID, &project, &hostname, &specJSON); err != nil {
+		if err := rows.Scan(&envID, &project, &hostname, &specJSON, &nodeAddr, &publishedPort); err != nil {
 			return nil, err
 		}
 		var ds spec.DeploymentSpec
@@ -420,6 +437,7 @@ func (s *Store) ListLiveRoutes(ctx context.Context) ([]LiveRoute, error) {
 		out = append(out, LiveRoute{
 			Env8: shortID(envID), ProjectName: project, IngressService: name,
 			Hostname: hostname, IngressPort: ds.Services[name].Ingress.Port,
+			NodeAddr: nodeAddr, PublishedPort: publishedPort,
 		})
 	}
 	return out, rows.Err()
@@ -428,6 +446,10 @@ func (s *Store) ListLiveRoutes(ctx context.Context) ([]LiveRoute, error) {
 type PendingDeployment struct {
 	Deployment
 	OrgID uuid.UUID
+	// HomeNodeID is the node this environment's durable state already lives on,
+	// nil before its first placement. A deployment for a homed environment goes
+	// there or nowhere: its pinned container and named volumes cannot follow it.
+	HomeNodeID *uuid.UUID
 }
 
 // ListPendingDeployments returns deployments awaiting scheduling, oldest
@@ -446,7 +468,7 @@ func (s *Store) listPendingDeployments(ctx context.Context, orgID *uuid.UUID) ([
 	rows, err := s.pool.Query(ctx, `
 		SELECT d.id, d.environment_id, d.stack_version_id, d.revision, d.slot,
 		       d.project_name, d.state, d.resolved_spec, d.created_at, d.updated_at,
-		       a.org_id
+		       a.org_id, e.home_node_id
 		FROM deployments d
 		JOIN environments e ON e.id = d.environment_id
 		JOIN stacks s       ON s.id = e.stack_id
@@ -464,7 +486,7 @@ func (s *Store) listPendingDeployments(ctx context.Context, orgID *uuid.UUID) ([
 		var specJSON []byte
 		if err := rows.Scan(&p.ID, &p.EnvironmentID, &p.StackVersionID, &p.Revision,
 			&p.Slot, &p.ProjectName, &p.State, &specJSON, &p.CreatedAt, &p.UpdatedAt,
-			&p.OrgID); err != nil {
+			&p.OrgID, &p.HomeNodeID); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(specJSON, &p.ResolvedSpec); err != nil {

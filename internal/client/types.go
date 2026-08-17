@@ -75,10 +75,11 @@ type Node struct {
 	MemoryBytes      int64      `json:"memory_bytes"`
 	AllocCPUMillis   int        `json:"alloc_cpu_millis"`
 	AllocMemoryBytes int64      `json:"alloc_memory_bytes"`
-	AgentVersion     string     `json:"agent_version,omitempty"`
-	AgeRecipient     string     `json:"age_recipient,omitempty"`
-	LastHeartbeat    *time.Time `json:"last_heartbeat,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
+	AgentVersion     string            `json:"agent_version,omitempty"`
+	AgeRecipient     string            `json:"age_recipient,omitempty"`
+	Labels           map[string]string `json:"labels,omitempty"`
+	LastHeartbeat    *time.Time        `json:"last_heartbeat,omitempty"`
+	CreatedAt        time.Time         `json:"created_at"`
 }
 
 type SecretMeta struct {

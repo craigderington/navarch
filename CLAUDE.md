@@ -94,6 +94,7 @@ make health
 make validate     # parse examples/webapp, see classification
 make demo         # agent-driven rollout to healthy, over HTTP, real containers
 make demo-failure # bad image → failed, prior deployment untouched
+make demo-fleet   # two nodes, two daemons: ingress pinned, worker spread
 make agent-logs   # tail the node agent
 make psql         # database shell
 make logs         # tail control plane
@@ -478,17 +479,137 @@ these, so don't drift them): swappable container
 named volume `cc-{env8}-{volume}`. Labels: `cc.env`, `cc.deployment`,
 `cc.service`, `cc.swappable`. `env8` = `store.shortID(environmentID)`.
 
-**The router joins the tenant's network; the tenant never joins a shared one.**
-Traefik reaches a revision's ingress container because the agent attaches the
-*router* to that revision network (`AttachRouterToNetwork`, locating the
-container by its `cc.role=ingress-router` label). The Sprint 2 plan in
-`docs/superpowers/` specifies the opposite — a shared external `cc-ingress`
-network that every ingress container joins — and that plan is history, not the
-design: a shared mesh puts two tenants' ingress containers on one network with
-working DNS between them. The `cc-ingress` network was removed once nothing
-referenced it; don't reintroduce it from the plan. The cost of this direction is
-that the router holds an endpoint on every revision network, which is why
-`RemoveEnv` must disconnect unmanaged containers before removing one.
+**Node labels are advertisement, and `ingress=true` no longer constrains
+placement.** The agent sends `COMPOSECTL_NODE_LABELS` at registration; malformed
+entries are dropped rather than aborting startup, because a node that refuses to
+start takes its capacity with it while a missing label is a placement the
+scheduler can explain. Slice B *did* filter on `ingress=true`, when the router
+could only reach a tenant by joining its revision network on a shared daemon —
+an ingress stack anywhere else went healthy, went live, and served nothing.
+Slice C's address-and-published-port routing removed the need, and the filter
+with it: any node can host an ingress stack so long as *some* node runs a
+router. `TestIngressStackMayBePlacedOnANodeWithoutARouter` pins the removal, so
+a reintroduced filter fails loudly rather than quietly stranding capacity. The
+label survives as the record of where the router actually runs.
+
+**Node capacity is reserved from declared limits, not measured usage**, and a
+live environment holds its reservation until its instances are deleted — nothing
+but a preview's TTL expires one on its own. A dev box therefore fills up over a
+session of demo runs, and the next rollout fails with "no ready node has …
+free", which reads like a bug and is not one. The dev nodes advertise 16 GB
+(`NAVARCH_NODE_MEMORY_MB`) to push that wall out; `make nuke` is the real reset.
+Every ingress stack lands on node 1, so it fills first.
+
+**An environment is bound to one node for its lifetime.**
+`environments.home_node_id` is set by the first placement, in the same
+transaction, and never changes. Every later deployment for that environment goes
+there or fails — `PlaceDeployment` refuses a contradicting node with
+`ErrConflict`, and the scheduler fails the deployment rather than looking
+elsewhere. **Falling back to another node when the home node is full is the
+data-loss bug wearing a helpful face:** the pinned container and named volumes
+cannot follow, so the agent would build a fresh pinned container over an *empty*
+volume, pass its health check, and be auto-promoted while the real data sat
+unreferenced on the original node — a rollout that reports success and loses the
+database. The check is enforced in the store, not only in the scheduler, for the
+same reason the deployment state machine is enforced in SQL: a buggy or racing
+scheduler must not be able to write a placement that contradicts durable state.
+`TestPlacementRefusesToMoveAHomedEnvironment` is the regression, verified to fail
+without the refusal.
+
+The column is `ON DELETE SET NULL` deliberately. RESTRICT is semantically purer,
+but deleting a node destroys the volumes it held, so unbinding is the honest
+outcome and re-homing the only recovery — and RESTRICT would wedge organization
+deletion, since environments cascade from stacks while nodes cascade from the
+org (the cascade-ordering hazard already recorded above).
+
+Placement for an *unbound* environment is scored, not first-fit: capacity is a
+hard filter, then fewest environments homed, then greatest free-capacity ratio
+(of the more constrained of cpu/memory), then node id ascending. The id
+tie-break exists so the same fleet state always yields the same choice — a
+scheduler whose output depends on Postgres row order cannot be asserted on, and
+its bugs reproduce only sometimes. `bestNode` is pure and table-tested.
+
+**No shared network in either direction.** A tenant joins no network but its own
+revision's, and nothing joins a tenant's network on the platform's behalf.
+Traefik reaches a revision's ingress container at its node's registered address
+and the port the agent published for it, so ingress works identically whether the
+tenant is on the router's node or another one. Two earlier designs are history,
+not the design: the Sprint 2 plan in `docs/superpowers/` specifies a shared
+external `cc-ingress` network every ingress container joins, and Slice B attached
+the *router* to each revision network instead. Don't reintroduce either — a
+shared mesh puts two tenants' ingress containers on one network with working DNS
+between them, and the router-side attach made every superseded revision network
+unprunable. `isIngressRouter` and `RemoveEnv`'s unconditional disconnect survive
+that removal on purpose: endpoints created before it still exist on any upgraded
+daemon, and they are what let those networks converge instead of leaking.
+
+**`PublishPort` is deliberately outside the container fingerprint, and verified
+against the container instead.** The fingerprint hashes resolved runtime config
+*including secret plaintext*, and a mismatch is a hard error rather than a
+rebuild — that error is what stops a rotated secret being claimed by an adopted
+container still running the old value, forcing the change through a new revision
+and its blue/green rollout. Adding `PublishPort` to it would make every container
+created before published-port routing fail adoption permanently, so the agent
+would error every tick on a healthy live deployment instead of converging.
+`EnsureContainer` compares the adopted container's `HostConfig.PortBindings`
+against the spec instead — create-time bindings, because `findByName` adopts
+stopped containers too and a stopped one reports no active ports however it was
+created. A container that disagrees is **replaced only if swappable**; the parser
+forbids those from mounting a writable named volume, which is exactly what makes
+one safe to rebuild and a pinned one not. Replacements are reported through
+`Ensured{ID, Created, Recreated}` and logged by the agent, because rebuilding a
+possibly-live container is disruptive and nothing else would show it happened.
+Before this, an upgraded agent adopted its existing ingress containers, they
+published nothing, `ingress_port` went NULL and the router silently dropped every
+route while the deployments stayed live and healthy.
+
+**Per-node capacity, not fleet capacity, is what a single environment can hit.**
+An environment is bound to one node, so its blue/green rollout — which holds
+reservations for the old *and* new revision at once — is bounded by that node's
+advertised memory, not the fleet's. At 8 GB per node a `hello`-shaped stack
+reserves ~1.28 GB and ~2.5 GB mid-rollout, so a handful of live environments
+homed on the same node will fail the next rollout there with "home node ... lacks
+capacity" while the fleet still looks half empty. That is the capacity signal
+working, not a bug, and the fix is `make nuke` — nothing releases a live
+environment's reservation. The full demo suite passes from a clean fleet and
+will not survive being run several times over without one.
+
+**`make up` passes `--remove-orphans`, and that is load-bearing.** Renaming a
+service leaves the old container running, and a stale agent keeps registering:
+`RegisterNode` upserts by `(org_id, hostname)`, so an orphan and its replacement
+fight over one node row, alternately publishing their own advertise address, and
+routes point at whichever won last. The four-node rename produced exactly that —
+an orphan `agent` driving the *host* daemon while `agent-1` drove `dind-1`, both
+claiming `dev-node-1`. It is invisible in `navarch node list`, which shows one
+healthy node either way.
+
+**Draining is reversible; the state a node returns to is derived, not declared.**
+`DrainNode` sets `draining`, and both `Heartbeat` and `RegisterNode` preserve it
+— deliberately, so an agent restart cannot silently un-cordon a node an operator
+cordoned. That made drain a one-way door until `UncordonNode` existed: nothing
+set a node back, and recovery meant hand-written SQL. Uncordon lifts operator
+*intent* only; it asserts nothing about liveness, so the node lands in `ready` or
+`unreachable` according to `last_heartbeat` against the same 30-second window
+`MarkStaleNodesUnreachable` and `ListReadyNodes` use. Both answers self-correct —
+a live agent's next heartbeat promotes `unreachable` to `ready`. The API and CLI
+report the resulting state rather than a fixed `"ready"`, so they cannot
+contradict the next `node list`. `retired` is refused, not lifted: `Heartbeat`
+skips retired nodes, so resurrecting one leaves a row claiming readiness that
+nothing can update. **Nothing sets `retired` yet, on purpose** — it would be a
+second irreversible operation, and it needs Slice D to decide what happens to
+environments homed on a retired node and the agent to stop reconciling rather
+than error-loop on a refused heartbeat.
+
+**A test must not leave a node in the `dev` org.** Placement scores by spread, so
+a freshly registered fixture node — zero environments homed on it — is the *most*
+attractive node in the fleet, and nothing drives it: the next demo's deployment
+is placed there and sits in `scheduling` until the heartbeat window closes. A
+passing system that looks broken. `internal/api`'s `testServer` snapshots the
+dev org's nodes and deletes any the test added, scoped by difference rather than
+by name so it also covers registrations made through the HTTP handler (where the
+test never holds the id). This was flakiness before Slice A's scoring existed —
+see the comment on `TestSetSecretWithNoReadyNodeIsUnprocessable`, which dodges it
+by using its own org — and a hazard for anything sharing the database after.
 
 **An empty router config is a file with no `http` section — never an empty
 one.** Traefik's parser refuses an element with no children, so `routers: {}`
@@ -584,7 +705,38 @@ would be permanent). `POST /v1/stacks/{stack}/versions` takes the compose
 file as the **raw body** (`curl --data-binary @compose.yaml`), authorship
 via `?created_by=`.
 
-**Sprint 4** — multi-node, WireGuard mesh, placement scoring
+**Sprint 4 — multi-node fleet. IN PROGRESS** (branch `sprint4-multi-node`).
+Design: `docs/superpowers/specs/2026-08-15-sprint4-multi-node-design.md`.
+Settled: a deployment is placed **whole onto one node** (no cross-node overlay,
+so the agent's container model is untouched); **one ingress node** reaches
+tenants over the mesh; the dev fleet is **Docker-in-Docker** so nodes are real
+separate daemons.
+
+- **Slice A — environment affinity + scored placement. DONE.** `home_node_id`,
+  refusal to relocate, spread-first scoring, secret recipients keyed to the home
+  node. It landed first because the affinity bug was live in the code and needed
+  only a second node to become data loss.
+- **Slice B — the dev fleet. DONE.** `dind-b` + `agent-b` give node 2 its own
+  Docker daemon (`DOCKER_HOST`, no socket mount, its own age identity), nodes
+  advertise capabilities via `COMPOSECTL_NODE_LABELS`, and the scheduler places
+  against them. `make demo-fleet` proves an ingress stack lands on the router
+  node while a no-ingress stack spreads to the other *and runs on that node's
+  daemon*. Node 1 stays on the host daemon this slice: moving Traefik into DinD
+  means solving cross-node ingress, which is Slice C's subject, and would leave
+  `make demo` broken in between.
+- **Slice C — cross-node ingress. DONE.** The router targets a node address and
+  a published port instead of a container name, so ingress no longer requires
+  the router to share a daemon with the tenant. Slice B's `ingress=true`
+  placement filter was scaffolding for exactly this and is gone;
+  `AttachRouterToNetwork` went with it. `make demo-fleet` asserts a stack on the
+  router-less node is served through the node that has one.
+- **Slice D** — drain and failover. Planned, not built:
+  `docs/superpowers/plans/2026-08-16-sprint4-slice-d-drain-and-failover.md`.
+  The drain one-way door is already fixed (see the uncordon invariant above);
+  what remains is that `ListLiveRoutes` filters only on `d.state='live'` and
+  joins `nodes` purely for the address, so a drained or unreachable node keeps
+  serving routes — users get hangs rather than errors.
+
 **Sprint 5** — Bubble Tea TUI, log aggregation, metrics
 
 **Post-review hardening. DONE.** Every API route except `/healthz` requires

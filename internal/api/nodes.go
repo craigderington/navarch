@@ -127,6 +127,7 @@ type reportRequest struct {
 		LastError    string    `json:"last_error,omitempty"`
 		RestartCount int       `json:"restart_count,omitempty"`
 		SetStarted   bool      `json:"set_started,omitempty"`
+		IngressPort  int       `json:"ingress_port,omitempty"`
 	} `json:"instances"`
 }
 
@@ -147,6 +148,7 @@ func (s *Server) handleInstanceReport(w http.ResponseWriter, r *http.Request) {
 			State: store.InstanceState(in.State), ContainerID: in.ContainerID,
 			HealthStatus: in.HealthStatus, LastError: in.LastError,
 			RestartCount: in.RestartCount, SetStarted: in.SetStarted,
+			IngressPort: in.IngressPort,
 		})
 		// A vanished row is not a failure, and it is routine: the agent
 		// reconciles at the top of its tick and reports at the bottom, so a
@@ -194,6 +196,29 @@ func (s *Server) handleDrainNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "draining"})
+}
+
+// handleUncordonNode lifts a drain. It reports the state the node actually
+// landed in rather than a fixed "ready", because the store derives that from the
+// last heartbeat — telling the caller "ready" when the row says `unreachable`
+// would make the API disagree with the very next `navarch node list`.
+func (s *Server) handleUncordonNode(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	if err := s.st.UncordonNode(ctx, id); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	n, err := s.st.GetNode(ctx, id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": string(n.State)})
 }
 
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {

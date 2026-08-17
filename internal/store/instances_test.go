@@ -191,6 +191,16 @@ func TestListLiveRoutes(t *testing.T) {
 	if _, err := st.PromoteDeployment(testCtx(t), dep.ID); err != nil {
 		t.Fatalf("promote: %v", err)
 	}
+	// Report the published port the way the agent does. Without this the route
+	// comes back with PublishedPort == 0, which the controller DISCARDS — this
+	// test used to assert only the spec-side fields and so passed on a route
+	// that would never have been served, and would have kept passing if
+	// NodeAddr and PublishedPort were deleted from the struct outright.
+	if err := st.ReportInstance(testCtx(t), node.ID, instanceIDFor(t, st, dep.ID, "api"),
+		ObservedInstance{State: InstanceRunning, ContainerID: "c-api", IngressPort: 32768}); err != nil {
+		t.Fatalf("ReportInstance: %v", err)
+	}
+
 	routes, err := st.ListLiveRoutes(testCtx(t))
 	if err != nil {
 		t.Fatalf("ListLiveRoutes: %v", err)
@@ -205,11 +215,64 @@ func TestListLiveRoutes(t *testing.T) {
 			if r.ProjectName == "" || r.Env8 == "" {
 				t.Fatalf("route missing project context: %+v", r)
 			}
+			// What the router actually connects to. The container name is not
+			// usable as a target once the tenant can be on another node.
+			if r.PublishedPort != 32768 {
+				t.Fatalf("route must carry the reported host port, got %+v", r)
+			}
+			if r.NodeAddr == "" {
+				t.Fatalf("route must carry the node's registered address, got %+v", r)
+			}
 		}
 	}
 	if !found {
 		t.Fatalf("live route not found in %+v", routes)
 	}
+}
+
+// A live deployment whose agent has not reported a port yet must still come
+// back, so the controller can tell "not ready to route" from "not live" and
+// omit the route rather than inventing a target for it.
+func TestListLiveRoutesReturnsRouteBeforeThePortIsReported(t *testing.T) {
+	st := testStore(t)
+	dep, node := deployFixture(t, st)
+	_, _ = st.Pool().Exec(testCtx(t),
+		`UPDATE environments SET hostname='unreported.example.com' WHERE id=(SELECT environment_id FROM deployments WHERE id=$1)`, dep.ID)
+	_ = st.CreateServiceInstances(testCtx(t), dep.ID, node.ID, []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "x"}})
+	for _, s := range []DeploymentState{DeployScheduling, DeployStarting, DeployHealthy} {
+		if err := st.UpdateDeploymentState(testCtx(t), dep.ID, s, ""); err != nil {
+			t.Fatalf("advance %s: %v", s, err)
+		}
+	}
+	if _, err := st.PromoteDeployment(testCtx(t), dep.ID); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+
+	routes, err := st.ListLiveRoutes(testCtx(t))
+	if err != nil {
+		t.Fatalf("ListLiveRoutes: %v", err)
+	}
+	for _, r := range routes {
+		if r.Hostname == "unreported.example.com" {
+			if r.PublishedPort != 0 {
+				t.Fatalf("no port has been reported, so none should be claimed: %+v", r)
+			}
+			return
+		}
+	}
+	t.Fatal("a live deployment must appear even before its port is reported")
+}
+
+// instanceIDFor finds the instance row for one service of a deployment.
+func instanceIDFor(t *testing.T, st *Store, depID uuid.UUID, service string) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := st.Pool().QueryRow(testCtx(t),
+		`SELECT id FROM service_instances WHERE deployment_id=$1 AND service_name=$2`,
+		depID, service).Scan(&id); err != nil {
+		t.Fatalf("find instance %s: %v", service, err)
+	}
+	return id
 }
 
 // driveToLive takes a deployment from pending to live: writes instances,
@@ -313,3 +376,121 @@ func TestRollbackRejectsMissingSecrets(t *testing.T) {
 }
 
 func errorsIs(err, target error) bool { return errors.Is(err, target) }
+
+// The data-loss regression. An environment's pinned container and named volumes
+// live on the node its first deployment was placed on. Before home_node_id,
+// nothing stopped revision 2 being placed elsewhere — where the agent would
+// build a fresh pinned container over an empty volume, pass health checks, and
+// be auto-promoted while the real data sat unreferenced on the original node.
+// The rollout reported success. Placement must refuse instead.
+func TestPlacementRefusesToMoveAHomedEnvironment(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	sv, err := st.CreateStackVersion(ctx, stack.ID, "raw", twoServiceSpec(), "t")
+	if err != nil {
+		t.Fatalf("CreateStackVersion: %v", err)
+	}
+	env, err := st.CreateEnvironment(ctx, CreateEnvironmentParams{StackID: stack.ID, Slug: "prod"})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	nodeA, nodeB := newNode(t, st, org.ID), newNode(t, st, org.ID)
+	insts := []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "nginx:alpine"}}
+
+	d1, err := st.CreateDeployment(ctx, CreateDeploymentParams{
+		EnvironmentID: env.ID, StackVersionID: sv.ID, ResolvedSpec: sv.Spec, CreatedBy: "t",
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	if err := st.PlaceDeployment(ctx, d1.ID, nodeA.ID, insts, 250, 256<<20); err != nil {
+		t.Fatalf("first placement: %v", err)
+	}
+
+	// First placement must have bound the environment.
+	got, err := st.GetEnvironment(ctx, env.ID)
+	if err != nil {
+		t.Fatalf("GetEnvironment: %v", err)
+	}
+	if got.HomeNodeID == nil || *got.HomeNodeID != nodeA.ID {
+		t.Fatalf("first placement must home the environment to %s, got %v", nodeA.ID, got.HomeNodeID)
+	}
+
+	// Retire the first so the partial unique index permits a second active
+	// deployment; the point under test is placement, not that constraint.
+	// Failed, not superseded: the state machine only allows superseding a live
+	// deployment, and this one never left scheduling.
+	if err := st.UpdateDeploymentState(ctx, d1.ID, DeployFailed, "retired by test"); err != nil {
+		t.Fatalf("retire first deployment: %v", err)
+	}
+	d2, err := st.CreateDeployment(ctx, CreateDeploymentParams{
+		EnvironmentID: env.ID, StackVersionID: sv.ID, ResolvedSpec: sv.Spec, CreatedBy: "t",
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment (second): %v", err)
+	}
+
+	err = st.PlaceDeployment(ctx, d2.ID, nodeB.ID, insts, 250, 256<<20)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("placing a homed environment on another node must be ErrConflict, got %v", err)
+	}
+
+	// And the binding is unchanged — a refused placement must not half-apply.
+	got, err = st.GetEnvironment(ctx, env.ID)
+	if err != nil {
+		t.Fatalf("GetEnvironment: %v", err)
+	}
+	if got.HomeNodeID == nil || *got.HomeNodeID != nodeA.ID {
+		t.Fatalf("home node must be unchanged after a refusal, got %v", got.HomeNodeID)
+	}
+
+	// The same deployment placed on the home node succeeds, proving the refusal
+	// was about the node and not about the deployment being unplaceable.
+	if err := st.PlaceDeployment(ctx, d2.ID, nodeA.ID, insts, 250, 256<<20); err != nil {
+		t.Fatalf("placement on the home node: %v", err)
+	}
+}
+
+func TestEnvironmentsHomedPerNode(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	sv, err := st.CreateStackVersion(ctx, stack.ID, "raw", twoServiceSpec(), "t")
+	if err != nil {
+		t.Fatalf("CreateStackVersion: %v", err)
+	}
+	nodeA, nodeB := newNode(t, st, org.ID), newNode(t, st, org.ID)
+	insts := []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "nginx:alpine"}}
+
+	// Two environments on A, one on B.
+	for i, node := range []*Node{nodeA, nodeA, nodeB} {
+		env, err := st.CreateEnvironment(ctx, CreateEnvironmentParams{
+			StackID: stack.ID, Slug: uniq("e"),
+		})
+		if err != nil {
+			t.Fatalf("CreateEnvironment %d: %v", i, err)
+		}
+		dep, err := st.CreateDeployment(ctx, CreateDeploymentParams{
+			EnvironmentID: env.ID, StackVersionID: sv.ID, ResolvedSpec: sv.Spec, CreatedBy: "t",
+		})
+		if err != nil {
+			t.Fatalf("CreateDeployment %d: %v", i, err)
+		}
+		if err := st.PlaceDeployment(ctx, dep.ID, node.ID, insts, 250, 256<<20); err != nil {
+			t.Fatalf("PlaceDeployment %d: %v", i, err)
+		}
+	}
+
+	homed, err := st.EnvironmentsHomedPerNode(ctx, org.ID)
+	if err != nil {
+		t.Fatalf("EnvironmentsHomedPerNode: %v", err)
+	}
+	if homed[nodeA.ID] != 2 || homed[nodeB.ID] != 1 {
+		t.Fatalf("want A=2 B=1, got %v", homed)
+	}
+}

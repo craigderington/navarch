@@ -35,7 +35,62 @@ func testServer(t *testing.T) *Server {
 	t.Cleanup(st.Close)
 	srv := NewServer(st, slogDiscard())
 	srv.BootstrapDevOrg(ctx)
+	cleanupDevNodes(t, st)
 	return srv
+}
+
+// cleanupDevNodes deletes every node this test adds to the bootstrapped "dev"
+// org, which is the same org the dev fleet and every demo run in.
+//
+// Left behind, those rows are not merely untidy. Placement scores by spread, so
+// a freshly registered fixture node — zero environments homed on it — is the
+// *most* attractive node in the fleet, and nothing drives it: the next demo's
+// deployment is placed there and sits in `scheduling` until the 30-second
+// heartbeat window closes and it is marked unreachable. That is a passing system
+// looking broken, on a surface where the honest failures are already subtle.
+// Slice A's scoring is what turned an old flakiness (see the comment on
+// TestSetSecretWithNoReadyNodeIsUnprocessable, which dodges this by using its
+// own org) into a hazard for anything sharing the database.
+//
+// Scoped by difference rather than by name so it covers registrations made
+// through the HTTP handler, where the test never holds the id, and any site
+// added later that this file does not know about.
+func cleanupDevNodes(t *testing.T, st *store.Store) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dev, err := st.GetOrganizationBySlug(ctx, "dev")
+	if err != nil {
+		return // no dev org, nothing this test can pollute
+	}
+	before := map[uuid.UUID]bool{}
+	if nodes, err := st.ListNodes(ctx, dev.ID); err == nil {
+		for _, n := range nodes {
+			before[n.ID] = true
+		}
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		nodes, err := st.ListNodes(c, dev.ID)
+		if err != nil {
+			return
+		}
+		for _, n := range nodes {
+			if before[n.ID] {
+				continue
+			}
+			// Instances first: service_instances.node_id has no ON DELETE
+			// CASCADE, the same ordering hazard the store fixtures document.
+			if _, err := st.Pool().Exec(c, `DELETE FROM service_instances WHERE node_id=$1`, n.ID); err != nil {
+				t.Errorf("cleanup instances for node %s: %v", n.ID, err)
+				continue
+			}
+			if _, err := st.Pool().Exec(c, `DELETE FROM nodes WHERE id=$1`, n.ID); err != nil {
+				t.Errorf("cleanup node %s: %v", n.ID, err)
+			}
+		}
+	})
 }
 
 // Every other test here builds a Server with no bearer token, which makes
@@ -286,4 +341,75 @@ func TestRollbackInvalidEnvIsBadRequest(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for a bad env id, got %d", rec.Code)
 	}
+}
+
+// Uncordon is an operator action, not an agent one. The distinction is not
+// cosmetic: nodeAgentPathID claims only heartbeat, desired-state and report, and
+// anything it does not claim falls through to the operator-token branch. A new
+// /v1/nodes/{id}/... route is exactly the shape that could land on the wrong
+// side of that split — which is how every per-node endpoint once returned 401
+// unconditionally — so the branch is pinned here rather than assumed.
+func TestUncordonIsAnOperatorEndpoint(t *testing.T) {
+	srv := testServer(t)
+	WithBearerToken("operator-token")(srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	org, err := srv.st.GetOrganizationBySlug(ctx, "dev")
+	if err != nil {
+		t.Fatalf("GetOrganizationBySlug: %v", err)
+	}
+	node, err := srv.st.RegisterNode(ctx, store.RegisterNodeParams{
+		OrgID: org.ID, Hostname: "uncordon-" + uuid.NewString()[:8],
+		AdvertiseAddr: "10.9.9.10", CPUMillis: 1000, MemoryBytes: 1 << 30,
+	})
+	if err != nil {
+		t.Fatalf("RegisterNode: %v", err)
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.st.Pool().Exec(c, `DELETE FROM nodes WHERE id=$1`, node.ID)
+	})
+	if err := srv.st.DrainNode(ctx, node.ID); err != nil {
+		t.Fatalf("DrainNode: %v", err)
+	}
+	path := "/v1/nodes/" + node.ID.String() + "/uncordon"
+
+	t.Run("a node token is refused", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("Authorization", "Bearer "+node.Token)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("a node must not be able to uncordon itself, got %d", rec.Code)
+		}
+	})
+
+	t.Run("the operator token works and reports the derived state", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("Authorization", "Bearer operator-token")
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		// The response reports what the row actually says, not a fixed "ready":
+		// the store derives the state from the last heartbeat, and an API that
+		// answered "ready" regardless would contradict the next node list.
+		var body map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		n, err := srv.st.GetNode(ctx, node.ID)
+		if err != nil {
+			t.Fatalf("GetNode: %v", err)
+		}
+		if body["status"] != string(n.State) {
+			t.Fatalf("reported %q but the row says %q", body["status"], n.State)
+		}
+		if n.State == store.NodeDraining {
+			t.Fatal("the node is still draining after a successful uncordon")
+		}
+	})
 }

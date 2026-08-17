@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/craig/composectl/internal/client"
@@ -523,7 +525,7 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 
 func cmdNode(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch node list|get|drain ...")
+		return usage("usage: navarch node list|get|drain|uncordon ...")
 	}
 	switch args[0] {
 	case "list":
@@ -544,9 +546,10 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		}
 		rows := make([][]string, 0, len(nodes))
 		for _, n := range nodes {
-			rows = append(rows, []string{n.ID, n.Hostname, n.State, n.AdvertiseAddr, strconv.Itoa(n.CPUMillis)})
+			rows = append(rows, []string{n.ID, n.Hostname, n.State, n.AdvertiseAddr,
+				strconv.Itoa(n.CPUMillis), formatLabels(n.Labels)})
 		}
-		return emit(e, nodes, []string{"ID", "HOSTNAME", "STATE", "ADDR", "CPU_MILLIS"}, rows)
+		return emit(e, nodes, []string{"ID", "HOSTNAME", "STATE", "ADDR", "CPU_MILLIS", "LABELS"}, rows)
 	case "get":
 		if err := need(args, 2, "usage: navarch node get ORG/HOSTNAME"); err != nil {
 			return err
@@ -559,8 +562,8 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		if err != nil {
 			return err
 		}
-		return emitOne(e, n, []string{"ID", "HOSTNAME", "STATE", "ADDR"},
-			[]string{n.ID, n.Hostname, n.State, n.AdvertiseAddr})
+		return emitOne(e, n, []string{"ID", "HOSTNAME", "STATE", "ADDR", "LABELS"},
+			[]string{n.ID, n.Hostname, n.State, n.AdvertiseAddr, formatLabels(n.Labels)})
 	case "drain":
 		if err := need(args, 2, "usage: navarch node drain ORG/HOSTNAME"); err != nil {
 			return err
@@ -579,8 +582,29 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		}
 		fmt.Fprintf(e.out, "draining\t%s\n", nodeID)
 		return nil
+	case "uncordon":
+		if err := need(args, 2, "usage: navarch node uncordon ORG/HOSTNAME"); err != nil {
+			return err
+		}
+		nodeID, err := e.resolveNode(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		// The reported state is whatever the control plane derived from the
+		// node's last heartbeat, not a fixed "ready" — an uncordoned node that
+		// has been silent comes back `unreachable`, and printing "ready" would
+		// contradict the next `node list`.
+		state, err := e.c.UncordonNode(ctx, nodeID)
+		if err != nil {
+			return err
+		}
+		if e.cfg.Output == "json" {
+			return printJSON(e.out, map[string]string{"status": state, "id": nodeID})
+		}
+		fmt.Fprintf(e.out, "%s\t%s\n", state, nodeID)
+		return nil
 	default:
-		return usage("usage: navarch node list|get|drain ...")
+		return usage("usage: navarch node list|get|drain|uncordon ...")
 	}
 }
 
@@ -714,4 +738,23 @@ func splitOnce(s, sep string) (string, string, bool) {
 		i++
 	}
 	return s, "", false
+}
+
+// formatLabels renders node labels for a table cell, sorted so the same node
+// always prints the same way — map iteration order would otherwise make the
+// output of two identical `node list` calls differ.
+func formatLabels(l map[string]string) string {
+	if len(l) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(l))
+	for k := range l {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+l[k])
+	}
+	return strings.Join(parts, ",")
 }

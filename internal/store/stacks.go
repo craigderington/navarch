@@ -152,10 +152,10 @@ func (s *Store) GetEnvironmentBySlug(ctx context.Context, stackID uuid.UUID, slu
 	var config []byte
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, stack_id, slug, strategy, COALESCE(hostname,''),
-		       config, live_deployment_id, ephemeral, expires_at, created_at
+		       config, live_deployment_id, ephemeral, expires_at, home_node_id, created_at
 		FROM environments WHERE stack_id = $1 AND slug = $2
 	`, stackID, slug).Scan(&e.ID, &e.StackID, &e.Slug, &e.Strategy, &e.Hostname,
-		&config, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt, &e.CreatedAt)
+		&config, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt, &e.HomeNodeID, &e.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -170,10 +170,10 @@ func (s *Store) GetEnvironment(ctx context.Context, id uuid.UUID) (*Environment,
 	var configJSON []byte
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, stack_id, slug, strategy, COALESCE(hostname,''),
-		       config, live_deployment_id, ephemeral, expires_at, created_at
+		       config, live_deployment_id, ephemeral, expires_at, home_node_id, created_at
 		FROM environments WHERE id = $1
 	`, id).Scan(&e.ID, &e.StackID, &e.Slug, &e.Strategy, &e.Hostname,
-		&configJSON, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt, &e.CreatedAt)
+		&configJSON, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt, &e.HomeNodeID, &e.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}

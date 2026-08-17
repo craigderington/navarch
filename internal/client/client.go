@@ -324,6 +324,18 @@ func (c *Client) DrainNode(ctx context.Context, id string) error {
 	return c.doJSON(ctx, http.MethodPost, "/v1/nodes/"+id+"/drain", map[string]any{}, &map[string]string{})
 }
 
+// UncordonNode lifts a drain and returns the state the node landed in, which
+// the control plane derives from its last heartbeat rather than assuming.
+func (c *Client) UncordonNode(ctx context.Context, id string) (string, error) {
+	var out struct {
+		Status string `json:"status"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/nodes/"+id+"/uncordon", map[string]any{}, &out); err != nil {
+		return "", err
+	}
+	return out.Status, nil
+}
+
 func (c *Client) ListEvents(ctx context.Context, orgID string, limit int, beforeID int64) ([]Event, error) {
 	q := url.Values{}
 	if limit > 0 {

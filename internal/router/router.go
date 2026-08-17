@@ -15,10 +15,16 @@ import (
 )
 
 type Route struct {
-	Key              string // stable per-environment id (env8)
-	Hostname         string
-	ServiceContainer string // cc-{env8}-r{rev}-{slot}-{ingress}
-	Port             int
+	Key      string // stable per-environment id (env8)
+	Hostname string
+	// Target is the node address the ingress container is reachable at, and Port
+	// is the host port published for it. This used to be the container's own
+	// name, resolved by Docker DNS on a network the router had joined — which
+	// only works while the router and the container share a daemon. Addressing
+	// the node instead is the one form that works whether the tenant is local or
+	// on another node, so there is no local-versus-remote branch to drift.
+	Target string
+	Port   int
 }
 
 type Router struct{ dir string }
@@ -27,6 +33,12 @@ func New(dir string) *Router { return &Router{dir: dir} }
 
 // hostNamePattern matches a lowercase DNS name. Same alphabet as store
 // hostname validation — Traefik Host() rules are interpolated from this.
+// targetPattern accepts a DNS name or an IPv4/IPv6 literal — the forms a node's
+// registered advertise_addr can take. It exists for the same reason
+// hostNamePattern does: the value is interpolated into generated config, so its
+// alphabet is constrained rather than trusted.
+var targetPattern = regexp.MustCompile(`^[a-zA-Z0-9.:_\-\[\]]+$`)
+
 var hostNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
 
 type traefikHTTP struct {
@@ -75,6 +87,12 @@ func (r *Router) Sync(routes []Route) error {
 		if !hostNamePattern.MatchString(rt.Hostname) {
 			return fmt.Errorf("refusing to route unsafe hostname %q", rt.Hostname)
 		}
+		// The target is interpolated into a URL in the same generated file, so it
+		// gets the same treatment as the hostname: an address is a DNS name or an
+		// IP literal, and anything else does not belong in this file.
+		if !targetPattern.MatchString(rt.Target) {
+			return fmt.Errorf("refusing to route to unsafe target %q", rt.Target)
+		}
 		if rt.Port <= 0 || rt.Port > 65535 {
 			return fmt.Errorf("refusing to route invalid port %d", rt.Port)
 		}
@@ -87,7 +105,7 @@ func (r *Router) Sync(routes []Route) error {
 		}
 		cfg.HTTP.Services[svc] = traefikService{
 			LoadBalancer: traefikLB{Servers: []traefikServer{
-				{URL: fmt.Sprintf("http://%s:%d", rt.ServiceContainer, rt.Port)},
+				{URL: fmt.Sprintf("http://%s:%d", rt.Target, rt.Port)},
 			}},
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/go-connections/nat"
 
 	"github.com/craig/composectl/internal/spec"
 )
@@ -72,6 +74,17 @@ type ContainerSpec struct {
 	Restart     string
 	CPUMillis   int
 	MemoryBytes int64
+	// PublishPort is the container port to publish on the host, set only for an
+	// ingress service. The host port is always 0 so Docker allocates it: there
+	// is no allocator here to collide, and the assignment is read back from the
+	// running container rather than predicted.
+	//
+	// This does not contradict the platform's rejection of `ports:` in tenant
+	// compose files. That rule stops a *tenant* claiming a fixed host port, which
+	// collides between revisions and between stacks. This is the platform
+	// publishing an ephemeral port so its own router can reach the container from
+	// another node — nothing a compose author can ask for or influence.
+	PublishPort int
 }
 
 func (d *Driver) EnsureImage(ctx context.Context, ref string) (string, error) {
@@ -109,29 +122,19 @@ func imageDigest(id string, repoDigests []string, ref string) string {
 const (
 	routerLabelKey   = "cc.role"
 	routerLabelValue = "ingress-router"
-	routerLabel      = routerLabelKey + "=" + routerLabelValue
 )
 
 // isIngressRouter reports whether a container is the platform's own router.
-// It is the one container that joins tenant networks without belonging to a
-// tenant, so every label check on a network's members has to account for it.
+//
+// The agent no longer puts it on tenant networks — routing is address-based, so
+// the router reaches a tenant at its node's address and published port. But the
+// label still has to be recognised, because endpoints created before that
+// changed do not disappear when the code does: a daemon upgraded across this
+// change still has a router attached to every revision network it ever served,
+// and something has to let those converge. Treating the router as foreign is
+// what made them unprunable in the first place.
 func isIngressRouter(labels map[string]string) bool {
 	return labels[routerLabelKey] == routerLabelValue
-}
-
-func (d *Driver) AttachRouterToNetwork(ctx context.Context, netName string) error {
-	list, err := d.cli.ContainerList(ctx, container.ListOptions{
-		Filters: filters.NewArgs(filters.Arg("label", routerLabel)),
-	})
-	if err != nil {
-		return fmt.Errorf("list ingress routers: %w", err)
-	}
-	for _, c := range list {
-		if err := d.AttachNetwork(ctx, c.ID, netName); err != nil {
-			return fmt.Errorf("attach router %s to %s: %w", c.ID, netName, err)
-		}
-	}
-	return nil
 }
 
 func (d *Driver) EnsureNetwork(ctx context.Context, name string, labels map[string]string) (string, error) {
@@ -185,26 +188,50 @@ func (d *Driver) removeNetwork(ctx context.Context, name string) error {
 //
 // secrets is per-call, not a Driver field, because Sprint 3 resolves secrets
 // per-environment — a single Driver reconciles instances across many envs.
-func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets SecretSource) (string, bool, error) {
+func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets SecretSource) (Ensured, error) {
 	env, err := d.resolveEnv(cs.Env, cs.SecretEnv, secrets)
 	if err != nil {
-		return "", false, err
+		return Ensured{}, err
 	}
 	fingerprint, err := containerFingerprint(cs, env)
 	if err != nil {
-		return "", false, err
+		return Ensured{}, err
 	}
+	recreated := false
 	if existing, err := d.findByName(ctx, cs.Name); err != nil {
-		return "", false, err
+		return Ensured{}, err
 	} else if existing != "" {
 		inspected, err := d.cli.ContainerInspect(ctx, existing)
 		if err != nil {
-			return "", false, err
+			return Ensured{}, err
 		}
 		if inspected.Config.Labels[specFingerprintLabel] != fingerprint {
-			return "", false, fmt.Errorf("container %s configuration changed; automatic stateful recreation is not supported", cs.Name)
+			return Ensured{}, fmt.Errorf("container %s configuration changed; automatic stateful recreation is not supported", cs.Name)
 		}
-		return existing, false, nil
+		// Publish state is checked against the container instead of through the
+		// fingerprint, and the difference matters — see containerFingerprint for
+		// why it is excluded from the hash. An adopted container whose bindings
+		// disagree with the spec cannot be corrected in place: Docker fixes port
+		// bindings at create time.
+		//
+		// The bindings are read from HostConfig rather than NetworkSettings
+		// because findByName adopts stopped containers too (All: true), and a
+		// stopped container reports no active ports however it was created.
+		if have := publishedPort(inspected.HostConfig); have != cs.PublishPort {
+			if cs.Labels["cc.swappable"] != "true" {
+				return Ensured{}, fmt.Errorf("container %s publishes port %d but %d is required, and a pinned container is not replaced automatically", cs.Name, have, cs.PublishPort)
+			}
+			// Safe only because it is swappable: the platform already destroys
+			// and rebuilds these on every rollout, and the parser forbids one
+			// from mounting a writable named volume, so there is no state to
+			// lose. A pinned container reaches the branch above instead.
+			if err := d.StopRemove(ctx, existing); err != nil {
+				return Ensured{}, fmt.Errorf("replace %s to correct its published port: %w", cs.Name, err)
+			}
+			recreated = true
+		} else {
+			return Ensured{ID: existing}, nil
+		}
 	}
 
 	labels := make(map[string]string, len(cs.Labels)+1)
@@ -236,6 +263,7 @@ func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets 
 		}
 	}
 
+	var publish nat.PortMap
 	binds := make([]string, 0, len(cs.Mounts))
 	for _, m := range cs.Mounts {
 		bind := m.Volume + ":" + m.Target
@@ -245,8 +273,21 @@ func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets 
 		binds = append(binds, bind)
 	}
 
+	// Host port 0 lets Docker allocate. Both halves are needed: ExposedPorts on
+	// the container config and PortBindings on the host config — binding without
+	// exposing silently publishes nothing.
+	if cs.PublishPort > 0 {
+		port, err := nat.NewPort("tcp", strconv.Itoa(cs.PublishPort))
+		if err != nil {
+			return Ensured{}, fmt.Errorf("ingress port %d: %w", cs.PublishPort, err)
+		}
+		cfg.ExposedPorts = nat.PortSet{port: struct{}{}}
+		publish = nat.PortMap{port: []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: "0"}}}
+	}
+
 	hostCfg := &container.HostConfig{
 		Binds:         binds,
+		PortBindings:  publish,
 		RestartPolicy: restartPolicy(cs.Restart),
 		Resources: container.Resources{
 			NanoCPUs:   int64(cs.CPUMillis) * 1_000_000, // millicpu → nanocpu
@@ -268,18 +309,60 @@ func (d *Driver) EnsureContainer(ctx context.Context, cs ContainerSpec, secrets 
 
 	created, err := d.cli.ContainerCreate(ctx, cfg, hostCfg, netCfg, nil, cs.Name)
 	if err != nil {
-		return "", false, fmt.Errorf("create %s: %w", cs.Name, err)
+		return Ensured{}, fmt.Errorf("create %s: %w", cs.Name, err)
 	}
 	if err := d.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
-		return "", false, fmt.Errorf("start %s: %w", cs.Name, err)
+		return Ensured{}, fmt.Errorf("start %s: %w", cs.Name, err)
 	}
-	return created.ID, true, nil
+	return Ensured{ID: created.ID, Created: !recreated, Recreated: recreated}, nil
+}
+
+// Ensured is the outcome of EnsureContainer. Recreated is separate from Created
+// because replacing a container that already existed is a disruptive act on a
+// possibly-live service, and the agent logs it — whereas creating one that was
+// never there is the ordinary path and says nothing.
+type Ensured struct {
+	ID        string
+	Created   bool
+	Recreated bool
+}
+
+// publishedPort reports the container-side port this container was created to
+// publish, 0 for none. Only one is ever published (the ingress service's), so
+// the first binding found is the answer.
+func publishedPort(hostCfg *container.HostConfig) int {
+	if hostCfg == nil {
+		return 0
+	}
+	for port, bindings := range hostCfg.PortBindings {
+		if len(bindings) == 0 {
+			continue
+		}
+		if n, err := strconv.Atoi(port.Port()); err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 func containerFingerprint(cs ContainerSpec, resolvedEnv map[string]string) (string, error) {
 	// Network and management labels are intentionally excluded: a pinned
 	// container joins each new revision network while its runtime configuration
 	// remains the same. Secret plaintext participates only through this hash.
+	//
+	// PublishPort is excluded too, and that exclusion is load-bearing rather
+	// than an oversight. Putting it in would make every container created
+	// before published-port routing existed fail adoption permanently — the
+	// mismatch branch is a hard error, not a rebuild, so the agent would error
+	// every tick on a healthy live deployment instead of converging. It is
+	// verified directly against the container's bindings in EnsureContainer
+	// instead, which is strictly stronger for a property Docker will tell you
+	// about: it also catches a binding lost for some reason nothing hashed.
+	//
+	// Do not "fix" this by adding the field. The hard error on a fingerprint
+	// mismatch is deliberate — it is what stops a rotated secret being claimed
+	// by an adopted container still running the old value, forcing the change
+	// through a new revision and its blue/green rollout instead.
 	v := struct {
 		Image       string
 		Env         map[string]string
@@ -316,6 +399,13 @@ type Health struct {
 	Status       string // "healthy" | "unhealthy" | "starting" | "" (none)
 	ExitCode     int
 	RestartCount int
+	// PublishedPort is the host port Docker assigned to this container's ingress
+	// port, 0 when nothing is published. It rides along on this inspect rather
+	// than taking a call of its own: reconcile already inspects every container
+	// on every tick, and a second round-trip per instance per tick to read one
+	// integer is a poor trade. The port is only knowable after the container
+	// exists, which is why it is observed here and not predicted at create time.
+	PublishedPort int
 }
 
 func (d *Driver) InspectHealth(ctx context.Context, containerID string) (Health, error) {
@@ -331,7 +421,34 @@ func (d *Driver) InspectHealth(ctx context.Context, containerID string) (Health,
 	if c.State.Health != nil {
 		h.Status = c.State.Health.Status
 	}
+	if c.NetworkSettings != nil {
+		h.PublishedPort = firstPublishedPort(c.NetworkSettings.Ports)
+	}
 	return h, nil
+}
+
+// firstPublishedPort reads back what Docker allocated. Only one port is ever
+// published per container, but Docker lists a binding per address family, so
+// IPv4 is preferred and any binding accepted — the two carry the same host port
+// and picking whichever came first would make the value depend on map order.
+func firstPublishedPort(ports nat.PortMap) int {
+	best := 0
+	for _, bindings := range ports {
+		for _, b := range bindings {
+			if b.HostPort == "" {
+				continue
+			}
+			n, err := strconv.Atoi(b.HostPort)
+			if err != nil || n <= 0 {
+				continue
+			}
+			if b.HostIP == "0.0.0.0" {
+				return n
+			}
+			best = n
+		}
+	}
+	return best
 }
 
 func (d *Driver) StopRemove(ctx context.Context, containerID string) error {
@@ -373,18 +490,25 @@ func (d *Driver) ListManaged(ctx context.Context, env8 string) ([]Managed, error
 // they are not the same case:
 //
 //   - Pinned containers, which are attached to every revision network.
-//   - The platform's own ingress router, which the agent attached to this
-//     network while the revision was live (AttachRouterToNetwork). It carries
-//     cc.role=ingress-router and no cc.env, so a bare "is this container
-//     managed for this env" test reads it as foreign.
+//   - The platform's own ingress router. It carries cc.role=ingress-router and
+//     no cc.env, so a bare "is this container managed for this env" test reads
+//     it as foreign.
 //
 // That second case used to make every superseded revision network unprunable
 // for the life of the environment — one leaked network per revision, each
 // holding a router endpoint, until Docker's address pool ran out and new
-// rollouts could no longer create a network. Disconnecting the router here is
-// safe precisely because this network is not in `wanted`: no live revision uses
-// it, and the routes Traefik serves resolve to container names on the live
-// revision's network, which is in `wanted` and never touched.
+// rollouts could no longer create a network.
+//
+// The agent no longer attaches the router to anything, so it should stop
+// arriving here. The exemption stays anyway, because removing it would strand
+// exactly the networks that motivated it: an endpoint outlives the code that
+// created it, and a daemon upgraded across that change still has a router on
+// every revision network it once served. Keeping it is what lets those
+// converge instead of leaking until someone removes them by hand.
+//
+// Disconnecting the router here is safe precisely because this network is not
+// in `wanted`: no live revision uses it, and traffic reaches the live revision
+// at its node's address rather than over this network.
 //
 // Anything else attached is genuinely unmanaged — a human, another tool — and
 // still blocks removal rather than being yanked off a network it may be using.
@@ -478,19 +602,22 @@ func (d *Driver) RemoveEnv(ctx context.Context, env8 string) error {
 	}
 	for _, n := range nets {
 		// Disconnect whatever is still attached, including containers this
-		// platform does not manage. The shared router joins a revision network
-		// to serve that environment's ingress and carries no cc.env label, so
-		// the container sweep above never removes it — and Docker refuses to
-		// remove a network that still has an active endpoint. Left alone, this
-		// failed teardown for every preview that had an ingress, which is all
-		// of them.
+		// platform does not manage. Docker refuses to remove a network that
+		// still has an active endpoint, and because networks are removed before
+		// volumes, one stuck network used to fail teardown for every preview
+		// that had an ingress — which was all of them — leaving the durable
+		// state a tombstone exists to destroy alive indefinitely.
+		//
+		// The router was the original cause and no longer attaches itself, but
+		// this stays unconditional on purpose. It is not "handle the router",
+		// it is "a tombstone is an instruction to destroy": anything at all on
+		// this network — a leftover router endpoint, a shell someone attached
+		// to debug — must not be able to strand a volume.
 		//
 		// PruneRevisionNetworks deliberately does the opposite and refuses to
 		// touch a network with an unmanaged container attached. That is right
 		// for routine GC, which runs constantly and must never yank a live
-		// container off a network. It is wrong here: RemoveEnv runs only on an
-		// explicit tombstone the control plane wrote durably before deleting
-		// the environment, and that is an instruction to destroy, not a guess.
+		// container off a network. It is wrong here, for the reason above.
 		inspected, err := d.cli.NetworkInspect(ctx, n.ID, network.InspectOptions{})
 		if err != nil && !errdefs.IsNotFound(err) {
 			problems = append(problems, fmt.Errorf("inspect network %s: %w", n.Name, err))

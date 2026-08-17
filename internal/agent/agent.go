@@ -32,6 +32,10 @@ type Config struct {
 	PollInterval    time.Duration
 	IdentityFile    string
 	NodeTokenFile   string
+	// Labels advertise what this node can do, and the scheduler places against
+	// them. `ingress=true` marks a node running the platform's router: until the
+	// mesh lands, a stack with an ingress service is only servable there.
+	Labels map[string]string
 }
 
 // Run registers this node and then reconciles on a ticker until ctx is done.
@@ -89,7 +93,7 @@ func (c *cpClient) register(ctx context.Context, cfg Config) (uuid.UUID, error) 
 	err := c.do(ctx, http.MethodPost, "/v1/nodes/register", map[string]any{
 		"org": cfg.Org, "hostname": cfg.Hostname, "advertise_addr": cfg.AdvertiseAddr,
 		"cpu_millis": cfg.CPUMillis, "memory_bytes": cfg.MemoryBytes, "agent_version": "sprint2-a",
-		"age_recipient": c.id.Recipient(),
+		"age_recipient": c.id.Recipient(), "labels": cfg.Labels,
 	}, &out)
 	if err != nil {
 		return uuid.Nil, err
@@ -141,6 +145,12 @@ func (c *cpClient) reconcileTick(ctx context.Context, nodeID uuid.UUID, rec *Rec
 	// left for the next tick, which reattempts both unconditionally.
 	for _, f := range failures {
 		log.Warn("env cleanup failed", "env", f.Env8, "op", f.Op, "err", f.Err)
+	}
+	for _, rep := range reports {
+		if rep.Recreated {
+			log.Warn("container replaced to correct its published port",
+				"instance", rep.InstanceID, "container", rep.ContainerID)
+		}
 	}
 	if len(reports) > 0 {
 		if err := c.do(ctx, http.MethodPost, "/v1/nodes/"+nodeID.String()+"/report",
@@ -198,6 +208,7 @@ func toReportDTO(reports []Report) []map[string]any {
 			"instance_id": r.InstanceID, "state": string(r.State),
 			"container_id": r.ContainerID, "health_status": r.HealthStatus,
 			"last_error": r.LastError, "restart_count": r.RestartCount, "set_started": r.SetStarted,
+			"ingress_port": r.IngressPort,
 		}
 	}
 	return out

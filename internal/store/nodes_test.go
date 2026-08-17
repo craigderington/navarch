@@ -3,6 +3,8 @@ package store
 import (
 	"errors"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestRegisterNodeIsUpsertByHostname(t *testing.T) {
@@ -170,4 +172,153 @@ func TestGetOrganizationBySlugUnknownIsNotFound(t *testing.T) {
 	if _, err := st.GetOrganizationBySlug(testCtx(t), uniq("nope")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
+}
+
+// The regression this fixes: draining was a one-way door. DrainNode set
+// `draining`, Heartbeat's CASE preserved it and RegisterNode's upsert preserved
+// it too, so a drained node could not be returned to service by any means the
+// product offered — reinstalling the agent did not clear it, and only hand-
+// written SQL against a live database did.
+func TestUncordonReturnsADrainedNodeToService(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	n, err := st.RegisterNode(testCtx(t), RegisterNodeParams{
+		OrgID: org.ID, Hostname: uniq("node"), AdvertiseAddr: "10.0.0.4",
+		CPUMillis: 1000, MemoryBytes: 1 << 30,
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := st.DrainNode(testCtx(t), n.ID); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	if err := st.UncordonNode(testCtx(t), n.ID); err != nil {
+		t.Fatalf("uncordon: %v", err)
+	}
+
+	got, err := st.GetNode(testCtx(t), n.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	// Registration set last_heartbeat=now(), so this node is provably live and
+	// the derived state must be ready rather than unreachable.
+	if got.State != NodeReady {
+		t.Fatalf("a freshly-heartbeating node must come back ready, got %q", got.State)
+	}
+	ready, err := st.ListReadyNodes(testCtx(t), org.ID)
+	if err != nil {
+		t.Fatalf("list ready: %v", err)
+	}
+	// The state column alone is not the point — the node has to be schedulable
+	// again, which is a different query with its own freshness filter.
+	var found bool
+	for _, r := range ready {
+		if r.ID == n.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("an uncordoned node must be schedulable again, ready pool: %+v", ready)
+	}
+}
+
+// Uncordon lifts an operator's intent not to schedule here; it does not assert
+// the node is alive, and only the heartbeat knows that. A node drained long
+// enough to go stale must come back `unreachable`, not `ready` — declaring
+// otherwise would show a state in `navarch node list` that nothing has any
+// evidence for.
+func TestUncordonDerivesStateFromLastHeartbeat(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	n, err := st.RegisterNode(testCtx(t), RegisterNodeParams{
+		OrgID: org.ID, Hostname: uniq("node"), AdvertiseAddr: "10.0.0.4",
+		CPUMillis: 1000, MemoryBytes: 1 << 30,
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := st.DrainNode(testCtx(t), n.ID); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	// Backdate past the same 30s window MarkStaleNodesUnreachable uses.
+	if _, err := st.pool.Exec(testCtx(t),
+		`UPDATE nodes SET last_heartbeat = now() - interval '5 minutes' WHERE id=$1`, n.ID); err != nil {
+		t.Fatalf("backdate heartbeat: %v", err)
+	}
+
+	if err := st.UncordonNode(testCtx(t), n.ID); err != nil {
+		t.Fatalf("uncordon: %v", err)
+	}
+
+	got, err := st.GetNode(testCtx(t), n.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.State != NodeUnreachable {
+		t.Fatalf("a silent node must come back unreachable, got %q", got.State)
+	}
+	// And it heals itself: the agent proving liveness is what makes it ready,
+	// which is the same path any unreachable node takes.
+	if err := st.Heartbeat(testCtx(t), n.ID, HeartbeatParams{}); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	got, err = st.GetNode(testCtx(t), n.ID)
+	if err != nil {
+		t.Fatalf("get after heartbeat: %v", err)
+	}
+	if got.State != NodeReady {
+		t.Fatalf("a heartbeat must promote an uncordoned node to ready, got %q", got.State)
+	}
+}
+
+func TestUncordonEdgeCases(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	newNodeFor := func() *Node {
+		t.Helper()
+		n, err := st.RegisterNode(testCtx(t), RegisterNodeParams{
+			OrgID: org.ID, Hostname: uniq("node"), AdvertiseAddr: "10.0.0.4",
+			CPUMillis: 1000, MemoryBytes: 1 << 30,
+		})
+		if err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		return n
+	}
+
+	t.Run("a node that is not draining is left alone", func(t *testing.T) {
+		// Idempotent rather than an error: the caller asked for a node that is
+		// not cordoned, and that is what they have. Reporting ErrNotFound here
+		// would say "no such node" about a node plainly in the listing.
+		n := newNodeFor()
+		if err := st.UncordonNode(testCtx(t), n.ID); err != nil {
+			t.Fatalf("uncordon of a ready node must succeed: %v", err)
+		}
+		got, _ := st.GetNode(testCtx(t), n.ID)
+		if got.State != NodeReady {
+			t.Fatalf("state changed unexpectedly: %q", got.State)
+		}
+	})
+
+	t.Run("a retired node is refused", func(t *testing.T) {
+		// Heartbeat will not touch a retired node, so resurrecting one would
+		// leave a row claiming readiness that nothing can ever update again.
+		n := newNodeFor()
+		if _, err := st.pool.Exec(testCtx(t),
+			`UPDATE nodes SET state='retired' WHERE id=$1`, n.ID); err != nil {
+			t.Fatalf("retire: %v", err)
+		}
+		err := st.UncordonNode(testCtx(t), n.ID)
+		if !errors.Is(err, ErrConflict) {
+			t.Fatalf("expected ErrConflict for a retired node, got %v", err)
+		}
+	})
+
+	t.Run("an unknown node is not found", func(t *testing.T) {
+		err := st.UncordonNode(testCtx(t), uuid.New())
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
 }
