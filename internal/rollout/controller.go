@@ -25,6 +25,17 @@ type Controller struct {
 	rtr          RouterSync
 	startTimeout time.Duration
 	orgID        *uuid.UUID
+	// routeStrand is how long a node may go unheard from before its routes are
+	// withdrawn. Zero means never, which is why it is not defaulted here: the
+	// production constructor sets it from config, and the test constructors
+	// choose deliberately rather than inheriting a number.
+	routeStrand time.Duration
+}
+
+// WithRouteStrand sets how long a node may go unheard from before its routes
+// are withdrawn. Applied by the control plane from COMPOSECTL_ROUTE_STRAND_SECONDS.
+func WithRouteStrand(d time.Duration) func(*Controller) {
+	return func(c *Controller) { c.routeStrand = d }
 }
 
 func newControllerForOrg(st *store.Store, log *slog.Logger, rtr RouterSync, orgID uuid.UUID) *Controller {
@@ -38,8 +49,12 @@ func (c *Controller) listRollouts(ctx context.Context, states ...store.Deploymen
 	return c.st.ListRolloutsInStateForOrg(ctx, *c.orgID, states...)
 }
 
-func NewController(st *store.Store, log *slog.Logger, rtr RouterSync) *Controller {
-	return &Controller{st: st, log: log, rtr: rtr, startTimeout: 5 * time.Minute}
+func NewController(st *store.Store, log *slog.Logger, rtr RouterSync, opts ...func(*Controller)) *Controller {
+	c := &Controller{st: st, log: log, rtr: rtr, startTimeout: 5 * time.Minute}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // ReconcileOnce advances every active rollout by the aggregate of its
@@ -83,7 +98,7 @@ func (c *Controller) ReconcileOnce(ctx context.Context) error {
 }
 
 func (c *Controller) syncRouter(ctx context.Context) error {
-	routes, err := c.st.ListLiveRoutes(ctx)
+	routes, err := c.st.ListLiveRoutes(ctx, c.routeStrand)
 	if err != nil {
 		return err
 	}

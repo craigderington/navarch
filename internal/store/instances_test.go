@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -37,7 +38,34 @@ func deployFixture(t *testing.T, st *Store) (*Deployment, *Node) {
 	if err != nil {
 		t.Fatalf("RegisterNode: %v", err)
 	}
+	// RegisterNode does not set last_heartbeat — a real agent registers and then
+	// heartbeats a moment later. Routing requires a node the control plane has
+	// actually heard from (a NULL heartbeat is what MarkStaleNodesUnreachable
+	// already treats as stale), so a fixture node that never heartbeats is not
+	// routable and every route test would be asserting reachability by accident.
+	if _, err := st.Pool().Exec(testCtx(t),
+		`UPDATE nodes SET last_heartbeat=now() WHERE id=$1`, node.ID); err != nil {
+		t.Fatalf("seed heartbeat: %v", err)
+	}
 	return dep, node
+}
+
+// placeInstances writes desired rows AND binds the environment to the node, the
+// way PlaceDeployment does on every real path. CreateServiceInstances alone has
+// no production caller: using it without the binding builds an environment with
+// live instances and no home node, which the scheduler cannot produce and which
+// makes routing tests assert against a state that does not occur.
+func placeInstances(t *testing.T, st *Store, depID, nodeID uuid.UUID, insts []NewInstance) {
+	t.Helper()
+	if err := st.CreateServiceInstances(testCtx(t), depID, nodeID, insts); err != nil {
+		t.Fatalf("CreateServiceInstances: %v", err)
+	}
+	if _, err := st.Pool().Exec(testCtx(t), `
+		UPDATE environments SET home_node_id=$2
+		WHERE id=(SELECT environment_id FROM deployments WHERE id=$1)
+	`, depID, nodeID); err != nil {
+		t.Fatalf("bind home node: %v", err)
+	}
 }
 
 func twoServiceSpec() *spec.DeploymentSpec {
@@ -182,7 +210,7 @@ func TestListLiveRoutes(t *testing.T) {
 	dep, node := deployFixture(t, st)
 	_, _ = st.Pool().Exec(testCtx(t),
 		`UPDATE environments SET hostname='prod.example.com' WHERE id=(SELECT environment_id FROM deployments WHERE id=$1)`, dep.ID)
-	_ = st.CreateServiceInstances(testCtx(t), dep.ID, node.ID, []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "x"}})
+	placeInstances(t, st, dep.ID, node.ID, []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "x"}})
 	for _, s := range []DeploymentState{DeployScheduling, DeployStarting, DeployHealthy} {
 		if err := st.UpdateDeploymentState(testCtx(t), dep.ID, s, ""); err != nil {
 			t.Fatalf("advance %s: %v", s, err)
@@ -201,7 +229,7 @@ func TestListLiveRoutes(t *testing.T) {
 		t.Fatalf("ReportInstance: %v", err)
 	}
 
-	routes, err := st.ListLiveRoutes(testCtx(t))
+	routes, err := st.ListLiveRoutes(testCtx(t), 120*time.Second)
 	if err != nil {
 		t.Fatalf("ListLiveRoutes: %v", err)
 	}
@@ -238,7 +266,7 @@ func TestListLiveRoutesReturnsRouteBeforeThePortIsReported(t *testing.T) {
 	dep, node := deployFixture(t, st)
 	_, _ = st.Pool().Exec(testCtx(t),
 		`UPDATE environments SET hostname='unreported.example.com' WHERE id=(SELECT environment_id FROM deployments WHERE id=$1)`, dep.ID)
-	_ = st.CreateServiceInstances(testCtx(t), dep.ID, node.ID, []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "x"}})
+	placeInstances(t, st, dep.ID, node.ID, []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "x"}})
 	for _, s := range []DeploymentState{DeployScheduling, DeployStarting, DeployHealthy} {
 		if err := st.UpdateDeploymentState(testCtx(t), dep.ID, s, ""); err != nil {
 			t.Fatalf("advance %s: %v", s, err)
@@ -248,7 +276,7 @@ func TestListLiveRoutesReturnsRouteBeforeThePortIsReported(t *testing.T) {
 		t.Fatalf("promote: %v", err)
 	}
 
-	routes, err := st.ListLiveRoutes(testCtx(t))
+	routes, err := st.ListLiveRoutes(testCtx(t), 120*time.Second)
 	if err != nil {
 		t.Fatalf("ListLiveRoutes: %v", err)
 	}
@@ -492,5 +520,214 @@ func TestEnvironmentsHomedPerNode(t *testing.T) {
 	}
 	if homed[nodeA.ID] != 2 || homed[nodeB.ID] != 1 {
 		t.Fatalf("want A=2 B=1, got %v", homed)
+	}
+}
+
+// Routes must follow reachability, and — the half that matters more — come back.
+// Withdrawal is derived, never written: nothing in ListLiveRoutes mutates, so a
+// node that heartbeats again is routable on the next resync. A withdrawal that
+// could not reverse would make a thirty-second blip permanent.
+func TestListLiveRoutesWithdrawsAndRestoresWithNodeReachability(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+	dep, node := deployFixture(t, st)
+	_, _ = st.Pool().Exec(ctx,
+		`UPDATE environments SET hostname='strand.example.com' WHERE id=(SELECT environment_id FROM deployments WHERE id=$1)`, dep.ID)
+	placeInstances(t, st, dep.ID, node.ID, []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "x"}})
+	for _, s := range []DeploymentState{DeployScheduling, DeployStarting, DeployHealthy} {
+		if err := st.UpdateDeploymentState(ctx, dep.ID, s, ""); err != nil {
+			t.Fatalf("advance %s: %v", s, err)
+		}
+	}
+	if _, err := st.PromoteDeployment(ctx, dep.ID); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if err := st.ReportInstance(ctx, node.ID, instanceIDFor(t, st, dep.ID, "api"),
+		ObservedInstance{State: InstanceRunning, ContainerID: "c-api", IngressPort: 32768}); err != nil {
+		t.Fatalf("ReportInstance: %v", err)
+	}
+	// A fresh heartbeat, so the node is genuinely reachable to begin with.
+	if _, err := st.Pool().Exec(ctx, `UPDATE nodes SET state='ready', last_heartbeat=now() WHERE id=$1`, node.ID); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	const strand = 120 * time.Second
+
+	if !routeServed(t, st, "strand.example.com", strand) {
+		t.Fatal("a live deployment on a reachable node must be routed")
+	}
+
+	// Unreachable state, heartbeat still fresh: proves the STATE clause alone.
+	if _, err := st.Pool().Exec(ctx, `UPDATE nodes SET state='unreachable' WHERE id=$1`, node.ID); err != nil {
+		t.Fatalf("mark unreachable: %v", err)
+	}
+	if routeServed(t, st, "strand.example.com", strand) {
+		t.Fatal("an unreachable node's route must be withdrawn")
+	}
+
+	// Back to ready: the route returns without anything being rewritten.
+	if _, err := st.Pool().Exec(ctx, `UPDATE nodes SET state='ready', last_heartbeat=now() WHERE id=$1`, node.ID); err != nil {
+		t.Fatalf("heal: %v", err)
+	}
+	if !routeServed(t, st, "strand.example.com", strand) {
+		t.Fatal("a healed node's route must come back — withdrawal is derived, not written")
+	}
+
+	// Ready state, ancient heartbeat: proves the HEARTBEAT clause independently.
+	// A test that only flipped state would still pass with this clause deleted.
+	if _, err := st.Pool().Exec(ctx,
+		`UPDATE nodes SET state='ready', last_heartbeat=now() - interval '10 minutes' WHERE id=$1`, node.ID); err != nil {
+		t.Fatalf("age the heartbeat: %v", err)
+	}
+	if routeServed(t, st, "strand.example.com", strand) {
+		t.Fatal("a node silent past the strand threshold must not be routed even while its state reads ready")
+	}
+
+	// Strand of zero means never withdraw — the "I would rather hang than 404"
+	// position, available as a dial rather than only as an omission.
+	if !routeServed(t, st, "strand.example.com", 0) {
+		t.Fatal("a zero strand must disable withdrawal entirely")
+	}
+}
+
+func routeServed(t *testing.T, st *Store, hostname string, strand time.Duration) bool {
+	t.Helper()
+	routes, err := st.ListLiveRoutes(testCtx(t), strand)
+	if err != nil {
+		t.Fatalf("ListLiveRoutes: %v", err)
+	}
+	for _, r := range routes {
+		if r.Hostname == hostname {
+			return true
+		}
+	}
+	return false
+}
+
+// Re-homing works THROUGH the strict placement path, never around it: the
+// release clears the binding and the ordinary PlaceDeployment then accepts a
+// different node. That ordering is the whole design — relaxing PlaceDeployment
+// instead would be the Slice A data-loss bug with a sympathetic motive.
+func TestReleaseEnvironmentHomeThenPlaceElsewhere(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	// Stateless by construction: one swappable service, no volumes.
+	statelessSpec := &spec.DeploymentSpec{
+		SpecVersion: spec.SpecVersion,
+		Services: map[string]spec.Service{
+			"api": {Name: "api", Image: "nginx:alpine", Swappable: true,
+				Limits: spec.ResourceLimit{CPUMillis: 250, MemoryBytes: 256 << 20}},
+		},
+	}
+	sv, err := st.CreateStackVersion(ctx, stack.ID, "raw", statelessSpec, "t")
+	if err != nil {
+		t.Fatalf("CreateStackVersion: %v", err)
+	}
+	env, err := st.CreateEnvironment(ctx, CreateEnvironmentParams{StackID: stack.ID, Slug: "prod"})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	nodeA, nodeB := newNode(t, st, org.ID), newNode(t, st, org.ID)
+	insts := []NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "nginx:alpine"}}
+
+	d1, _ := st.CreateDeployment(ctx, CreateDeploymentParams{
+		EnvironmentID: env.ID, StackVersionID: sv.ID, ResolvedSpec: sv.Spec, CreatedBy: "t"})
+	if err := st.PlaceDeployment(ctx, d1.ID, nodeA.ID, insts, 250, 256<<20); err != nil {
+		t.Fatalf("first placement: %v", err)
+	}
+	// Make it live so the release judges durability from a real resolved spec.
+	for _, s := range []DeploymentState{DeployScheduling, DeployStarting, DeployHealthy} {
+		_ = st.UpdateDeploymentState(ctx, d1.ID, s, "")
+	}
+	if _, err := st.PromoteDeployment(ctx, d1.ID); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+
+	if err := st.ReleaseEnvironmentHome(ctx, env.ID); err != nil {
+		t.Fatalf("release a stateless environment: %v", err)
+	}
+	got, _ := st.GetEnvironment(ctx, env.ID)
+	if got.HomeNodeID != nil {
+		t.Fatalf("release must clear the binding, got %v", got.HomeNodeID)
+	}
+
+	// The unmodified strict path now accepts a different node.
+	_ = st.UpdateDeploymentState(ctx, d1.ID, DeploySuperseded, "")
+	d2, _ := st.CreateDeployment(ctx, CreateDeploymentParams{
+		EnvironmentID: env.ID, StackVersionID: sv.ID, ResolvedSpec: sv.Spec, CreatedBy: "t"})
+	if err := st.PlaceDeployment(ctx, d2.ID, nodeB.ID, insts, 250, 256<<20); err != nil {
+		t.Fatalf("placement on a new node after release: %v", err)
+	}
+	got, _ = st.GetEnvironment(ctx, env.ID)
+	if got.HomeNodeID == nil || *got.HomeNodeID != nodeB.ID {
+		t.Fatalf("re-homed environment should be bound to %s, got %v", nodeB.ID, got.HomeNodeID)
+	}
+}
+
+// The two ways an environment can be stuck. The read-only case is the one a
+// naive check gets wrong: read-only describes the container's access to the
+// bytes, not where the bytes live, so the volume is still on that node and the
+// environment still cannot move.
+func TestReleaseEnvironmentHomeRefusesDurableState(t *testing.T) {
+	limits := spec.ResourceLimit{CPUMillis: 250, MemoryBytes: 256 << 20}
+	cases := map[string]*spec.DeploymentSpec{
+		"a pinned service": {
+			SpecVersion: spec.SpecVersion,
+			Services: map[string]spec.Service{
+				"api": {Name: "api", Image: "nginx:alpine", Swappable: true, Limits: limits},
+				"db":  {Name: "db", Image: "postgres:16-alpine", Swappable: false, Limits: limits},
+			},
+		},
+		"a READ-ONLY volume on a swappable service": {
+			SpecVersion: spec.SpecVersion,
+			Volumes:     map[string]spec.Volume{"assets": {}},
+			Services: map[string]spec.Service{
+				"api": {Name: "api", Image: "nginx:alpine", Swappable: true, Limits: limits,
+					Mounts: []spec.Mount{{Kind: spec.MountVolume, Source: "assets", Target: "/assets", ReadOnly: true}}},
+			},
+		},
+	}
+	for name, ds := range cases {
+		t.Run(name, func(t *testing.T) {
+			st := testStore(t)
+			ctx := testCtx(t)
+			org := newOrg(t, st)
+			app := newApp(t, st, org.ID)
+			stack := newStack(t, st, app.ID)
+			sv, err := st.CreateStackVersion(ctx, stack.ID, "raw", ds, "t")
+			if err != nil {
+				t.Fatalf("CreateStackVersion: %v", err)
+			}
+			env, err := st.CreateEnvironment(ctx, CreateEnvironmentParams{StackID: stack.ID, Slug: "prod"})
+			if err != nil {
+				t.Fatalf("CreateEnvironment: %v", err)
+			}
+			node := newNode(t, st, org.ID)
+			dep, _ := st.CreateDeployment(ctx, CreateDeploymentParams{
+				EnvironmentID: env.ID, StackVersionID: sv.ID, ResolvedSpec: sv.Spec, CreatedBy: "t"})
+			if err := st.PlaceDeployment(ctx, dep.ID, node.ID,
+				[]NewInstance{{ServiceName: "api", Swappable: true, ImageRef: "nginx:alpine"}}, 250, 256<<20); err != nil {
+				t.Fatalf("place: %v", err)
+			}
+			for _, s := range []DeploymentState{DeployScheduling, DeployStarting, DeployHealthy} {
+				_ = st.UpdateDeploymentState(ctx, dep.ID, s, "")
+			}
+			if _, err := st.PromoteDeployment(ctx, dep.ID); err != nil {
+				t.Fatalf("promote: %v", err)
+			}
+
+			err = st.ReleaseEnvironmentHome(ctx, env.ID)
+			if !errors.Is(err, ErrConflict) {
+				t.Fatalf("releasing durable state must be ErrConflict, got %v", err)
+			}
+			// The binding must be untouched — a refused release that half-applied
+			// would be worse than one that never ran.
+			got, _ := st.GetEnvironment(ctx, env.ID)
+			if got.HomeNodeID == nil || *got.HomeNodeID != node.ID {
+				t.Fatalf("a refused release must leave the binding intact, got %v", got.HomeNodeID)
+			}
+		})
 	}
 }

@@ -90,6 +90,7 @@ services:
       COMPOSECTL_LISTEN_ADDR: 0.0.0.0:8417
       COMPOSECTL_AGENT_TOKEN: dev-token-change-me
       COMPOSECTL_ROUTER_DIR: /dynamic
+      COMPOSECTL_ROUTE_STRAND_SECONDS: ${NAVARCH_ROUTE_STRAND_SECONDS:-120}
     volumes:
       - traefik-dynamic:/dynamic
     ports:

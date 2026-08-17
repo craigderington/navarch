@@ -35,16 +35,35 @@ type Config struct {
 	// (pr-142-hello.<domain>). The default resolves on a dev box without DNS
 	// because Traefik routes on the Host header alone.
 	PreviewDomain string
+	// RouteStrandSeconds is how long a node may go unheard from before its
+	// environments' routes are withdrawn. Deliberately separate from the 30s
+	// staleness window that stops the scheduler placing new work: that decision
+	// is cheap and reversible, while cutting live traffic is neither, and a
+	// threshold chosen for one should not silently govern the other.
+	//
+	// The trade is real in both directions. With whole-stack placement there is
+	// exactly one copy of an environment, so withdrawing the route of a node
+	// that is unreachable-but-serving turns a working service into a 404. Keeping
+	// it means every request to a genuinely dead node hangs until it times out —
+	// and a timeout is the least diagnosable failure there is. Withdrawal wins
+	// because a fast 404 can be explained and a hang cannot, but it waits four
+	// times as long as the scheduler does before deciding.
+	//
+	// Zero means never withdraw, which is a legitimate operator preference: some
+	// would rather have a hang than a 404. It is not the default because the
+	// default should be the one that is easier to diagnose.
+	RouteStrandSeconds int
 }
 
 func Load() (*Config, error) {
 	c := &Config{
-		DatabaseURL:   os.Getenv("COMPOSECTL_DATABASE_URL"),
-		ListenAddr:    ListenAddr(),
-		AgentToken:    os.Getenv("COMPOSECTL_AGENT_TOKEN"),
-		TickInterval:  time.Duration(intEnv("COMPOSECTL_TICK_SECONDS", 1)) * time.Second,
-		RouterDir:     os.Getenv("COMPOSECTL_ROUTER_DIR"),
-		PreviewDomain: envOr("COMPOSECTL_PREVIEW_DOMAIN", "preview.localhost"),
+		DatabaseURL:        os.Getenv("COMPOSECTL_DATABASE_URL"),
+		ListenAddr:         ListenAddr(),
+		AgentToken:         os.Getenv("COMPOSECTL_AGENT_TOKEN"),
+		TickInterval:       time.Duration(intEnv("COMPOSECTL_TICK_SECONDS", 1)) * time.Second,
+		RouterDir:          os.Getenv("COMPOSECTL_ROUTER_DIR"),
+		PreviewDomain:      envOr("COMPOSECTL_PREVIEW_DOMAIN", "preview.localhost"),
+		RouteStrandSeconds: intEnv("COMPOSECTL_ROUTE_STRAND_SECONDS", 120),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("COMPOSECTL_DATABASE_URL is required")

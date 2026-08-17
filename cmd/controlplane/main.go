@@ -132,7 +132,8 @@ func run(log *slog.Logger) error {
 		log.Info("router enabled", "dir", cfg.RouterDir)
 	}
 	sched := rollout.NewScheduler(st, log)
-	ctrl := rollout.NewController(st, log, rtr)
+	ctrl := rollout.NewController(st, log, rtr,
+		rollout.WithRouteStrand(time.Duration(cfg.RouteStrandSeconds)*time.Second))
 	reaper := rollout.NewReaper(st, log).WithLogBuffer(logBuffer)
 	go runLoop(ctx, cfg.TickInterval, log, metricsRegistry, "scheduler", sched.ScheduleOnce)
 	go runLoop(ctx, cfg.TickInterval, log, metricsRegistry, "controller", ctrl.ReconcileOnce)
