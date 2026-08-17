@@ -192,6 +192,8 @@ func dispatch(ctx context.Context, e env, cmd string, args []string) error {
 		return cmdLogs(ctx, e, args)
 	case "wait":
 		return cmdWait(ctx, e, args)
+	case "tui":
+		return cmdTUI(ctx, e, args)
 	default:
 		return usage(fmt.Sprintf("unknown command %q\n\n%s", cmd, rootHelp))
 	}
@@ -308,6 +310,7 @@ Commands:
   events               Organization audit timeline
   logs ENV             Container output for one service (--service, --follow)
   wait ID              Block until a deployment reaches a state
+  tui                  Read-only full-screen dashboard for the fleet
   version              Print CLI version
 
 Naming things:

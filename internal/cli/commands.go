@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/craig/composectl/internal/client"
+	"github.com/craig/composectl/internal/tui"
 )
 
 func cmdHealth(ctx context.Context, e env) error {
@@ -862,4 +863,31 @@ func takeBoolFlag(args []string, names ...string) ([]string, bool) {
 		out = append(out, a)
 	}
 	return out, found
+}
+
+// cmdTUI hands the terminal to internal/tui. The client is built here and
+// passed in rather than reconstructed there, so URL, token and config
+// precedence keep exactly one implementation — a second one would be a second
+// set of rules to keep in step, and they would drift on the first change.
+//
+// Output format is deliberately ignored: --output json alongside a full-screen
+// dashboard is a contradiction, and silently honouring one of them would be
+// worse than picking the screen the user plainly asked for.
+func cmdTUI(ctx context.Context, e env, args []string) error {
+	flags, _, err := flagMap(args)
+	if err != nil {
+		return err
+	}
+	opts := tui.Options{Org: flags["org"], LogFile: flags["log-file"]}
+	if flags["refresh"] != "" {
+		d, err := time.ParseDuration(flags["refresh"])
+		if err != nil {
+			return usage("--refresh must be a duration such as 2s or 500ms")
+		}
+		if d <= 0 {
+			return usage("--refresh must be positive")
+		}
+		opts.Refresh = d
+	}
+	return tui.Run(ctx, e.c, opts)
 }
