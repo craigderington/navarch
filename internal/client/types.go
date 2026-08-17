@@ -66,15 +66,15 @@ type Deployment struct {
 }
 
 type Node struct {
-	ID               string     `json:"id"`
-	OrgID            string     `json:"org_id"`
-	Hostname         string     `json:"hostname"`
-	AdvertiseAddr    string     `json:"advertise_addr"`
-	State            string     `json:"state"`
-	CPUMillis        int        `json:"cpu_millis"`
-	MemoryBytes      int64      `json:"memory_bytes"`
-	AllocCPUMillis   int        `json:"alloc_cpu_millis"`
-	AllocMemoryBytes int64      `json:"alloc_memory_bytes"`
+	ID               string            `json:"id"`
+	OrgID            string            `json:"org_id"`
+	Hostname         string            `json:"hostname"`
+	AdvertiseAddr    string            `json:"advertise_addr"`
+	State            string            `json:"state"`
+	CPUMillis        int               `json:"cpu_millis"`
+	MemoryBytes      int64             `json:"memory_bytes"`
+	AllocCPUMillis   int               `json:"alloc_cpu_millis"`
+	AllocMemoryBytes int64             `json:"alloc_memory_bytes"`
 	AgentVersion     string            `json:"agent_version,omitempty"`
 	AgeRecipient     string            `json:"age_recipient,omitempty"`
 	Labels           map[string]string `json:"labels,omitempty"`
@@ -120,4 +120,34 @@ type Preview struct {
 
 type Health struct {
 	Status string `json:"status"`
+}
+
+// LogRequest is an instruction the control plane recorded, not the output it
+// produced. The output arrives as chunks and is never stored — see LogChunk.
+type LogRequest struct {
+	ID            string    `json:"id"`
+	InstanceID    string    `json:"instance_id"`
+	EnvironmentID string    `json:"environment_id"`
+	ServiceName   string    `json:"service_name"`
+	TailLines     int       `json:"tail_lines"`
+	Follow        bool      `json:"follow"`
+	State         string    `json:"state"`
+	LastError     string    `json:"last_error,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	ExpiresAt     time.Time `json:"expires_at"`
+}
+
+type LogChunk struct {
+	Seq  int64  `json:"seq"`
+	Data string `json:"data"`
+}
+
+// LogPage is one read of a request's buffer. Dropped reports that output was
+// discarded to stay under the control plane's memory cap, which a reader must
+// surface: a gap shown as continuous output is a lie about what a container did.
+type LogPage struct {
+	Request *LogRequest `json:"request"`
+	Chunks  []LogChunk  `json:"chunks"`
+	Cursor  int64       `json:"cursor"`
+	Dropped bool        `json:"dropped"`
 }

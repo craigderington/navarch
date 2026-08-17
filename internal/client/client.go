@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -420,4 +421,39 @@ func (c *Client) roundTrip(ctx context.Context, method, path string, body io.Rea
 		return nil
 	}
 	return json.Unmarshal(raw, out)
+}
+
+// OpenLogs asks the control plane to fetch a service's container output. It
+// returns an instruction, not output: the node has to be polled before anything
+// exists to read, so the caller then reads with LogPage.
+func (c *Client) OpenLogs(ctx context.Context, envID, service string, tail int, follow bool) (*LogRequest, error) {
+	body := map[string]any{"service": service, "follow": follow}
+	if tail > 0 {
+		body["tail"] = tail
+	}
+	var out LogRequest
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/envs/"+envID+"/logs", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ReadLogs returns whatever has arrived for a request since cursor.
+func (c *Client) ReadLogs(ctx context.Context, requestID string, cursor int64) (*LogPage, error) {
+	path := "/v1/logs/" + requestID
+	if cursor > 0 {
+		path += "?cursor=" + strconv.FormatInt(cursor, 10)
+	}
+	var out LogPage
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// CloseLogs ends a tail. Worth calling even on the way out of a failure: a
+// followed request left open keeps its node reading Docker every tick for output
+// that nothing will collect.
+func (c *Client) CloseLogs(ctx context.Context, requestID string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/logs/"+requestID, nil, nil)
 }

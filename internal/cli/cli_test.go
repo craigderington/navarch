@@ -197,3 +197,37 @@ func TestEnvPrecedenceAcrossTheRename(t *testing.T) {
 		})
 	}
 }
+
+// flagMap consumes the argument after every flag it sees, which is correct for
+// --tail 50 and wrong for --follow. A bare boolean at the end of the line — the
+// natural place to put it — would otherwise fail with "requires a value", and
+// one in the middle would silently eat the next argument.
+func TestTakeBoolFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantRest []string
+		wantSet  bool
+	}{
+		{"absent", []string{"env", "--service", "api"}, []string{"env", "--service", "api"}, false},
+		{"trailing", []string{"env", "--service", "api", "--follow"}, []string{"env", "--service", "api"}, true},
+		{"in the middle, does not eat the next argument",
+			[]string{"env", "--follow", "--service", "api"}, []string{"env", "--service", "api"}, true},
+		{"short form", []string{"env", "-f"}, []string{"env"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rest, set := takeBoolFlag(tt.args, "follow", "f")
+			if set != tt.wantSet {
+				t.Fatalf("set = %v, want %v", set, tt.wantSet)
+			}
+			if strings.Join(rest, " ") != strings.Join(tt.wantRest, " ") {
+				t.Fatalf("rest = %v, want %v", rest, tt.wantRest)
+			}
+			// The surviving arguments must still parse, which is the whole point.
+			if _, _, err := flagMap(rest); err != nil {
+				t.Fatalf("remaining args do not parse: %v", err)
+			}
+		})
+	}
+}
