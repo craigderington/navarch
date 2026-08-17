@@ -195,6 +195,20 @@ func (c *Client) ListEnvs(ctx context.Context, stackID string) ([]Environment, e
 	return out.Envs, nil
 }
 
+// ListOrgEnvironments returns every environment in an organization in one
+// request. Prefer it to walking apps → stacks → environments: that walk costs a
+// request per app and per stack, which grows with the catalog rather than with
+// what the caller is actually showing.
+func (c *Client) ListOrgEnvironments(ctx context.Context, orgID string) ([]OrgEnvironment, error) {
+	var out struct {
+		Envs []OrgEnvironment `json:"environments"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/orgs/"+orgID+"/environments", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Envs, nil
+}
+
 func (c *Client) GetEnv(ctx context.Context, id string) (*Environment, error) {
 	var out Environment
 	if err := c.do(ctx, http.MethodGet, "/v1/envs/"+id, nil, &out); err != nil {

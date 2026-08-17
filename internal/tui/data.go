@@ -99,71 +99,43 @@ func deploymentsCmd(c *client.Client, envID string) tea.Cmd {
 	}
 }
 
-// catalogCmd walks apps → stacks → environments.
+// catalogCmd fetches every environment in the org in one request.
 //
-// There is no endpoint that lists an organization's environments, so this is
-// one request per app plus one per stack — 15 against the dev fleet, growing
-// with the catalog. That cost is the whole reason the walk runs on the slow
-// tier and only while its pane is in front.
+// It used to walk apps → stacks → environments: one request per app plus one
+// per stack, which against the dev fleet had reached 115 for a single screen
+// and grew with the catalog rather than with what was on display. That cost is
+// why the pane was put on the slow tier; the endpoint removed the cost, and the
+// tier can be revisited on its own merits rather than to hide request volume.
 //
-// Sequential on purpose: the control plane is also running the scheduler,
-// controller and reaper loops, and a burst of parallel requests from a
-// dashboard is a poor trade for latency on a screen that refreshes every twenty
-// seconds. A partial failure returns what it has rather than nothing — a
-// catalog missing one app is more useful than an empty pane, and the error is
-// still reported.
+// The server returns the app and stack slugs with each environment, so the tree
+// never has to be reassembled here, and the home node's hostname, which no
+// client could previously show without walking up to the org to list its nodes.
 func catalogCmd(c *client.Client, orgID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), walkTimeout)
 		defer cancel()
 
-		apps, err := c.ListApps(ctx, orgID)
+		envs, err := c.ListOrgEnvironments(ctx, orgID)
 		if err != nil {
 			return catalogMsg{at: time.Now(), err: err}
 		}
-		var rows []envRow
-		var firstErr error
-		for _, app := range apps {
-			stacks, err := c.ListStacks(ctx, app.ID)
-			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				continue
-			}
-			for _, st := range stacks {
-				envs, err := c.ListEnvs(ctx, st.ID)
-				if err != nil {
-					if firstErr == nil {
-						firstErr = err
-					}
-					continue
-				}
-				for _, e := range envs {
-					rows = append(rows, envRow{
-						App: app.Slug, Stack: st.Slug, Env: e.Slug,
-						EnvID:    e.ID,
-						Hostname: e.Hostname,
-						// LiveDeploymentID is the environment's own record of
-						// what is serving, so "has a live deployment" costs
-						// nothing extra here — the revisions themselves are
-						// fetched only for the selected row.
-						HasLive:   e.LiveDeploymentID != nil && *e.LiveDeploymentID != "",
-						Ephemeral: e.Ephemeral,
-						ExpiresAt: e.ExpiresAt,
-					})
-				}
-			}
+		rows := make([]envRow, 0, len(envs))
+		for _, e := range envs {
+			rows = append(rows, envRow{
+				App: e.AppSlug, Stack: e.StackSlug, Env: e.Slug,
+				EnvID:    e.ID,
+				Hostname: e.Hostname,
+				HomeNode: e.HomeNode,
+				// LiveDeploymentID is the environment's own record of what is
+				// serving, so "has a live deployment" costs nothing extra here —
+				// the revisions themselves are fetched only for the selected row.
+				HasLive:   e.LiveDeploymentID != nil && *e.LiveDeploymentID != "",
+				Ephemeral: e.Ephemeral,
+				ExpiresAt: e.ExpiresAt,
+			})
 		}
-		sort.Slice(rows, func(i, j int) bool {
-			if rows[i].App != rows[j].App {
-				return rows[i].App < rows[j].App
-			}
-			if rows[i].Stack != rows[j].Stack {
-				return rows[i].Stack < rows[j].Stack
-			}
-			return rows[i].Env < rows[j].Env
-		})
-		return catalogMsg{rows: rows, at: time.Now(), err: firstErr}
+		// The server orders by app, stack, env; sorting again here would be a
+		// second opinion about the same thing, and the two would drift.
+		return catalogMsg{rows: rows, at: time.Now(), err: nil}
 	}
 }

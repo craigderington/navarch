@@ -209,7 +209,7 @@ func (m Model) envsPane(maxRows int) string {
 	if listRows < 2 {
 		listRows = 2
 	}
-	head := "  " + styleHead.Render(pad("APP/STACK/ENV", 40)+pad("HOSTNAME", 32)+pad("LIVE", 6)+"TTL")
+	head := "  " + styleHead.Render(pad("APP/STACK/ENV", 36)+pad("HOSTNAME", 28)+pad("NODE", 13)+pad("LIVE", 6)+"TTL")
 	rows := make([]string, 0, len(m.envs))
 	for i, e := range m.envs {
 		live := styleDim.Render(pad("no", 6))
@@ -223,7 +223,14 @@ func (m Model) envsPane(maxRows int) string {
 				ttl = styleWarn.Render("expires in " + age(e.ExpiresAt.Sub(m.now)))
 			}
 		}
-		line := pad(e.App+"/"+e.Stack+"/"+e.Env, 40) + pad(orDash(e.Hostname), 32) + live + ttl
+		// An unplaced environment is a real state, not missing data: nothing is
+		// bound until the first deployment. Dimming it says "not yet" rather
+		// than letting a blank column read as a failed lookup.
+		node := styleDim.Render(pad("unplaced", 13))
+		if e.HomeNode != "" {
+			node = pad(e.HomeNode, 13)
+		}
+		line := pad(e.App+"/"+e.Stack+"/"+e.Env, 36) + pad(orDash(e.Hostname), 28) + node + live + ttl
 		rows = append(rows, m.cursorLine(paneEnvs, i, line))
 	}
 	return head + "\n" + window(rows, m.cursor[paneEnvs], listRows) + "\n\n" + m.revisions()

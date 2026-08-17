@@ -220,6 +220,7 @@ func (s *Server) routes() {
 	// Applications
 	s.mux.HandleFunc("POST /v1/orgs/{org}/apps", s.handleCreateApp)
 	s.mux.HandleFunc("GET /v1/orgs/{org}/apps", s.handleListApps)
+	s.mux.HandleFunc("GET /v1/orgs/{org}/environments", s.handleListOrgEnvs)
 
 	// Stacks — POST accepts a compose file, parses it, stores a version
 	s.mux.HandleFunc("POST /v1/apps/{app}/stacks", s.handleCreateStack)

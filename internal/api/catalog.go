@@ -289,6 +289,30 @@ func (s *Server) handleListEnvs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"environments": envs})
 }
 
+// handleListOrgEnvs answers the question the catalog hierarchy cannot: every
+// environment in an organization, in one request. Clients previously walked
+// apps → stacks → environments, which costs a request per app and per stack and
+// grows with the catalog rather than with what is being displayed.
+//
+// The org scoping lives in the store query, which reaches the org through
+// stacks and applications because an environment carries no org id of its own.
+// That makes the store method the tenant boundary for this route.
+func (s *Server) handleListOrgEnvs(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 10*time.Second)
+	defer cancel()
+
+	orgID, ok := pathUUID(w, r, "org")
+	if !ok {
+		return
+	}
+	envs, err := s.st.ListOrgEnvironments(ctx, orgID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"environments": envs})
+}
+
 // pathUUID reads a UUID path parameter, writing a 400 and reporting false
 // when it is not one. Every handler taking an id needs this, so it lives
 // here rather than being repeated per handler.

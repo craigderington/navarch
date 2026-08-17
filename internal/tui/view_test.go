@@ -158,3 +158,30 @@ func stripANSI(s string) string {
 	}
 	return b.String()
 }
+
+// The home node is the point of the catalog endpoint for a multi-node fleet:
+// "which machine holds this environment's data" is the first thing an operator
+// asks, and before Sprint 5's client work no front end could answer it.
+//
+// Unplaced is a real state, not missing data — an environment is bound by its
+// FIRST deployment — so the pane must say so rather than leave a blank that
+// reads as a lookup that failed.
+func TestEnvsPaneShowsHomeNodeAndNamesTheUnplaced(t *testing.T) {
+	m := ready(t0)
+	m.active = paneEnvs
+	m = send(m, catalogMsg{at: t0, rows: []envRow{
+		{App: "shop", Stack: "main", Env: "prod", EnvID: "e1", Hostname: "shop.example.com", HomeNode: "dev-node-3"},
+		{App: "shop", Stack: "main", Env: "staging", EnvID: "e2"},
+	}})
+
+	out := m.View()
+	if !strings.Contains(out, "dev-node-3") {
+		t.Fatalf("placed environment must show its node:\n%s", out)
+	}
+	if !strings.Contains(out, "unplaced") {
+		t.Fatalf("an environment with no home node must be named unplaced:\n%s", out)
+	}
+	if !strings.Contains(out, "NODE") {
+		t.Fatalf("the pane needs a NODE column header:\n%s", out)
+	}
+}

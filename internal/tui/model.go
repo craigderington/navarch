@@ -76,6 +76,10 @@ type envRow struct {
 	Env      string
 	EnvID    string
 	Hostname string
+	// HomeNode is the hostname of the node holding this environment's durable
+	// state, empty when it has never been placed. In a multi-node fleet it is
+	// the first thing an operator wants to know about an environment.
+	HomeNode string
 	// HasLive distinguishes "deployed and serving" from "created but never
 	// rolled out", which is the difference between an environment that is
 	// broken and one that is merely empty.
