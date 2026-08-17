@@ -404,3 +404,137 @@ func TestCreateEnvironmentRejectsBadSlug(t *testing.T) {
 		t.Fatalf("expected ErrInvalid, got %v", err)
 	}
 }
+
+// The tenant boundary for GET /v1/orgs/{org}/environments. An environment
+// carries no org id — it reaches one only through stacks and applications — so
+// the JOIN in ListOrgEnvironments *is* the isolation. Widening it hands one
+// tenant another's catalog: environment slugs, ingress hostnames, and which
+// node runs them. This codebase has been bitten by cross-tenant leakage before
+// (see the preview-hostname section of CLAUDE.md for why env8 exists), so the
+// scoping gets a test that fails if the WHERE clause stops discriminating.
+func TestListOrgEnvironmentsIsScopedToItsOrg(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+
+	mine := envInOrg(t, st, "mine")
+	theirs := envInOrg(t, st, "theirs")
+
+	got, err := st.ListOrgEnvironments(ctx, mine.orgID)
+	if err != nil {
+		t.Fatalf("ListOrgEnvironments: %v", err)
+	}
+	var sawMine bool
+	for _, e := range got {
+		if e.ID == theirs.envID {
+			t.Fatalf("environment %s belongs to another organization and must not be listed", e.ID)
+		}
+		if e.ID == mine.envID {
+			sawMine = true
+		}
+	}
+	if !sawMine {
+		t.Fatalf("own environment %s missing from %d rows", mine.envID, len(got))
+	}
+	// Asserted both ways round: a query returning everything would pass the
+	// "mine is present" half on its own.
+	for _, e := range got {
+		if e.AppSlug == "" || e.StackSlug == "" {
+			t.Fatalf("row %s missing its catalog path: %+v", e.ID, e)
+		}
+	}
+}
+
+// An environment is bound to a node by its FIRST placement, so most of the
+// catalog is unplaced most of the time. The join that resolves the hostname
+// must be LEFT: an inner join would drop every never-deployed environment from
+// the listing, which is a far worse failure than a blank column because the
+// rows simply vanish.
+func TestListOrgEnvironmentsIncludesUnplacedAndResolvesHostnames(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+
+	f := envInOrg(t, st, "homed")
+	unplaced, err := st.CreateEnvironment(ctx, CreateEnvironmentParams{StackID: f.stackID, Slug: "unplaced"})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+
+	node := newNode(t, st, f.orgID)
+	if _, err := st.Pool().Exec(ctx,
+		`UPDATE environments SET home_node_id=$2 WHERE id=$1`, f.envID, node.ID); err != nil {
+		t.Fatalf("home the environment: %v", err)
+	}
+
+	got, err := st.ListOrgEnvironments(ctx, f.orgID)
+	if err != nil {
+		t.Fatalf("ListOrgEnvironments: %v", err)
+	}
+	var homed, blank *OrgEnvironment
+	for i := range got {
+		switch got[i].ID {
+		case f.envID:
+			homed = &got[i]
+		case unplaced.ID:
+			blank = &got[i]
+		}
+	}
+	if homed == nil || blank == nil {
+		t.Fatalf("expected both environments listed, got %d rows", len(got))
+	}
+	if homed.HomeNode != node.Hostname {
+		t.Fatalf("home node hostname = %q, want %q", homed.HomeNode, node.Hostname)
+	}
+	if blank.HomeNode != "" || blank.HomeNodeID != nil {
+		t.Fatalf("an unplaced environment must report no node, got %+v", blank)
+	}
+}
+
+// GetEnvironment and ListEnvironments resolve the hostname too — the CLI's
+// `env get` and `env list` read through those, not through the org listing.
+func TestEnvironmentReadsResolveHomeNodeHostname(t *testing.T) {
+	st := testStore(t)
+	ctx := testCtx(t)
+	f := envInOrg(t, st, "reads")
+	node := newNode(t, st, f.orgID)
+	if _, err := st.Pool().Exec(ctx,
+		`UPDATE environments SET home_node_id=$2 WHERE id=$1`, f.envID, node.ID); err != nil {
+		t.Fatalf("home the environment: %v", err)
+	}
+
+	one, err := st.GetEnvironment(ctx, f.envID)
+	if err != nil {
+		t.Fatalf("GetEnvironment: %v", err)
+	}
+	if one.HomeNode != node.Hostname {
+		t.Fatalf("GetEnvironment home node = %q, want %q", one.HomeNode, node.Hostname)
+	}
+
+	list, err := st.ListEnvironments(ctx, f.stackID)
+	if err != nil {
+		t.Fatalf("ListEnvironments: %v", err)
+	}
+	if len(list) == 0 || list[0].HomeNode != node.Hostname {
+		t.Fatalf("ListEnvironments home node = %+v, want %q", list, node.Hostname)
+	}
+}
+
+type orgEnvFixture struct {
+	orgID   uuid.UUID
+	stackID uuid.UUID
+	envID   uuid.UUID
+}
+
+// envInOrg builds org → app → stack → env, the whole chain the org scoping has
+// to traverse. Two of these in one test are two tenants.
+func envInOrg(t *testing.T, st *Store, label string) orgEnvFixture {
+	t.Helper()
+	ctx := testCtx(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	env, err := st.CreateEnvironment(ctx, CreateEnvironmentParams{StackID: stack.ID, Slug: label})
+	if err != nil {
+		t.Fatalf("CreateEnvironment(%s): %v", label, err)
+	}
+	return orgEnvFixture{orgID: org.ID, stackID: stack.ID, envID: env.ID}
+}

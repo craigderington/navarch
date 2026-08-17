@@ -28,6 +28,13 @@ type fakeDriver struct {
 	prunedNetworks  []string
 	pruneErrs       map[string]error
 
+	// logs is the canned output per container id, and logErrs the failures.
+	// logReads records what was asked for, so a test can assert the *bounds* a
+	// request carried rather than only the text it got back.
+	logs     map[string]string
+	logErrs  map[string]error
+	logReads []dockerd.LogOptions
+
 	// removeEnvCalls records every RemoveEnv invocation including the failing
 	// ones, which removedEnvs (successes only) cannot distinguish from a call
 	// that never happened.
@@ -82,6 +89,13 @@ func (f *fakeDriver) ListManaged(ctx context.Context, env8 string) ([]dockerd.Ma
 func (f *fakeDriver) PruneRevisionNetworks(ctx context.Context, env8 string, wanted map[string]bool) error {
 	f.prunedNetworks = append(f.prunedNetworks, env8)
 	return f.pruneErrs[env8]
+}
+func (f *fakeDriver) ContainerLogs(ctx context.Context, id string, opt dockerd.LogOptions) (string, error) {
+	f.logReads = append(f.logReads, opt)
+	if err, ok := f.logErrs[id]; ok {
+		return "", err
+	}
+	return f.logs[id], nil
 }
 func (f *fakeDriver) EnsureVolume(ctx context.Context, name string, l map[string]string) error {
 	f.volumes = append(f.volumes, name)
@@ -538,5 +552,51 @@ func TestReportSurfacesARecreatedContainer(t *testing.T) {
 		[]store.DesiredInstance{desired("api", true, dockerd.Health{})}, nil, nil)
 	if len(reports) != 1 || !reports[0].Recreated {
 		t.Fatalf("a replacement must reach the report, got %+v", reports)
+	}
+}
+
+func TestCollectLogsReadsWhatItIsToldTo(t *testing.T) {
+	f := &fakeDriver{logs: map[string]string{"c-api": "hello from api\n"}}
+	r := NewReconciler(f)
+	since := time.Now().Add(-30 * time.Second)
+	id := uuid.New()
+
+	got := r.CollectLogs(context.Background(), []store.PendingLogRequest{
+		{ID: id, ContainerID: "c-api", TailLines: 50, SinceAt: &since},
+	})
+	if len(got) != 1 || got[0].RequestID != id.String() {
+		t.Fatalf("expected one delivery for %s, got %+v", id, got)
+	}
+	if got[0].Data != "hello from api\n" || got[0].Err != "" {
+		t.Fatalf("unexpected delivery: %+v", got[0])
+	}
+	// The bounds must reach Docker. Without them one request drags a chatty
+	// container's whole history through the agent and the control plane.
+	if len(f.logReads) != 1 || f.logReads[0].Tail != 50 || !f.logReads[0].Since.Equal(since) {
+		t.Fatalf("bounds not passed through: %+v", f.logReads)
+	}
+}
+
+// A tail routinely outlives a blue/green flip, so a container that has gone is
+// the common case. It must come back as a per-request error the requester can
+// act on, never as an abort that costs every other delivery in the batch.
+func TestCollectLogsIsolatesOneFailure(t *testing.T) {
+	f := &fakeDriver{
+		logs:    map[string]string{"c-ok": "still here\n"},
+		logErrs: map[string]error{"c-gone": errors.New("No such container: c-gone")},
+	}
+	r := NewReconciler(f)
+	got := r.CollectLogs(context.Background(), []store.PendingLogRequest{
+		{ID: uuid.New(), ContainerID: "c-gone", TailLines: 10},
+		{ID: uuid.New(), ContainerID: "c-ok", TailLines: 10},
+	})
+	if len(got) != 2 {
+		t.Fatalf("a failure must not drop the other deliveries, got %d", len(got))
+	}
+	if got[0].Err == "" || got[0].Data != "" {
+		t.Fatalf("failed read must carry a reason and no data: %+v", got[0])
+	}
+	if got[1].Data != "still here\n" || got[1].Err != "" {
+		t.Fatalf("healthy read spoiled by its neighbour: %+v", got[1])
 	}
 }

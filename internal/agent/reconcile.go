@@ -36,6 +36,10 @@ type DockerDriver interface {
 	// that removes pinned containers or volumes, and it fires only on an
 	// explicit tombstone.
 	RemoveEnv(ctx context.Context, env8 string) error
+	// ContainerLogs reads a bounded slice of one container's output. The agent
+	// never chooses which container: the control plane resolves that and hands
+	// down an id, so a node can only be asked for output it already runs.
+	ContainerLogs(ctx context.Context, containerID string, opt dockerd.LogOptions) (string, error)
 }
 
 type Report struct {

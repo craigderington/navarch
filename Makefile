@@ -97,6 +97,10 @@ demo-preview: ## Create a preview env with inherited secrets, then watch it expi
 demo-fleet: ## Two nodes, two daemons: ingress stack pinned to the router node, worker stack spread to the other
 	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-fleet.sh
 
+.PHONY: demo-logs
+demo-logs: ## Read a container's output through the fleet, and prove none of it is stored
+	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-logs.sh
+
 .PHONY: agent-logs
 agent-logs: ## Tail the node agent logs
 	docker compose logs -f $(AGENTS)

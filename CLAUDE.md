@@ -611,6 +611,55 @@ test never holds the id). This was flakiness before Slice A's scoring existed �
 see the comment on `TestSetSecretWithNoReadyNodeIsUnprocessable`, which dodges it
 by using its own org — and a hazard for anything sharing the database after.
 
+**Log content never reaches Postgres, and that is the design.** A `log_requests`
+row is an instruction — which container, what bounds, follow or not — and never
+an answer. Container stdout routinely carries secrets (an app logging its own
+`DATABASE_URL`, a debug dump of the environment, a stack trace with a token), so
+persisting it would put plaintext at rest, in every backup and readable by anyone
+with database access, undoing what age sealing and agent-side decryption buy.
+Chunks live in `internal/logbuf`: bounded per request and in total, freed when the
+requester reads them, when the tail closes, or when the reaper sweeps the row —
+buffers first, then rows, because a deleted row with live content behind it is
+the one outcome the design promises to avoid. Content still transits
+control-plane *memory*, which is unavoidable while the agent has no inbound
+server, and must never reach a log line. `make demo-logs` asserts the negative:
+no column of `log_requests` may hold content.
+
+**The control plane resolves service→container; the agent is told what to read.**
+An agent that could be asked for an arbitrary container id would be one
+compromised control plane away from reading every tenant's output on that node.
+Bounds live in the store, not the handler: the agent acts on whatever the row
+says and cannot know a number is unreasonable. `Tail` counts lines and a line has
+no length limit, so `dockerd` caps bytes too and says so in the output — a
+silently short answer is indistinguishable from a container that stopped logging.
+
+**Two routes end in `/logs` and authorize differently.**
+`POST /v1/nodes/{id}/logs` is a node delivering and takes that node's token;
+`POST /v1/envs/{env}/logs` and `GET`/`DELETE /v1/logs/{id}` are operator-facing.
+`nodeAgentPathID` matches on the `/v1/nodes/` prefix for exactly this reason — a
+node token that could open tails would read any environment, and an operator
+token demanded on the delivery path would stop every agent answering.
+
+**The TUI observes; it never acts.** `internal/tui` is read-only by design —
+every destructive operation stays in the CLI, where it is explicit, scriptable
+and reviewable. `TestNoKeyPerformsAnAction` pins it, so adding "just one" action
+means deleting a test that explains why not. It is a second consumer of
+`internal/client`, never a second protocol: nothing in the package knows a URL or
+a JSON shape, and `navarch tui` builds the client and passes it in so URL/token
+precedence keeps one implementation. The charmbracelet tree links into `navarch`
+only — `go list -deps ./cmd/controlplane` and `./cmd/agent` must show none of it,
+the same guard shape as the Docker SDK.
+
+**A failed refresh keeps the previous timestamp.** The data on screen really is
+that old; advancing it would make "the control plane stopped answering"
+indistinguishable from "nothing is happening", which is precisely when the
+distinction matters. Panes also do not cost the same and the poll cadence
+reflects it: fleet, events and health are one request each, while the environment
+catalog is a walk of apps → stacks → envs (15 requests against the dev fleet,
+growing with the catalog) because **no endpoint lists an organization's
+environments** — that walk runs on a slow tier and only while its pane is in
+front. Adding `GET /v1/orgs/{org}/environments` would collapse it to one request.
+
 **An empty router config is a file with no `http` section — never an empty
 one.** Traefik's parser refuses an element with no children, so `routers: {}`
 fails the *whole* file with `routers cannot be a standalone element`, and

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/craig/composectl/internal/client"
+	"github.com/craig/composectl/internal/tui"
 )
 
 func cmdHealth(ctx context.Context, e env) error {
@@ -264,9 +265,9 @@ func cmdEnv(ctx context.Context, e env, args []string) error {
 			if ev.LiveDeploymentID != nil {
 				live = *ev.LiveDeploymentID
 			}
-			rows = append(rows, []string{ev.ID, ev.Slug, ev.Hostname, ev.Strategy, live})
+			rows = append(rows, []string{ev.ID, ev.Slug, ev.Hostname, ev.Strategy, homeNode(ev.HomeNode), live})
 		}
-		return emit(e, envs, []string{"ID", "SLUG", "HOSTNAME", "STRATEGY", "LIVE"}, rows)
+		return emit(e, envs, []string{"ID", "SLUG", "HOSTNAME", "STRATEGY", "NODE", "LIVE"}, rows)
 	case "create":
 		flags, pos, err := flagMap(args[1:])
 		if err != nil {
@@ -304,7 +305,8 @@ func cmdEnv(ctx context.Context, e env, args []string) error {
 		if ev.LiveDeploymentID != nil {
 			live = *ev.LiveDeploymentID
 		}
-		return emitOne(e, ev, []string{"ID", "SLUG", "HOSTNAME", "LIVE"}, []string{ev.ID, ev.Slug, ev.Hostname, live})
+		return emitOne(e, ev, []string{"ID", "SLUG", "HOSTNAME", "NODE", "LIVE"},
+			[]string{ev.ID, ev.Slug, ev.Hostname, homeNode(ev.HomeNode), live})
 	default:
 		return usage("usage: navarch env list|create|get ...")
 	}
@@ -757,4 +759,149 @@ func formatLabels(l map[string]string) string {
 		parts = append(parts, k+"="+l[k])
 	}
 	return strings.Join(parts, ",")
+}
+
+// cmdLogs prints a service's container output.
+//
+// The latency is stated in the header rather than hidden. Output reaches here by
+// the agent's poll, so a follow runs a tick or two behind — and a user who
+// believes they are watching live will read a lull as a silent container and go
+// hunting for a fault that is not there.
+func cmdLogs(ctx context.Context, e env, args []string) error {
+	// flagMap treats every flag as taking a value, so a bare --follow would
+	// swallow the next argument — or fail outright when it is last, which is
+	// where anyone would naturally put it. Lift the boolean out first.
+	args, follow := takeBoolFlag(args, "follow", "f")
+	flags, pos, err := flagMap(args)
+	if err != nil {
+		return err
+	}
+	if len(pos) < 1 {
+		return usage("usage: navarch logs ORG/APP/STACK/ENV --service NAME [--tail N] [--follow]")
+	}
+	service := flags["service"]
+	if service == "" {
+		return usage("--service is required: logs are per service, not per stack")
+	}
+	tail := 0
+	if flags["tail"] != "" {
+		if tail, err = strconv.Atoi(flags["tail"]); err != nil || tail <= 0 {
+			return usage("--tail must be a positive number of lines")
+		}
+	}
+	envID, err := e.resolveEnv(ctx, pos[0])
+	if err != nil {
+		return err
+	}
+
+	req, err := e.c.OpenLogs(ctx, envID, service, tail, follow)
+	if err != nil {
+		return err
+	}
+	// Closing matters more than it looks: a followed request left pending keeps
+	// its node reading Docker every tick until the TTL expires it.
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = e.c.CloseLogs(closeCtx, req.ID)
+	}()
+
+	if follow {
+		fmt.Fprintf(e.err, "# following %s (delivered via the node's poll, so roughly a tick behind — not live)\n", service)
+	}
+
+	var cursor int64
+	deadline := time.Now().Add(30 * time.Second) // for a non-following read: how long to wait for the first delivery
+	for {
+		page, err := e.c.ReadLogs(ctx, req.ID, cursor)
+		if err != nil {
+			return err
+		}
+		cursor = page.Cursor
+		if page.Dropped {
+			fmt.Fprintln(e.err, "# output dropped: the container produced more than the control plane buffers")
+		}
+		for _, c := range page.Chunks {
+			fmt.Fprint(e.out, c.Data)
+		}
+		if page.Request != nil {
+			if page.Request.State == "failed" {
+				return fmt.Errorf("log read failed on the node: %s", page.Request.LastError)
+			}
+			// A non-following request is finished once the node has answered it.
+			if !follow && page.Request.State == "done" {
+				return nil
+			}
+		}
+		if !follow && len(page.Chunks) == 0 && time.Now().After(deadline) {
+			return fmt.Errorf("no output delivered within 30s — is the node reconciling?")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
+}
+
+// takeBoolFlag removes a valueless flag from args and reports whether it was
+// present, under any of the given names. It exists because flagMap consumes the
+// following argument for every flag it sees, which is right for --tail 50 and
+// wrong for --follow.
+func takeBoolFlag(args []string, names ...string) ([]string, bool) {
+	want := map[string]bool{}
+	for _, n := range names {
+		want["--"+n] = true
+		want["-"+n] = true
+	}
+	out := make([]string, 0, len(args))
+	found := false
+	for _, a := range args {
+		if want[a] {
+			found = true
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, found
+}
+
+// cmdTUI hands the terminal to internal/tui. The client is built here and
+// passed in rather than reconstructed there, so URL, token and config
+// precedence keep exactly one implementation — a second one would be a second
+// set of rules to keep in step, and they would drift on the first change.
+//
+// Output format is deliberately ignored: --output json alongside a full-screen
+// dashboard is a contradiction, and silently honouring one of them would be
+// worse than picking the screen the user plainly asked for.
+func cmdTUI(ctx context.Context, e env, args []string) error {
+	flags, _, err := flagMap(args)
+	if err != nil {
+		return err
+	}
+	opts := tui.Options{Org: flags["org"], LogFile: flags["log-file"]}
+	if flags["refresh"] != "" {
+		d, err := time.ParseDuration(flags["refresh"])
+		if err != nil {
+			return usage("--refresh must be a duration such as 2s or 500ms")
+		}
+		if d <= 0 {
+			return usage("--refresh must be positive")
+		}
+		opts.Refresh = d
+	}
+	return tui.Run(ctx, e.c, opts)
+}
+
+// homeNode renders which node holds an environment's durable state.
+//
+// An environment is bound to a node by its FIRST placement, so an empty value
+// means it has never been deployed — a real and common state, not missing data.
+// Saying "unplaced" distinguishes it from a blank cell, which in a table of
+// hostnames reads as something that failed to load.
+func homeNode(hostname string) string {
+	if hostname == "" {
+		return "unplaced"
+	}
+	return hostname
 }

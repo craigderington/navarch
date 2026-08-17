@@ -20,7 +20,9 @@ import (
 
 func slogDiscard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-func testServer(t *testing.T) *Server {
+// Variadic options so a test needing extra wiring — a log buffer, say — does not
+// have to build its own Server and drift from this one's setup.
+func testServer(t *testing.T, opts ...ServerOption) *Server {
 	t.Helper()
 	dsn := os.Getenv("COMPOSECTL_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -33,7 +35,7 @@ func testServer(t *testing.T) *Server {
 		t.Skipf("postgres unreachable — run make up: %v", err)
 	}
 	t.Cleanup(st.Close)
-	srv := NewServer(st, slogDiscard())
+	srv := NewServer(st, slogDiscard(), opts...)
 	srv.BootstrapDevOrg(ctx)
 	cleanupDevNodes(t, st)
 	return srv

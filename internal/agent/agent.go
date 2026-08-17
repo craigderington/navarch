@@ -114,6 +114,7 @@ func (c *cpClient) reconcileTick(ctx context.Context, nodeID uuid.UUID, rec *Rec
 		Instances    []store.DesiredInstance            `json:"instances"`
 		Secrets      map[string][]store.EncryptedSecret `json:"secrets"`
 		TeardownEnvs []string                           `json:"teardown_envs"`
+		LogRequests  []store.PendingLogRequest          `json:"log_requests"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/v1/nodes/"+nodeID.String()+"/desired-state", nil, &desired); err != nil {
 		return err
@@ -156,6 +157,20 @@ func (c *cpClient) reconcileTick(ctx context.Context, nodeID uuid.UUID, rec *Rec
 		if err := c.do(ctx, http.MethodPost, "/v1/nodes/"+nodeID.String()+"/report",
 			map[string]any{"instances": toReportDTO(reports)}, nil); err != nil {
 			return err
+		}
+	}
+
+	// Logs are delivered after the instance report, not before: reconciling is
+	// what the node is for, and a slow or enormous log read must never delay the
+	// state the controller needs to advance a rollout.
+	if deliveries := rec.CollectLogs(ctx, desired.LogRequests); len(deliveries) > 0 {
+		if err := c.do(ctx, http.MethodPost, "/v1/nodes/"+nodeID.String()+"/logs",
+			map[string]any{"deliveries": toLogDTO(deliveries)}, nil); err != nil {
+			// Deliberately not fatal to the tick. The request stays pending and
+			// the next tick retries it, whereas returning here would skip the
+			// heartbeat below and eventually mark a perfectly healthy node
+			// unreachable because somebody was tailing a log.
+			log.Warn("log delivery failed", "err", err)
 		}
 	}
 	allocCPU, allocMemory := desiredAllocations(desired.Instances)
@@ -209,6 +224,16 @@ func toReportDTO(reports []Report) []map[string]any {
 			"container_id": r.ContainerID, "health_status": r.HealthStatus,
 			"last_error": r.LastError, "restart_count": r.RestartCount, "set_started": r.SetStarted,
 			"ingress_port": r.IngressPort,
+		}
+	}
+	return out
+}
+
+func toLogDTO(ds []LogDelivery) []map[string]any {
+	out := make([]map[string]any, len(ds))
+	for i, d := range ds {
+		out[i] = map[string]any{
+			"request_id": d.RequestID, "data": d.Data, "error": d.Err,
 		}
 	}
 	return out

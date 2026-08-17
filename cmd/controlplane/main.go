@@ -16,6 +16,7 @@ import (
 
 	"github.com/craig/composectl/internal/api"
 	"github.com/craig/composectl/internal/config"
+	"github.com/craig/composectl/internal/logbuf"
 	"github.com/craig/composectl/internal/metrics"
 	"github.com/craig/composectl/internal/rollout"
 	"github.com/craig/composectl/internal/router"
@@ -100,10 +101,16 @@ func run(log *slog.Logger) error {
 	defer st.Close()
 
 	metricsRegistry := metrics.New()
+	// Delivered container output lives here and nowhere else. One buffer shared
+	// by the API that fills it and the reaper that frees it, because a second
+	// copy of this state would be a second place secrets could outlive the
+	// request that fetched them.
+	logBuffer := logbuf.New()
 	srvHandler := api.NewServer(st, log,
 		api.WithPreviewDomain(cfg.PreviewDomain),
 		api.WithBearerToken(cfg.AgentToken),
 		api.WithMetrics(metricsRegistry),
+		api.WithLogBuffer(logBuffer),
 	)
 
 	// Bootstrap the dev org the local agent registers into.
@@ -126,7 +133,7 @@ func run(log *slog.Logger) error {
 	}
 	sched := rollout.NewScheduler(st, log)
 	ctrl := rollout.NewController(st, log, rtr)
-	reaper := rollout.NewReaper(st, log)
+	reaper := rollout.NewReaper(st, log).WithLogBuffer(logBuffer)
 	go runLoop(ctx, cfg.TickInterval, log, metricsRegistry, "scheduler", sched.ScheduleOnce)
 	go runLoop(ctx, cfg.TickInterval, log, metricsRegistry, "controller", ctrl.ReconcileOnce)
 	go runLoop(ctx, cfg.TickInterval, log, metricsRegistry, "reaper", reaper.ReapOnce)

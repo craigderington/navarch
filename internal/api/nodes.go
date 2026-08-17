@@ -113,8 +113,18 @@ func (s *Server) handleDesiredState(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	// Log instructions ride the same poll. They are deliberately part of this
+	// response rather than a second endpoint: an agent that had to ask
+	// separately would either poll twice as often or learn about a tail a tick
+	// late, and neither buys anything.
+	logReqs, err := s.st.LogRequestsForNode(ctx, id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"instances": desired, "secrets": secretsByEnv, "teardown_envs": teardown,
+		"log_requests": logReqs,
 	})
 }
 

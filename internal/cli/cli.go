@@ -188,8 +188,12 @@ func dispatch(ctx context.Context, e env, cmd string, args []string) error {
 		return cmdNode(ctx, e, args)
 	case "events":
 		return cmdEvents(ctx, e, args)
+	case "logs":
+		return cmdLogs(ctx, e, args)
 	case "wait":
 		return cmdWait(ctx, e, args)
+	case "tui":
+		return cmdTUI(ctx, e, args)
 	default:
 		return usage(fmt.Sprintf("unknown command %q\n\n%s", cmd, rootHelp))
 	}
@@ -304,7 +308,9 @@ Commands:
   secret               Set, list, and delete environment secrets
   node                 List, get, drain, and uncordon nodes
   events               Organization audit timeline
+  logs ENV             Container output for one service (--service, --follow)
   wait ID              Block until a deployment reaches a state
+  tui                  Read-only full-screen dashboard for the fleet
   version              Print CLI version
 
 Naming things:
@@ -329,4 +335,5 @@ Examples:
   navarch deploy --env dev/preview/main/staging
   navarch secret set --env dev/preview/main/staging db_password hunter2
   navarch events --org dev --limit 20
+  navarch logs dev/shop/main/staging --service api --follow
 `

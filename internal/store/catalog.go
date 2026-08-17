@@ -199,6 +199,9 @@ func (s *Store) CreateEnvironment(ctx context.Context, p CreateEnvironmentParams
 			NULLIF($4, ''),
 			$5
 		)
+		-- No join for the home node here, unlike the read paths: a freshly
+		-- created environment has never been placed, so home_node_id is NULL by
+		-- construction and the hostname would always come back empty.
 		RETURNING id, stack_id, slug, strategy, COALESCE(hostname,''),
 		          config, live_deployment_id, ephemeral, expires_at, home_node_id, created_at
 	`, p.StackID, p.Slug, strategy, p.Hostname, configJSON).
@@ -215,9 +218,16 @@ func (s *Store) CreateEnvironment(ctx context.Context, p CreateEnvironmentParams
 
 func (s *Store) ListEnvironments(ctx context.Context, stackID uuid.UUID) ([]Environment, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, stack_id, slug, strategy, COALESCE(hostname,''),
-		       config, live_deployment_id, ephemeral, expires_at, home_node_id, created_at
-		FROM environments WHERE stack_id = $1 ORDER BY slug
+		SELECT e.id, e.stack_id, e.slug, e.strategy, COALESCE(e.hostname,''),
+		       e.config, e.live_deployment_id, e.ephemeral, e.expires_at,
+		       e.home_node_id, COALESCE(n.hostname,''), e.created_at
+		FROM environments e
+		-- LEFT, and that is load-bearing: home_node_id is NULL until the first
+		-- placement, so an inner join would silently drop every environment that
+		-- has never been deployed. A listing that omits rows is far worse than
+		-- one with a blank column.
+		LEFT JOIN nodes n ON n.id = e.home_node_id
+		WHERE e.stack_id = $1 ORDER BY e.slug
 	`, stackID)
 	if err != nil {
 		return nil, mapErr(err)
@@ -229,7 +239,8 @@ func (s *Store) ListEnvironments(ctx context.Context, stackID uuid.UUID) ([]Envi
 		var e Environment
 		var config []byte
 		if err := rows.Scan(&e.ID, &e.StackID, &e.Slug, &e.Strategy, &e.Hostname,
-			&config, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt, &e.HomeNodeID, &e.CreatedAt); err != nil {
+			&config, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt,
+			&e.HomeNodeID, &e.HomeNode, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(config, &e.Config); err != nil {
@@ -262,4 +273,53 @@ func orEmpty(m map[string]string) map[string]string {
 		return map[string]string{}
 	}
 	return m
+}
+
+// ListOrgEnvironments returns every environment in an organization, with the
+// app and stack that own it and the hostname of its home node.
+//
+// It exists because there was no way to ask that question: a client had to walk
+// apps → stacks → environments, one request per app and one per stack. Against
+// the dev fleet that had grown to 115 requests for a single screen, and it grows
+// with the catalog rather than with what is being looked at.
+//
+// The org is reached through the real ownership chain — environments carry no
+// org id, only a stack — so the scoping here IS the tenant boundary. Widening
+// this WHERE, or joining a way that lets a row in from another org, hands one
+// tenant another's catalog: environment slugs, hostnames, and which node runs
+// them. TestListOrgEnvironmentsIsScopedToItsOrg exists to fail if that happens.
+func (s *Store) ListOrgEnvironments(ctx context.Context, orgID uuid.UUID) ([]OrgEnvironment, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT e.id, e.stack_id, e.slug, e.strategy, COALESCE(e.hostname,''),
+		       e.config, e.live_deployment_id, e.ephemeral, e.expires_at,
+		       e.home_node_id, COALESCE(n.hostname,''), e.created_at,
+		       a.slug, s.slug
+		FROM environments e
+		JOIN stacks s       ON s.id = e.stack_id
+		JOIN applications a ON a.id = s.app_id
+		LEFT JOIN nodes n   ON n.id = e.home_node_id
+		WHERE a.org_id = $1
+		ORDER BY a.slug, s.slug, e.slug
+	`, orgID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+
+	out := []OrgEnvironment{}
+	for rows.Next() {
+		var e OrgEnvironment
+		var config []byte
+		if err := rows.Scan(&e.ID, &e.StackID, &e.Slug, &e.Strategy, &e.Hostname,
+			&config, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt,
+			&e.HomeNodeID, &e.HomeNode, &e.CreatedAt,
+			&e.AppSlug, &e.StackSlug); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(config, &e.Config); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
