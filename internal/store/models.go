@@ -65,7 +65,24 @@ type Environment struct {
 	// its first placement and never changed. Every later deployment goes there:
 	// the pinned container and named volumes cannot follow it elsewhere.
 	HomeNodeID *uuid.UUID `json:"home_node_id,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	// HomeNode is HomeNodeID's hostname, resolved by the same query that reads
+	// the environment. Every consumer wants the name rather than the id — a
+	// column of UUIDs tells an operator nothing — and resolving it here costs a
+	// LEFT JOIN on a primary key, where doing it client-side would cost a walk
+	// up to the org just to be allowed to list its nodes. Empty when the
+	// environment has never been placed.
+	HomeNode  string    `json:"home_node,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// OrgEnvironment is an environment with the catalog path needed to identify it
+// across an organization. ListOrgEnvironments returns these because an
+// environment's slug is unique only within its stack: "prod" is meaningless
+// without the app and stack that own it.
+type OrgEnvironment struct {
+	Environment
+	AppSlug   string `json:"app_slug"`
+	StackSlug string `json:"stack_slug"`
 }
 
 type DeploymentState string

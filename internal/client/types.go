@@ -45,7 +45,21 @@ type Environment struct {
 	LiveDeploymentID *string           `json:"live_deployment_id,omitempty"`
 	Ephemeral        bool              `json:"ephemeral"`
 	ExpiresAt        *time.Time        `json:"expires_at,omitempty"`
-	CreatedAt        time.Time         `json:"created_at"`
+	// HomeNodeID is the node holding this environment's durable state, and
+	// HomeNode is that node's hostname. Both are empty until the first
+	// placement binds the environment. The server resolves the hostname so no
+	// client has to walk up to the org just to be allowed to list its nodes.
+	HomeNodeID *string   `json:"home_node_id,omitempty"`
+	HomeNode   string    `json:"home_node,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// OrgEnvironment is an environment plus the catalog path that identifies it:
+// a slug of "prod" means nothing without the app and stack owning it.
+type OrgEnvironment struct {
+	Environment
+	AppSlug   string `json:"app_slug"`
+	StackSlug string `json:"stack_slug"`
 }
 
 type Deployment struct {

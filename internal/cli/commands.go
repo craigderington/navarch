@@ -265,9 +265,9 @@ func cmdEnv(ctx context.Context, e env, args []string) error {
 			if ev.LiveDeploymentID != nil {
 				live = *ev.LiveDeploymentID
 			}
-			rows = append(rows, []string{ev.ID, ev.Slug, ev.Hostname, ev.Strategy, live})
+			rows = append(rows, []string{ev.ID, ev.Slug, ev.Hostname, ev.Strategy, homeNode(ev.HomeNode), live})
 		}
-		return emit(e, envs, []string{"ID", "SLUG", "HOSTNAME", "STRATEGY", "LIVE"}, rows)
+		return emit(e, envs, []string{"ID", "SLUG", "HOSTNAME", "STRATEGY", "NODE", "LIVE"}, rows)
 	case "create":
 		flags, pos, err := flagMap(args[1:])
 		if err != nil {
@@ -305,7 +305,8 @@ func cmdEnv(ctx context.Context, e env, args []string) error {
 		if ev.LiveDeploymentID != nil {
 			live = *ev.LiveDeploymentID
 		}
-		return emitOne(e, ev, []string{"ID", "SLUG", "HOSTNAME", "LIVE"}, []string{ev.ID, ev.Slug, ev.Hostname, live})
+		return emitOne(e, ev, []string{"ID", "SLUG", "HOSTNAME", "NODE", "LIVE"},
+			[]string{ev.ID, ev.Slug, ev.Hostname, homeNode(ev.HomeNode), live})
 	default:
 		return usage("usage: navarch env list|create|get ...")
 	}
@@ -890,4 +891,17 @@ func cmdTUI(ctx context.Context, e env, args []string) error {
 		opts.Refresh = d
 	}
 	return tui.Run(ctx, e.c, opts)
+}
+
+// homeNode renders which node holds an environment's durable state.
+//
+// An environment is bound to a node by its FIRST placement, so an empty value
+// means it has never been deployed — a real and common state, not missing data.
+// Saying "unplaced" distinguishes it from a blank cell, which in a table of
+// hostnames reads as something that failed to load.
+func homeNode(hostname string) string {
+	if hostname == "" {
+		return "unplaced"
+	}
+	return hostname
 }

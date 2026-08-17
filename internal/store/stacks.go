@@ -151,11 +151,17 @@ func (s *Store) GetEnvironmentBySlug(ctx context.Context, stackID uuid.UUID, slu
 	var e Environment
 	var config []byte
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, stack_id, slug, strategy, COALESCE(hostname,''),
-		       config, live_deployment_id, ephemeral, expires_at, home_node_id, created_at
-		FROM environments WHERE stack_id = $1 AND slug = $2
+		SELECT e.id, e.stack_id, e.slug, e.strategy, COALESCE(e.hostname,''),
+		       e.config, e.live_deployment_id, e.ephemeral, e.expires_at,
+		       e.home_node_id, COALESCE(n.hostname,''), e.created_at
+		FROM environments e
+		-- LEFT: home_node_id is NULL until the first placement, and an inner
+		-- join would make a never-deployed environment simply not found.
+		LEFT JOIN nodes n ON n.id = e.home_node_id
+		WHERE e.stack_id = $1 AND e.slug = $2
 	`, stackID, slug).Scan(&e.ID, &e.StackID, &e.Slug, &e.Strategy, &e.Hostname,
-		&config, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt, &e.HomeNodeID, &e.CreatedAt)
+		&config, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt,
+		&e.HomeNodeID, &e.HomeNode, &e.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -169,11 +175,15 @@ func (s *Store) GetEnvironment(ctx context.Context, id uuid.UUID) (*Environment,
 	var e Environment
 	var configJSON []byte
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, stack_id, slug, strategy, COALESCE(hostname,''),
-		       config, live_deployment_id, ephemeral, expires_at, home_node_id, created_at
-		FROM environments WHERE id = $1
+		SELECT e.id, e.stack_id, e.slug, e.strategy, COALESCE(e.hostname,''),
+		       e.config, e.live_deployment_id, e.ephemeral, e.expires_at,
+		       e.home_node_id, COALESCE(n.hostname,''), e.created_at
+		FROM environments e
+		LEFT JOIN nodes n ON n.id = e.home_node_id
+		WHERE e.id = $1
 	`, id).Scan(&e.ID, &e.StackID, &e.Slug, &e.Strategy, &e.Hostname,
-		&configJSON, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt, &e.HomeNodeID, &e.CreatedAt)
+		&configJSON, &e.LiveDeploymentID, &e.Ephemeral, &e.ExpiresAt,
+		&e.HomeNodeID, &e.HomeNode, &e.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
