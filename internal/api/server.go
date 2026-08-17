@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/craig/composectl/internal/logbuf"
 	"github.com/craig/composectl/internal/metrics"
 	"github.com/craig/composectl/internal/store"
 	"github.com/google/uuid"
@@ -24,6 +25,9 @@ type Server struct {
 	previewDomain string
 	bearerToken   string
 	metrics       *metrics.Registry
+	// logs holds delivered container output in memory and nowhere else. It is
+	// not a cache of something durable — there is no durable copy, on purpose.
+	logs *logbuf.Buffer
 }
 
 // ServerOption keeps NewServer's existing two-argument form working; only the
@@ -47,6 +51,14 @@ func WithBearerToken(token string) ServerOption {
 
 func WithMetrics(reg *metrics.Registry) ServerOption {
 	return func(s *Server) { s.metrics = reg }
+}
+
+// WithLogBuffer supplies the in-memory buffer that delivered log chunks land in.
+// Without one the log endpoints still work and simply return nothing, which is
+// the right degradation: a control plane that cannot buffer output should say it
+// has none rather than refuse the request or, worse, start persisting it.
+func WithLogBuffer(b *logbuf.Buffer) ServerOption {
+	return func(s *Server) { s.logs = b }
 }
 
 func NewServer(st *store.Store, log *slog.Logger, opts ...ServerOption) *Server {
@@ -117,6 +129,13 @@ func nodeAgentPathID(r *http.Request) (uuid.UUID, bool) {
 		want = "desired-state"
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/report"):
 		want = "report"
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/logs") &&
+		strings.HasPrefix(r.URL.Path, "/v1/nodes/"):
+		// Only the node-scoped delivery path. The operator-facing
+		// /v1/envs/{env}/logs also ends in /logs and must stay on the operator
+		// token — hence the prefix check, without which opening a tail would
+		// demand a node token nobody has.
+		want = "logs"
 	default:
 		return uuid.Nil, false
 	}
@@ -232,6 +251,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/nodes/{id}/report", s.handleInstanceReport)
 	s.mux.HandleFunc("GET /v1/nodes", s.handleListNodes)
 	s.mux.HandleFunc("GET /v1/nodes/{id}", s.handleGetNode)
+	s.mux.HandleFunc("POST /v1/nodes/{id}/logs", s.handleLogDelivery)
 	s.mux.HandleFunc("POST /v1/nodes/{id}/drain", s.handleDrainNode)
 	s.mux.HandleFunc("POST /v1/nodes/{id}/uncordon", s.handleUncordonNode)
 
@@ -240,6 +260,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/envs/{env}/secrets", s.handleSetSecret)
 	s.mux.HandleFunc("GET /v1/envs/{env}/secrets", s.handleListSecrets)
 	s.mux.HandleFunc("DELETE /v1/envs/{env}/secrets/{key}", s.handleDeleteSecret)
+
+	// Logs — a request is an instruction; the answer lives in memory only.
+	s.mux.HandleFunc("POST /v1/envs/{env}/logs", s.handleCreateLogRequest)
+	s.mux.HandleFunc("GET /v1/logs/{id}", s.handleGetLogs)
+	s.mux.HandleFunc("DELETE /v1/logs/{id}", s.handleCloseLogRequest)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {

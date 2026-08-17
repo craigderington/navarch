@@ -715,3 +715,89 @@ func restartPolicy(mode string) container.RestartPolicy {
 		return container.RestartPolicy{Name: container.RestartPolicyOnFailure, MaximumRetryCount: 3}
 	}
 }
+
+// LogOptions bounds one read. Both bounds matter: Tail caps a first fetch of a
+// container that has been running for a week, and Since caps every fetch after
+// it. Without them a single request drags the whole history of a chatty
+// container through the agent, the control plane's memory and an operator's
+// terminal.
+type LogOptions struct {
+	Tail  int
+	Since time.Time
+}
+
+// MaxLogBytes caps what one read returns regardless of the options, because Tail
+// counts lines and a line has no length limit — a container printing one enormous
+// JSON blob per line satisfies Tail: 10 and still returns megabytes.
+const MaxLogBytes = 1 << 20 // 1 MiB
+
+// ContainerLogs reads a bounded slice of one container's output, newest-biased.
+//
+// Timestamps are always on. The caller needs them to ask for "what is new since
+// the last line I saw" on the next poll, and a follow built on elapsed wall-clock
+// instead would double-print or skip lines every time a tick ran long.
+//
+// The stream is demultiplexed here rather than handed up raw: Docker frames
+// stdout and stderr with an 8-byte header per message when the container has no
+// TTY, and a caller that did not strip it would show binary noise between every
+// line. That framing is a Docker SDK detail, and this is the only package that
+// is allowed to know one.
+func (d *Driver) ContainerLogs(ctx context.Context, containerID string, opt LogOptions) (string, error) {
+	o := container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Timestamps: true,
+	}
+	if opt.Tail > 0 {
+		o.Tail = strconv.Itoa(opt.Tail)
+	}
+	if !opt.Since.IsZero() {
+		o.Since = opt.Since.UTC().Format(time.RFC3339Nano)
+	}
+	rc, err := d.cli.ContainerLogs(ctx, containerID, o)
+	if err != nil {
+		return "", fmt.Errorf("read logs for %s: %w", containerID, err)
+	}
+	defer rc.Close()
+
+	// One byte over the cap tells demuxLogs it was truncated, so the caller can
+	// say so rather than silently returning a short answer.
+	raw, err := io.ReadAll(io.LimitReader(rc, MaxLogBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read logs for %s: %w", containerID, err)
+	}
+	return demuxLogs(raw, MaxLogBytes), nil
+}
+
+// demuxLogs strips Docker's stream framing and enforces the byte cap.
+//
+// Each message is an 8-byte header — stream type, three zero bytes, then a
+// big-endian uint32 length — followed by that many bytes. A container started
+// with a TTY has no framing at all, which is why an unrecognised header is
+// treated as plain text rather than as corruption: guessing wrong there would
+// blank the output of every TTY container instead of showing it.
+func demuxLogs(raw []byte, maxBytes int) string {
+	truncated := false
+	if len(raw) > maxBytes {
+		raw = raw[:maxBytes]
+		truncated = true
+	}
+	var out []byte
+	for len(raw) >= 8 {
+		if raw[0] > 2 || raw[1] != 0 || raw[2] != 0 || raw[3] != 0 {
+			break // not framed: TTY container, take the rest verbatim
+		}
+		n := int(raw[4])<<24 | int(raw[5])<<16 | int(raw[6])<<8 | int(raw[7])
+		raw = raw[8:]
+		if n > len(raw) {
+			n = len(raw) // truncated mid-message by the byte cap
+		}
+		out = append(out, raw[:n]...)
+		raw = raw[n:]
+	}
+	out = append(out, raw...)
+	if truncated {
+		out = append(out, "\n[truncated: log read hit the size cap]\n"...)
+	}
+	return string(out)
+}
