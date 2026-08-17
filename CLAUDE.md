@@ -583,6 +583,67 @@ an orphan `agent` driving the *host* daemon while `agent-1` drove `dind-1`, both
 claiming `dev-node-1`. It is invisible in `navarch node list`, which shows one
 healthy node either way.
 
+**Routes follow node reachability, on their own threshold.** `ListLiveRoutes`
+serves a live deployment only when its environment's home node is `ready` and has
+heartbeated within `COMPOSECTL_ROUTE_STRAND_SECONDS` (default 120). Both
+conditions are checked and they are independent — a node can read `ready` with an
+ancient heartbeat, or be `draining` while heartbeating perfectly — so a test that
+flips only the state would pass with the heartbeat clause deleted. The strand is
+deliberately NOT the 30s window that stops the scheduler placing work: declining
+to schedule is cheap and reversible, cutting live traffic is neither. Withdrawal
+wins over hanging because a fast 404 can be explained and a timeout cannot, but a
+strand of `0` disables it for operators who would rather hang than 404.
+**Withdrawal is derived, never written** — nothing mutates, so a node that
+heartbeats again is routable on the next resync, which is what makes this safe
+for a state that self-heals. Reachability is judged from the environment's
+`home_node_id`, not from the instance row that reported a port: joining through
+the instance withdraws the route of every deployment whose agent has not reported
+yet, judging a node unreachable because no container has come up.
+
+**A deployment's state describes its rollout, not its connectivity.** A live
+deployment on a silent node stays `live`. Nothing superseded it, its containers
+are very likely still running, and writing a state change would assert something
+about a world the control plane has just admitted it cannot see — and would not
+unwind, because `deployments` is append-only and `validTransitions` has no path
+back to `live`, so a thirty-second blip would permanently rewrite history. The
+node's reachability is reported *alongside* the deployment instead
+(`home_node`, `home_node_state`; `navarch deployment get` renders
+`dev-node-2 (unreachable)`). That is the other half of the bargain: if the state
+column keeps telling the truth, the doubt must be visible in the same output, or
+"do not lie in the state column" quietly becomes "do not tell them at all".
+
+**Re-homing is the absence of a binding, never an override of one.**
+`ReleaseEnvironmentHome` is the only thing that clears `home_node_id`, and
+`PlaceDeployment`'s refusal stays exactly as strict as Slice A left it. The
+instinct when a home node dies — "if it is unreachable, allow another node" — is
+the data-loss bug with a sympathetic motive, and unreachable is a *worse* trigger
+than full: a node that is merely unreachable still has the volumes, so the
+environment would be rebuilt empty elsewhere while its data sat intact on the old
+one. Release first, then the ordinary scheduler places by score through the
+unmodified path. Durability is judged from the live deployment's resolved spec,
+and **a named volume mounted read-only by a swappable service still pins the
+environment**: read-only describes the container's access to the bytes, not where
+the bytes are. Releases append an environment event, because a binding that
+changes without a trace cannot be audited after an incident.
+
+**Drain cordons always, evacuates what it can, and reports what it cannot.**
+Refusing to drain a node holding stateful environments would make drain useless
+exactly when it is most wanted; draining silently would be worse, because the
+operator would believe the node was empty. `POST /v1/nodes/{id}/drain` returns
+`{released, stranded}` with reasons and the CLI prints both. **Exit stays zero**
+— the node is cordoned, which is what drain promises; stranded environments are
+the expected outcome for anything holding durable state.
+
+**Failover is never automatic.** Nothing re-homes an environment because its node
+went quiet. An unreachable node is usually one that is about to come back, and its
+agent still holds desired rows for its environments — re-homing automatically
+would run two copies of a stateless environment until the old node returned and
+its agent garbage-collected the orphans, a window unbounded by anything the
+control plane controls. Re-homing is therefore operator-initiated: `drain` or
+`retire` the node, and the release happens as a consequence of a human decision.
+`retired` is still set by nothing, deliberately — a policy loop with no
+operational history behind it is a guess with a cron schedule.
+
 **Draining is reversible; the state a node returns to is derived, not declared.**
 `DrainNode` sets `draining`, and both `Heartbeat` and `RegisterNode` preserve it
 — deliberately, so an agent restart cannot silently un-cordon a node an operator

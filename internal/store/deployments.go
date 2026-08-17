@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -209,14 +210,22 @@ func (s *Store) GetDeployment(ctx context.Context, id uuid.UUID) (*Deployment, e
 	var d Deployment
 	var specJSON []byte
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, environment_id, stack_version_id, revision, slot,
-		       project_name, state, resolved_spec, promoted_at, superseded_at,
-		       COALESCE(failure_reason,''), COALESCE(created_by,''),
-		       created_at, updated_at
-		FROM deployments WHERE id = $1
+		SELECT d.id, d.environment_id, d.stack_version_id, d.revision, d.slot,
+		       d.project_name, d.state, d.resolved_spec, d.promoted_at, d.superseded_at,
+		       COALESCE(d.failure_reason,''), COALESCE(d.created_by,''),
+		       d.created_at, d.updated_at,
+		       COALESCE(n.hostname,''), COALESCE(n.state::text,'')
+		FROM deployments d
+		JOIN environments e ON e.id = d.environment_id
+		-- LEFT twice over: an environment is unbound until its first placement,
+		-- and a node row can be deleted. Neither should make a deployment
+		-- unreadable — the reachability information is additional, not required.
+		LEFT JOIN nodes n ON n.id = e.home_node_id
+		WHERE d.id = $1
 	`, id).Scan(&d.ID, &d.EnvironmentID, &d.StackVersionID, &d.Revision,
 		&d.Slot, &d.ProjectName, &d.State, &specJSON, &d.PromotedAt,
-		&d.SupersededAt, &d.FailureReason, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt)
+		&d.SupersededAt, &d.FailureReason, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
+		&d.HomeNode, &d.HomeNodeState)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -394,10 +403,28 @@ type LiveRoute struct {
 }
 
 // ListLiveRoutes returns one route per live deployment whose environment has a
-// hostname and whose spec declares an ingress service. The router turns these
+// hostname, whose spec declares an ingress service, and **whose node the control
+// plane can currently reach**.
+//
+// strand is how long a node may go unheard from before its routes are withdrawn.
+// It is passed in rather than fixed here because it is policy, and deliberately
+// longer than the 30s staleness window that stops the scheduler placing new work:
+// declining to schedule is cheap and reversible, cutting live traffic is neither.
+// A strand of zero disables withdrawal entirely — an operator who would rather
+// have a hanging request than a 404 can say so.
+//
+// Both conditions are checked, and they are independent. A node can read `ready`
+// while its last heartbeat is ancient (nothing has run MarkStaleNodesUnreachable
+// yet), and a node can be `draining` while heartbeating perfectly. Testing only
+// the state would pass with the heartbeat clause deleted.
+//
+// Withdrawal is reversible by construction: nothing is written here. The moment a
+// heartbeat lands, Heartbeat resolves the node back to ready and the next resync
+// puts the route back. That matters because unreachable is a self-healing state,
+// and a route that could not come back would make a 30-second blip permanent. The router turns these
 // into Traefik config. resolved_spec is parsed here (not in the router) so the
 // router stays free of the spec type and pgx.
-func (s *Store) ListLiveRoutes(ctx context.Context) ([]LiveRoute, error) {
+func (s *Store) ListLiveRoutes(ctx context.Context, strand time.Duration) ([]LiveRoute, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT d.environment_id, d.project_name, COALESCE(e.hostname,''), d.resolved_spec,
 		       COALESCE(host(n.advertise_addr), ''), COALESCE(si.ingress_port, 0)
@@ -410,9 +437,24 @@ func (s *Store) ListLiveRoutes(ctx context.Context) ([]LiveRoute, error) {
 		-- caller cannot distinguish from "not live".
 		LEFT JOIN service_instances si
 		       ON si.deployment_id = d.id AND si.ingress_port IS NOT NULL
-		LEFT JOIN nodes n ON n.id = si.node_id
+		-- Joined on the ENVIRONMENT's binding, not on si.node_id. They name the
+		-- same node once anything is placed (PlaceDeployment binds the
+		-- environment to the node it places on and refuses any other), but the
+		-- instance row only exists once a port has been reported. Hanging
+		-- reachability off si would withdraw the route of every deployment whose
+		-- agent had not reported yet — judging a node unreachable because no
+		-- container has come up is exactly backwards.
+		LEFT JOIN nodes n ON n.id = e.home_node_id
 		WHERE d.state = 'live' AND e.hostname IS NOT NULL AND e.hostname <> ''
-	`)
+		  -- $1 <= 0 disables withdrawal: every live route is served regardless
+		  -- of what the control plane can see, which is the "I would rather hang
+		  -- than 404" position stated explicitly rather than by omission.
+		  AND ($1 <= 0 OR (
+		        n.state = 'ready'
+		    AND n.last_heartbeat IS NOT NULL
+		    AND n.last_heartbeat > now() - make_interval(secs => $1)
+		  ))
+	`, strand.Seconds())
 	if err != nil {
 		return nil, mapErr(err)
 	}

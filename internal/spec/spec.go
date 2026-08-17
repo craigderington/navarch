@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"sort"
 )
@@ -214,4 +215,49 @@ func (s *DeploymentSpec) IngressService() (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// DurableReasons lists what ties this stack to the node it was first placed on,
+// empty when nothing does. It answers one question — may this environment be
+// re-homed without losing anything — and the caller reports the reasons rather
+// than re-deriving them.
+//
+// Two things count, and the second is the one a naive check misses:
+//
+//   - A pinned service. It runs once, is adopted across revisions by its stable
+//     name, and its container lives on exactly one node.
+//   - A named volume, mounted by ANY service, read-only or not. Read-only
+//     describes the container's access to the bytes, not where the bytes are:
+//     the volume is `cc-{env8}-{name}` on that node's daemon and moving the
+//     environment leaves it behind. A swappable service with a read-only mount
+//     therefore still pins the environment, which is exactly the case that looks
+//     safe and is not.
+//
+// Erring toward "cannot move" is the correct direction: refusing to re-home an
+// environment that would have survived it costs an operator an inconvenience,
+// while allowing one that would not costs them their data.
+func (s *DeploymentSpec) DurableReasons() []string {
+	var out []string
+	for _, name := range s.PinnedServices() {
+		out = append(out, fmt.Sprintf("pinned service %q", name))
+	}
+	seen := map[string]bool{}
+	for _, name := range s.ServiceNames() {
+		for _, m := range s.Services[name].Mounts {
+			if m.Kind != MountVolume || m.Source == "" || seen[m.Source] {
+				continue
+			}
+			seen[m.Source] = true
+			out = append(out, fmt.Sprintf("named volume %q mounted by %q", m.Source, name))
+		}
+	}
+	// A volume declared but mounted by nothing is rejected at parse time, so it
+	// cannot reach here — but if it ever did, the bytes would still be on that
+	// node and this is the answer that keeps the data safe.
+	for vol := range s.Volumes {
+		if !seen[vol] {
+			out = append(out, fmt.Sprintf("named volume %q", vol))
+		}
+	}
+	return out
 }

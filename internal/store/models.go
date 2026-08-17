@@ -119,6 +119,20 @@ type Deployment struct {
 	CreatedBy      string               `json:"created_by,omitempty"`
 	CreatedAt      time.Time            `json:"created_at"`
 	UpdatedAt      time.Time            `json:"updated_at"`
+	// HomeNode and HomeNodeState describe the node this deployment's environment
+	// is bound to. They are reported ALONGSIDE State rather than folded into it:
+	// a deployment whose node went quiet is still live — nothing superseded it
+	// and its containers are very likely still running — and writing a state
+	// change would be the control plane asserting something about a world it has
+	// just admitted it cannot see. It also would not unwind: `deployments` is
+	// append-only and validTransitions has no path back to live, so a 30-second
+	// blip would permanently rewrite history.
+	//
+	// The bargain is that if State keeps telling the truth, the reader must be
+	// able to see the node is unreachable in the same breath — otherwise "do not
+	// lie in the state column" quietly becomes "do not tell them at all".
+	HomeNode      string    `json:"home_node,omitempty"`
+	HomeNodeState NodeState `json:"home_node_state,omitempty"`
 }
 
 type NodeState string

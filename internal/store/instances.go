@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -275,4 +276,116 @@ func (s *Store) DeleteInstances(ctx context.Context, deploymentID uuid.UUID) err
 		return err
 	})
 	return mapErr(err)
+}
+
+// ReleaseEnvironmentHome clears an environment's node binding, but only when
+// the environment has nothing durable on that node.
+//
+// This is the ONLY way a binding is ever cleared, and PlaceDeployment is
+// deliberately untouched by it. The instinct when a home node dies is to relax
+// the placement check — "if the home node is unreachable, allow another one" —
+// and that is the Slice A data-loss bug with a sympathetic motive. Unreachable
+// is a worse trigger than full, because a node that is merely unreachable still
+// has the volumes: the environment would be rebuilt empty on a new node while
+// its real data sat intact on the old one, and the rollout would report success.
+//
+// So re-homing is the ABSENCE of a binding, never an override of one. After a
+// release the ordinary scheduler places the next deployment by score, through
+// the same strict path, and binds it wherever it lands.
+//
+// The durability check and the clear happen in one transaction under a row lock,
+// because the answer comes from the live deployment's resolved spec and a
+// deployment could otherwise land between reading it and acting on it.
+func (s *Store) ReleaseEnvironmentHome(ctx context.Context, envID uuid.UUID) error {
+	return mapErr(s.tx(ctx, func(tx pgx.Tx) error {
+		var home *uuid.UUID
+		var liveDep *uuid.UUID
+		if err := tx.QueryRow(ctx, `
+			SELECT home_node_id, live_deployment_id FROM environments WHERE id=$1 FOR UPDATE
+		`, envID).Scan(&home, &liveDep); err != nil {
+			return err // pgx.ErrNoRows -> ErrNotFound via mapErr
+		}
+		if home == nil {
+			return nil // already unbound; releasing again is a no-op, not an error
+		}
+
+		// The spec of whatever is live is what describes the durable state on
+		// disk right now. An environment that has never been deployed cannot
+		// have created a volume, so there is nothing to lose by releasing it.
+		if liveDep != nil {
+			var specJSON []byte
+			if err := tx.QueryRow(ctx,
+				`SELECT resolved_spec FROM deployments WHERE id=$1`, *liveDep).Scan(&specJSON); err != nil {
+				return err
+			}
+			var ds spec.DeploymentSpec
+			if err := json.Unmarshal(specJSON, &ds); err != nil {
+				return err
+			}
+			if reasons := ds.DurableReasons(); len(reasons) > 0 {
+				return fmt.Errorf("%w: environment holds durable state on node %s (%s)",
+					ErrConflict, *home, strings.Join(reasons, ", "))
+			}
+		}
+
+		if _, err := tx.Exec(ctx,
+			`UPDATE environments SET home_node_id=NULL WHERE id=$1`, envID); err != nil {
+			return err
+		}
+		// A binding that changes without a trace is a binding nobody can audit
+		// after an incident: "why is this environment on a different node than
+		// last week" must have an answer that is not guesswork.
+		return appendEnvironmentEventTx(ctx, tx, envID, "environment.home_released",
+			"environment released from its home node",
+			map[string]any{"released_from": home.String()})
+	}))
+}
+
+// EnvironmentsHomedOnNode reports every environment bound to a node and whether
+// each can be released. Drain uses it to evacuate what it safely can and to tell
+// the operator precisely what it could not — a drain that silently leaves three
+// databases behind is worse than one that refuses, because the operator believes
+// the node is empty.
+func (s *Store) EnvironmentsHomedOnNode(ctx context.Context, nodeID uuid.UUID) ([]HomedEnvironment, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT e.id, a.slug, st.slug, e.slug, d.resolved_spec
+		FROM environments e
+		JOIN stacks st      ON st.id = e.stack_id
+		JOIN applications a ON a.id = st.app_id
+		LEFT JOIN deployments d ON d.id = e.live_deployment_id
+		WHERE e.home_node_id = $1
+		ORDER BY a.slug, st.slug, e.slug
+	`, nodeID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+
+	out := []HomedEnvironment{}
+	for rows.Next() {
+		var h HomedEnvironment
+		var specJSON []byte
+		if err := rows.Scan(&h.ID, &h.AppSlug, &h.StackSlug, &h.Slug, &specJSON); err != nil {
+			return nil, err
+		}
+		if len(specJSON) > 0 {
+			var ds spec.DeploymentSpec
+			if err := json.Unmarshal(specJSON, &ds); err != nil {
+				return nil, err
+			}
+			h.DurableReasons = ds.DurableReasons()
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// HomedEnvironment is an environment bound to a node, with why it is stuck
+// there if it is. Empty DurableReasons means it can be released.
+type HomedEnvironment struct {
+	ID             uuid.UUID `json:"id"`
+	AppSlug        string    `json:"app_slug"`
+	StackSlug      string    `json:"stack_slug"`
+	Slug           string    `json:"slug"`
+	DurableReasons []string  `json:"durable_reasons,omitempty"`
 }
