@@ -563,6 +563,17 @@ Before this, an upgraded agent adopted its existing ingress containers, they
 published nothing, `ingress_port` went NULL and the router silently dropped every
 route while the deployments stayed live and healthy.
 
+**Per-node capacity, not fleet capacity, is what a single environment can hit.**
+An environment is bound to one node, so its blue/green rollout — which holds
+reservations for the old *and* new revision at once — is bounded by that node's
+advertised memory, not the fleet's. At 8 GB per node a `hello`-shaped stack
+reserves ~1.28 GB and ~2.5 GB mid-rollout, so a handful of live environments
+homed on the same node will fail the next rollout there with "home node ... lacks
+capacity" while the fleet still looks half empty. That is the capacity signal
+working, not a bug, and the fix is `make nuke` — nothing releases a live
+environment's reservation. The full demo suite passes from a clean fleet and
+will not survive being run several times over without one.
+
 **`make up` passes `--remove-orphans`, and that is load-bearing.** Renaming a
 service leaves the old container running, and a stale agent keeps registering:
 `RegisterNode` upserts by `(org_id, hostname)`, so an orphan and its replacement
