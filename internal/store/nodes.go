@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -29,6 +30,11 @@ type RegisterNodeParams struct {
 // that is actively registering is, by definition, ready. A plaintext token
 // is issued only when the node has no token_hash yet (first register or
 // post-migration); re-registration does not rotate it.
+//
+// A changing age_recipient is the one field whose update is a security
+// event: every secret set afterward for environments homed here is sealed to
+// the new key, so a silent overwrite is a credential redirect with no trace.
+// The first registration is not — there is no previous recipient to displace.
 func (s *Store) RegisterNode(ctx context.Context, p RegisterNodeParams) (*Node, error) {
 	labels, err := json.Marshal(orEmpty(p.Labels))
 	if err != nil {
@@ -41,31 +47,59 @@ func (s *Store) RegisterNode(ctx context.Context, p RegisterNodeParams) (*Node, 
 	var n Node
 	var labelsOut []byte
 	var issuedHash *string
-	err = s.pool.QueryRow(ctx, `
-		INSERT INTO nodes (org_id, hostname, advertise_addr, state,
-		                   cpu_millis, memory_bytes, labels, agent_version, age_recipient,
-		                   token_hash, last_heartbeat)
-		VALUES ($1,$2,$3,'ready',$4,$5,$6,NULLIF($7,''),NULLIF($8,''),$9,now())
-		ON CONFLICT (org_id, hostname) DO UPDATE SET
-			advertise_addr = EXCLUDED.advertise_addr,
-			state          = CASE WHEN nodes.state = 'draining' THEN nodes.state ELSE 'ready' END,
-			cpu_millis     = EXCLUDED.cpu_millis,
-			memory_bytes   = EXCLUDED.memory_bytes,
-			labels         = EXCLUDED.labels,
-			agent_version  = EXCLUDED.agent_version,
-			age_recipient  = EXCLUDED.age_recipient,
-			token_hash     = COALESCE(nodes.token_hash, EXCLUDED.token_hash),
-			last_heartbeat = now()
-		RETURNING id, org_id, hostname, host(advertise_addr), state,
-		          cpu_millis, memory_bytes, alloc_cpu_millis, alloc_memory_bytes,
-		          labels, COALESCE(agent_version,''), COALESCE(age_recipient,''),
-		          last_heartbeat, created_at, token_hash
-	`, p.OrgID, p.Hostname, p.AdvertiseAddr, p.CPUMillis, p.MemoryBytes,
-		labels, p.AgentVersion, p.AgeRecipient, tokenHash).
-		Scan(&n.ID, &n.OrgID, &n.Hostname, &n.AdvertiseAddr, &n.State,
-			&n.CPUMillis, &n.MemoryBytes, &n.AllocCPUMillis, &n.AllocMemoryBytes,
-			&labelsOut, &n.AgentVersion, &n.AgeRecipient, &n.LastHeartbeat, &n.CreatedAt,
-			&issuedHash)
+	err = s.tx(ctx, func(tx pgx.Tx) error {
+		// The old recipient is needed to detect rotation, and RETURNING only
+		// sees post-update values — so read it first. A node that does not
+		// exist yet has none, and a first registration is not a rotation.
+		var oldRecipient *string
+		if err := tx.QueryRow(ctx,
+			`SELECT age_recipient FROM nodes WHERE org_id=$1 AND hostname=$2`,
+			p.OrgID, p.Hostname).Scan(&oldRecipient); err != nil &&
+			!errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+
+		err := tx.QueryRow(ctx, `
+			INSERT INTO nodes (org_id, hostname, advertise_addr, state,
+			                   cpu_millis, memory_bytes, labels, agent_version, age_recipient,
+			                   token_hash, last_heartbeat)
+			VALUES ($1,$2,$3,'ready',$4,$5,$6,NULLIF($7,''),NULLIF($8,''),$9,now())
+			ON CONFLICT (org_id, hostname) DO UPDATE SET
+				advertise_addr = EXCLUDED.advertise_addr,
+				state          = CASE WHEN nodes.state = 'draining' THEN nodes.state ELSE 'ready' END,
+				cpu_millis     = EXCLUDED.cpu_millis,
+				memory_bytes   = EXCLUDED.memory_bytes,
+				labels         = EXCLUDED.labels,
+				agent_version  = EXCLUDED.agent_version,
+				age_recipient  = EXCLUDED.age_recipient,
+				token_hash     = COALESCE(nodes.token_hash, EXCLUDED.token_hash),
+				last_heartbeat = now()
+			RETURNING id, org_id, hostname, host(advertise_addr), state,
+			          cpu_millis, memory_bytes, alloc_cpu_millis, alloc_memory_bytes,
+			          labels, COALESCE(agent_version,''), COALESCE(age_recipient,''),
+			          last_heartbeat, created_at, token_hash
+		`, p.OrgID, p.Hostname, p.AdvertiseAddr, p.CPUMillis, p.MemoryBytes,
+			labels, p.AgentVersion, p.AgeRecipient, tokenHash).
+			Scan(&n.ID, &n.OrgID, &n.Hostname, &n.AdvertiseAddr, &n.State,
+				&n.CPUMillis, &n.MemoryBytes, &n.AllocCPUMillis, &n.AllocMemoryBytes,
+				&labelsOut, &n.AgentVersion, &n.AgeRecipient, &n.LastHeartbeat, &n.CreatedAt,
+				&issuedHash)
+		if err != nil {
+			return err
+		}
+		// Same recipient spelled the same way (including both absent) is not a
+		// rotation. An empty incoming recipient is: a node dropping its key
+		// makes future secret writes for its environments fail, which is
+		// exactly the kind of change an operator must see in the timeline.
+		if oldRecipient != nil && p.AgeRecipient != *oldRecipient {
+			if err := appendEventTx(ctx, tx, p.OrgID, nil, &n.ID,
+				"node.recipient_rotated", "node age recipient changed on re-register",
+				map[string]any{"hostname": p.Hostname}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, mapErr(err)
 	}

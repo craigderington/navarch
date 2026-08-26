@@ -194,6 +194,26 @@ func TestRegisterNodeHandler(t *testing.T) {
 	}
 }
 
+// A malformed age recipient must be rejected at registration with a 400.
+// Accepted, it surfaces much later as a 500 on the first secret written for
+// an environment homed to that node — confined to that node's environments,
+// which reads as a control-plane bug rather than a bad key.
+func TestRegisterNodeRejectsMalformedRecipient(t *testing.T) {
+	srv := testServer(t)
+	for _, recipient := range []string{"not-a-recipient", "age1shortcut", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample"} {
+		body, _ := json.Marshal(map[string]any{
+			"org": "dev", "hostname": "badkey-" + time.Now().Format("150405.000"),
+			"advertise_addr": "10.1.2.3", "cpu_millis": 2000, "memory_bytes": 1 << 31,
+			"age_recipient": recipient,
+		})
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/nodes/register", bytes.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("recipient %q should be a 400, got %d: %s", recipient, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // newReportableInstance builds the full chain a service_instance hangs off of
 // -- org, app, stack, version, environment, deployment, node -- and returns
 // the node and the one instance row scheduled onto it.

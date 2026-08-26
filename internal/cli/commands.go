@@ -486,20 +486,46 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 		if err != nil {
 			return err
 		}
-		if flags["env"] == "" || len(pos) < 2 {
-			return usage("usage: navarch secret set --env ORG/APP/STACK/ENV KEY VALUE")
+		if flags["env"] == "" || len(pos) < 1 {
+			return usage("usage: navarch secret set --env ORG/APP/STACK/ENV KEY (- | @FILE | VALUE)")
 		}
 		envID, err := e.resolveEnv(ctx, flags["env"])
 		if err != nil {
 			return err
 		}
-		if err := e.c.SetSecret(ctx, envID, pos[0], pos[1]); err != nil {
+		key := pos[0]
+		var value string
+		switch {
+		case len(pos) >= 2 && (pos[1] == "-" || strings.HasPrefix(pos[1], "@")):
+			// The value is a secret: reading it from stdin or a file keeps it
+			// out of shell history, `ps`, and any exec audit logging. The
+			// positional form remains for compatibility but is the one place
+			// the value is handled casually, so it earns a warning.
+			raw, err := readFileOrStdin(strings.TrimPrefix(pos[1], "@"))
+			if err != nil {
+				return err
+			}
+			value = string(raw)
+		case len(pos) >= 2:
+			fmt.Fprintln(e.err, "# warning: the value is visible in shell history and ps — prefer '-' (stdin) or '@file'")
+			value = pos[1]
+		default:
+			return usage("usage: navarch secret set --env ORG/APP/STACK/ENV KEY (- | @FILE | VALUE)")
+		}
+		// A trailing newline is an artifact of `echo` or an editor, not part
+		// of the secret: stripping it here is far cheaper than debugging why
+		// the same password works interactively and not from a script.
+		value = strings.TrimSuffix(value, "\n")
+		if value == "" {
+			return fmt.Errorf("secret %q is empty", key)
+		}
+		if err := e.c.SetSecret(ctx, envID, key, value); err != nil {
 			return err
 		}
 		if e.cfg.Output == "json" {
-			return printJSON(e.out, map[string]string{"key": pos[0]})
+			return printJSON(e.out, map[string]string{"key": key})
 		}
-		fmt.Fprintf(e.out, "set\t%s\n", pos[0])
+		fmt.Fprintf(e.out, "set\t%s\n", key)
 		return nil
 	case "delete":
 		flags, pos, err := flagMap(args[1:])

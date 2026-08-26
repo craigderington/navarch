@@ -76,6 +76,58 @@ func (s *Store) DeleteSecret(ctx context.Context, envID uuid.UUID, key string) e
 	return mapErr(err)
 }
 
+// PruneSecretVersions removes old versions of secrets that have since been
+// superseded, keeping the newest and anything younger than the retention
+// window. A rotated secret stays sealed to whatever recipients were live at
+// write time — including nodes since removed from the org — so an unbounded
+// version history is an unbounded at-rest exposure to keys nobody meant to
+// keep. The newest version is always kept: the agent reads max(version), and
+// a prune that could remove the live value would break deployments, not just
+// history.
+func (s *Store) PruneSecretVersions(ctx context.Context, keepNewerThan time.Duration) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM secrets
+		WHERE id IN (
+			SELECT s.id FROM secrets s
+			JOIN (
+				SELECT environment_id, key, MAX(version) AS latest
+				FROM secrets GROUP BY environment_id, key
+			) latest ON latest.environment_id = s.environment_id AND latest.key = s.key
+			WHERE s.version < latest.latest
+			  AND s.created_at < now() - make_interval(secs => $1)
+		)
+	`, keepNewerThan.Seconds())
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// PruneSecretVersionsForOrg is PruneSecretVersions scoped to one organization,
+// for the reaper's organization-scoped test constructors.
+func (s *Store) PruneSecretVersionsForOrg(ctx context.Context, orgID uuid.UUID, keepNewerThan time.Duration) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM secrets
+		WHERE id IN (
+			SELECT s.id FROM secrets s
+			JOIN environments e ON e.id = s.environment_id
+			JOIN stacks st ON st.id = e.stack_id
+			JOIN applications a ON a.id = st.app_id
+			JOIN (
+				SELECT environment_id, key, MAX(version) AS latest
+				FROM secrets GROUP BY environment_id, key
+			) latest ON latest.environment_id = s.environment_id AND latest.key = s.key
+			WHERE a.org_id = $2
+			  AND s.version < latest.latest
+			  AND s.created_at < now() - make_interval(secs => $1)
+		)
+	`, keepNewerThan.Seconds(), orgID)
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // RecipientsForEnvironment returns the age recipients that should be able to
 // open this environment's secrets, narrowest first: its home node, then any node
 // already running it, then every ready node in the org when nothing is placed.

@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/craig/composectl/internal/rollout"
+	"github.com/craig/composectl/internal/secrets"
 	"github.com/craig/composectl/internal/store"
 )
 
@@ -41,6 +42,15 @@ func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
 	org, err := s.st.GetOrganizationBySlug(ctx, req.Org)
 	if err != nil {
 		s.writeStoreError(w, err)
+		return
+	}
+	// Reject a malformed recipient here rather than at the first secret
+	// write: that failure arrives as a 500 confined to environments homed to
+	// this node, which reads as a control-plane bug. A node without a key is
+	// legitimate (it just gets no secrets), so only the non-empty case is
+	// checked.
+	if req.AgeRecipient != "" && !secrets.ValidRecipient(req.AgeRecipient) {
+		writeError(w, http.StatusBadRequest, "age_recipient is not a valid X25519 recipient", nil)
 		return
 	}
 	node, err := s.st.RegisterNode(ctx, store.RegisterNodeParams{

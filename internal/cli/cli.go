@@ -333,7 +333,7 @@ Examples:
   navarch validate examples/hello/compose.yaml
   navarch stack push dev/preview/main examples/hello/compose.yaml
   navarch deploy --env dev/preview/main/staging
-  navarch secret set --env dev/preview/main/staging db_password hunter2
+  navarch secret set --env dev/preview/main/staging db_password -   # value from stdin (or @file)
   navarch events --org dev --limit 20
   navarch logs dev/shop/main/staging --service api --follow
 `

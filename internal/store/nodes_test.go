@@ -174,6 +174,58 @@ func TestGetOrganizationBySlugUnknownIsNotFound(t *testing.T) {
 	}
 }
 
+// A changing age_recipient is a credential redirect: every secret set after
+// it is sealed to the new key. It must leave a trace in the org timeline —
+// "why can this node read our secrets" deserves an answer that is not
+// guesswork — while an unchanged recipient, a first registration, and a
+// routine capacity refresh must not add noise.
+func TestRegisterNodeRecipientRotationIsAudited(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	host := uniq("node")
+	reg := func(recipient string) *Node {
+		t.Helper()
+		n, err := st.RegisterNode(testCtx(t), RegisterNodeParams{
+			OrgID: org.ID, Hostname: host, AdvertiseAddr: "10.0.0.7",
+			CPUMillis: 1000, MemoryBytes: 1 << 30, AgeRecipient: recipient,
+		})
+		if err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		return n
+	}
+
+	countRotations := func() int {
+		t.Helper()
+		evs, err := st.ListEvents(testCtx(t), org.ID, 0, 200)
+		if err != nil {
+			t.Fatalf("ListEvents: %v", err)
+		}
+		n := 0
+		for _, e := range evs {
+			if e.Kind == "node.recipient_rotated" {
+				n++
+			}
+		}
+		return n
+	}
+
+	reg("age1first")            // first registration: no event
+	reg("age1first")            // same recipient: no event
+	reg("age1rotated")          // rotation: one event
+	reg("age1rotated")          // unchanged again: no event
+	if got := countRotations(); got != 1 {
+		t.Fatalf("expected exactly 1 rotation event, got %d", got)
+	}
+
+	evs, _ := st.ListEvents(testCtx(t), org.ID, 0, 200)
+	for _, e := range evs {
+		if e.Kind == "node.recipient_rotated" && e.NodeID == nil {
+			t.Fatal("rotation event must name the node it happened to")
+		}
+	}
+}
+
 // The regression this fixes: draining was a one-way door. DrainNode set
 // `draining`, Heartbeat's CASE preserved it and RegisterNode's upsert preserved
 // it too, so a drained node could not be returned to service by any means the

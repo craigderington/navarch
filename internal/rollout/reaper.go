@@ -45,6 +45,13 @@ func (r *Reaper) WithLogBuffer(b LogBuffer) *Reaper { r.logs = b; return r }
 // is the only signal its memory is dead weight.
 const LogBufferIdleTTL = 10 * time.Minute
 
+// SecretVersionRetention is how long a superseded secret version outlives its
+// replacement. Rotation does not narrow who can open history — old ciphertext
+// stays sealed to whatever recipients were live at write time — so the reaper
+// retires it. Long enough to be evidence in an incident, short enough that
+// "who could read last month's password" has an end date.
+const SecretVersionRetention = 30 * 24 * time.Hour
+
 func newReaperForOrg(st *store.Store, log *slog.Logger, orgID uuid.UUID) *Reaper {
 	return &Reaper{st: st, log: log, orgID: &orgID}
 }
@@ -82,6 +89,24 @@ func (r *Reaper) ReapOnce(ctx context.Context) error {
 			r.logs.Drop(id)
 		}
 		r.logs.Expire(LogBufferIdleTTL)
+	}
+	// Superseded secret versions past retention. Old ciphertext stays sealed
+	// to the recipients live at write time, so keeping it forever keeps keys
+	// nobody meant to keep. Runs after the log sweep for the same reason as
+	// everything else in this loop: deleting durable state is the reaper's
+	// job, and doing it here keeps every "when does data disappear" answer
+	// in one place.
+	var pruned int64
+	if r.orgID == nil {
+		pruned, err = r.st.PruneSecretVersions(ctx, SecretVersionRetention)
+	} else {
+		pruned, err = r.st.PruneSecretVersionsForOrg(ctx, *r.orgID, SecretVersionRetention)
+	}
+	if err != nil {
+		return err
+	}
+	if pruned > 0 {
+		r.log.Info("pruned superseded secret versions", "count", pruned)
 	}
 	if r.orgID == nil {
 		return r.st.SweepTombstones(ctx, TombstoneRetention)

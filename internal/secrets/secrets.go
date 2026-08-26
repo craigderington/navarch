@@ -67,6 +67,16 @@ func (i Identity) Decrypt(ciphertext []byte) (string, error) {
 	return string(out), nil
 }
 
+// ValidRecipient reports whether s parses as an X25519 age recipient. Used
+// at node registration so a malformed key is rejected on the spot with a 400
+// — otherwise it surfaces much later, as a 500 on the first secret written
+// for an environment homed to that node, which looks like a control-plane
+// bug and only affects some environments.
+func ValidRecipient(s string) bool {
+	_, err := age.ParseX25519Recipient(s)
+	return err == nil
+}
+
 // Encrypt seals plaintext to every recipient; any one's identity can open it.
 func Encrypt(plaintext string, recipients []string) ([]byte, error) {
 	if len(recipients) == 0 {
