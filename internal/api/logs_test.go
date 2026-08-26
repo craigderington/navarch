@@ -108,8 +108,13 @@ func TestGetLogsWithoutBufferStillAnswers(t *testing.T) {
 	}
 }
 
-// A node may only answer for its own containers. Without the node scoping in
-// CompleteLogRequest, any registered agent could mark another node's tails done.
+// A node may only answer for its own containers. Ownership is enforced by
+// CompleteLogRequest's node scoping — and it must gate the *content* write
+// too, not just the row update. Without that gate a foreign node's delivery
+// is refused as a completion while its forged content still lands in the
+// buffer and is served to the operator as if their own node had produced
+// it. Forged log output is a real attack: "credentials rotated, re-auth
+// required" in a tail is acted on, not read.
 func TestLogDeliveryFromAnotherNodeDoesNotCompleteTheRequest(t *testing.T) {
 	buf := logbuf.New()
 	srv := testServer(t, WithLogBuffer(buf))
@@ -121,7 +126,7 @@ func TestLogDeliveryFromAnotherNodeDoesNotCompleteTheRequest(t *testing.T) {
 	srv.ServeHTTP(rec, jsonRequest(http.MethodPost, "/v1/nodes/"+other+"/logs",
 		`{"deliveries":[{"request_id":"`+reqID+`","data":"forged\n"}]}`))
 	// The batch is accepted — one bogus entry must not fail a real agent's
-	// whole delivery — but the request must not be completed by it.
+	// whole delivery — but neither the row nor the buffer may accept it.
 	if rec.Code != http.StatusOK {
 		t.Fatalf("delivery batch should be accepted, got %d", rec.Code)
 	}
@@ -129,10 +134,37 @@ func TestLogDeliveryFromAnotherNodeDoesNotCompleteTheRequest(t *testing.T) {
 		Request struct {
 			State string `json:"state"`
 		} `json:"request"`
+		Chunks []struct {
+			Data string `json:"data"`
+		} `json:"chunks"`
 	}
 	readPage(t, srv, reqID, 0, &page)
 	if page.Request.State != string(store.LogPending) {
 		t.Fatalf("a foreign node completed the request: state=%s", page.Request.State)
+	}
+	if len(page.Chunks) != 0 {
+		t.Fatalf("a foreign node's content reached the requester: %+v", page.Chunks)
+	}
+}
+
+// A node may not forge deliveries for request ids that never existed either.
+// The buffer must not allocate an entry for them: its slots are bounded, so
+// a node spraying random UUIDs must not be able to occupy the lot and starve
+// legitimate deliveries out of the buffer.
+func TestLogDeliveryForUnknownRequestBuffersNothing(t *testing.T) {
+	buf := logbuf.New()
+	srv := testServer(t, WithLogBuffer(buf))
+	envID, nodeID := seedRunningInstance(t, srv)
+	openTail(t, srv, envID, `{"service":"api"}`)
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, jsonRequest(http.MethodPost, "/v1/nodes/"+nodeID+"/logs",
+		`{"deliveries":[{"request_id":"`+uuid.New().String()+`","data":"noise\n"}]}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delivery batch should be accepted, got %d", rec.Code)
+	}
+	if n := buf.Len(); n != 0 {
+		t.Fatalf("delivery for an unknown request must not allocate a buffer entry, got %d", n)
 	}
 }
 

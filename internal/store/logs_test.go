@@ -212,6 +212,39 @@ func TestCompleteLogRequestRejectsAnotherNode(t *testing.T) {
 	}
 }
 
+// The ownership check the API gates buffered content on. It answers exactly
+// what CompleteLogRequest enforces — this node's containers only — without
+// mutating anything, and a request that never existed is simply not owned
+// rather than an error: the caller treats "not ours" and "vanished" the same.
+func TestLogRequestOwnedByNode(t *testing.T) {
+	st := testStore(t)
+	dep, node, _ := logFixture(t, st)
+	lr, err := st.CreateLogRequest(testCtx(t), CreateLogRequestParams{
+		EnvironmentID: envIDOf(t, st, dep.ID), ServiceName: "api",
+	})
+	if err != nil {
+		t.Fatalf("CreateLogRequest: %v", err)
+	}
+	owned, err := st.LogRequestOwnedByNode(testCtx(t), node.ID, lr.ID)
+	if err != nil || !owned {
+		t.Fatalf("the owning node should own it, got owned=%v err=%v", owned, err)
+	}
+	impostor := newNode(t, st, orgOfNode(t, st, node.ID))
+	owned, err = st.LogRequestOwnedByNode(testCtx(t), impostor.ID, lr.ID)
+	if err != nil || owned {
+		t.Fatalf("a foreign node must not own it, got owned=%v err=%v", owned, err)
+	}
+	owned, err = st.LogRequestOwnedByNode(testCtx(t), node.ID, uuid.New())
+	if err != nil || owned {
+		t.Fatalf("a request that never existed is not owned, got owned=%v err=%v", owned, err)
+	}
+	// The check must not touch the row.
+	got, _ := st.GetLogRequest(testCtx(t), lr.ID)
+	if got.State != LogPending {
+		t.Fatalf("ownership check must not mutate the request, got %s", got.State)
+	}
+}
+
 // A failure has to be recorded and terminal: retrying forever against a
 // container that has gone would keep the node reading Docker for nothing.
 func TestCompleteLogRequestRecordsFailure(t *testing.T) {

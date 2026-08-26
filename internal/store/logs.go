@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -155,6 +156,31 @@ func (s *Store) LogRequestsForNode(ctx context.Context, nodeID uuid.UUID) ([]Pen
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// LogRequestOwnedByNode reports whether nodeID owns the container a request
+// reads. It exists so the API can gate the *content* of a delivery on
+// ownership before buffering it: CompleteLogRequest enforces the same scoping
+// for the row update, but by then a handler that wrote content first would
+// have already accepted a foreign node's bytes into the operator's tail —
+// and writing after the update flips a one-shot request to done before its
+// content lands, a window in which the reader is told "finished" and shown
+// nothing. Check without mutating, then buffer, then complete.
+func (s *Store) LogRequestOwnedByNode(ctx context.Context, nodeID, requestID uuid.UUID) (bool, error) {
+	var one int
+	err := s.pool.QueryRow(ctx, `
+		SELECT 1
+		FROM log_requests lr
+		JOIN service_instances si ON si.id = lr.instance_id
+		WHERE lr.id = $1 AND si.node_id = $2
+	`, requestID, nodeID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, mapErr(err)
+	}
+	return true, nil
 }
 
 // CompleteLogRequest records the outcome of a delivery. It takes no content:

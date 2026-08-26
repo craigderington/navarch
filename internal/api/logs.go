@@ -76,15 +76,24 @@ func (s *Server) handleLogDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, d := range req.Deliveries {
+		// Ownership gates the content, not just the row. Without this check
+		// a node could forge output into an operator's tail under any request
+		// id it knows — "credentials rotated, re-auth required" in a log tail
+		// is acted on, not read — or allocate buffer entries for ids nobody
+		// opened. The write happens before the completion because completing
+		// a one-shot request flips it to done, and a reader polling in that
+		// window would be told "finished" and shown nothing.
+		owned, err := s.st.LogRequestOwnedByNode(ctx, nodeID, d.RequestID)
+		if err != nil || !owned {
+			// A vanished request is routine rather than a failure, exactly as
+			// for instance reports: the requester may have closed the tail
+			// between the agent's poll and its delivery. Aborting the batch
+			// here would drop every other delivery in it.
+			continue
+		}
 		if d.Data != "" && s.logs != nil {
-			// A false return means nobody is reading this request any more. The
-			// row is still completed below so the node stops being asked.
 			s.logs.Write(d.RequestID, d.Data)
 		}
-		// A vanished request is routine rather than a failure, exactly as for
-		// instance reports: the requester may have closed the tail between the
-		// agent's poll and its delivery. Aborting the batch here would drop
-		// every other delivery in it.
 		if err := s.st.CompleteLogRequest(ctx, nodeID, d.RequestID, d.Error); err != nil {
 			continue
 		}
