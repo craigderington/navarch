@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        # Same image and credentials as the dev stack, on the same port, so
+        # the tests' default DSN works unchanged.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: composectl
+          POSTGRES_PASSWORD: composectl
+          POSTGRES_DB: composectl
+        ports:
+          - 5473:5432
+        options: >-
+          --health-cmd "pg_isready -U composectl"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      COMPOSECTL_TEST_DATABASE_URL: postgres://composectl:composectl@localhost:5473/composectl?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      # The boundaries are the main design decision in the codebase; a PR
+      # that silently links the Docker SDK into the control plane or the
+      # charmbracelet tree into a server binary should be red, not noticed
+      # in review.
+      - name: Boundary guards
+        run: |
+          if go list -deps ./cmd/controlplane | grep -q 'docker/docker'; then
+            echo "control plane links the Docker SDK" >&2; exit 1
+          fi
+          if go list -deps ./cmd/controlplane ./cmd/agent | grep -q 'charmbracelet'; then
+            echo "server binaries link the charmbracelet tree" >&2; exit 1
+          fi
+
+      # The same migrate image and invocation the dev stack uses, so CI
+      # applies migrations exactly as `make up` does.
+      - name: Apply migrations
+        run: |
+          docker run --rm --network host \
+            -v "$PWD/migrations:/migrations:ro" \
+            migrate/migrate:v4.18.1 \
+            -path=/migrations \
+            -database "$COMPOSECTL_TEST_DATABASE_URL" up
+
+      # Postgres is a hard dependency of store/rollout/api and the Docker
+      # daemon of the dockerd suite; the runner has both, so any skip means
+      # a test quietly proved nothing — which fails the build here exactly
+      # as it does under `make test` locally.
+      - name: Test
+        run: |
+          set -o pipefail
+          go test ./... -race -count=1 -v 2>&1 | tee /tmp/test.log
+          skips=$(grep -c '^--- SKIP' /tmp/test.log || true)
+          if [ "$skips" -ne 0 ]; then
+            grep '^--- SKIP' /tmp/test.log >&2
+            echo "$skips test(s) skipped — a green run proves nothing" >&2
+            exit 1
+          fi

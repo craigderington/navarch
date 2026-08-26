@@ -22,8 +22,8 @@ build: ## Build binaries into ./bin
 	CGO_ENABLED=0 go build -o bin/navarch ./cmd/navarch
 
 .PHONY: test
-test: ## Run tests
-	go test ./... -race -count=1
+test: ## Run tests (stops the dev control plane, fails on any skip)
+	@./scripts/test.sh
 
 .PHONY: up
 up: ## Start the dev stack
