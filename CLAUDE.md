@@ -729,11 +729,11 @@ the same guard shape as the Docker SDK.
 that old; advancing it would make "the control plane stopped answering"
 indistinguishable from "nothing is happening", which is precisely when the
 distinction matters. Panes also do not cost the same and the poll cadence
-reflects it: fleet, events and health are one request each, while the environment
-catalog is a walk of apps → stacks → envs (15 requests against the dev fleet,
-growing with the catalog) because **no endpoint lists an organization's
-environments** — that walk runs on a slow tier and only while its pane is in
-front. Adding `GET /v1/orgs/{org}/environments` would collapse it to one request.
+reflects it: fleet, events and health are one request each, and the environment
+catalog is one request too — `GET /v1/orgs/{org}/environments` (the catalog
+walk of apps → stacks → envs it replaced cost 15 requests against the dev
+fleet and grew with the catalog, so the TUI keeps the same slow tier and
+only-while-visible cadence out of habit rather than need).
 
 **An empty router config is a file with no `http` section — never an empty
 one.** Traefik's parser refuses an element with no children, so `routers: {}`
@@ -943,12 +943,9 @@ unit tests ran green against all three bugs.
   together. `go mod tidy` overshot the OTel stack to the latest (1.25-needing)
   versions rather than the older ones Docker minimally requires — fine, since
   we're at 1.25 anyway.
-- `internal/api` still lacks direct coverage for much of the catalog and
-  deployment surface. Overlay precedence has regression coverage through API
-  tests, while `internal/spec` and both config loaders now have focused tests.
-- The example stack's comment claims `cache` is "swappable (tmpfs only)",
-  but `cache` declares no mount at all. Harmless — it is swappable either
-  way — but the comment describes a case the example never exercises.
+- `internal/api` coverage: the catalog/deployment/validate handlers and
+  overlay precedence (`applyEnvConfig`) have HTTP-level/unit tests; `internal/spec`
+  and both config loaders have focused tests.
 - `examples/webapp/compose.yaml` uses placeholder images that don't pull;
   it's for parsing/classification only. The **runnable** demo stack is
   `examples/hello/compose.yaml` (real images), which `make demo` uses.

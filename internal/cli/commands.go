@@ -652,6 +652,11 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 	}
 }
 
+// waitPollInterval paces `navarch wait`'s polling. A package var rather than
+// a literal so tests can shorten it: the interval is patience, not logic,
+// and testing the loop's decisions should not cost 2s per step.
+var waitPollInterval = 2 * time.Second
+
 func cmdWait(ctx context.Context, e env, args []string) error {
 	flags, pos, err := flagMap(args)
 	if err != nil {
@@ -690,7 +695,7 @@ func cmdWait(ctx context.Context, e env, args []string) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(waitPollInterval):
 		}
 	}
 }
