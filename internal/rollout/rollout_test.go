@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/craig/composectl/internal/router"
 	"github.com/craig/composectl/internal/spec"
 	"github.com/craig/composectl/internal/store"
 )
@@ -494,5 +495,74 @@ func TestFailureReasonNamesAnUnhealthyServiceWithNoError(t *testing.T) {
 	dep, _ := st.GetDeployment(ctx(t), depID)
 	if !strings.Contains(dep.FailureReason, "unhealthy") {
 		t.Fatalf("an unhealthy instance with no error must still be described: %q", dep.FailureReason)
+	}
+}
+
+// captureRouter records the last Sync so a test can assert on the route set the
+// controller computed, rather than on a file only Traefik can judge.
+type captureRouter struct{ last []router.Route }
+
+func (c *captureRouter) Sync(routes []router.Route) error { c.last = routes; return nil }
+
+// syncRouter must omit a live route whose target is not fully known yet.
+// ListLiveRoutes LEFT JOINs both the reporting instance and the home node on
+// purpose, so a live deployment comes back with an empty address or a zero port
+// instead of vanishing — the caller has to tell "not ready" from "not live".
+// Inventing a target would send that hostname's traffic somewhere arbitrary,
+// and serving nothing until the next resync is the honest alternative. Nothing
+// pinned the branch, so removing it would have broken only the demos.
+func TestSyncRouterOmitsARouteWithNoReportedTarget(t *testing.T) {
+	st := testStore(t)
+	depID, nodeID, orgID := fixture(t, st)
+	setSpecIngress(t, st, depID)
+	if err := newSchedulerForOrg(st, discardLog(), orgID).ScheduleOnce(ctx(t)); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	reportAll(t, st, nodeID, store.InstanceRunning, "healthy")
+	advance(t, st, depID, store.DeployStarting, store.DeployHealthy, store.DeployLive)
+
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := st.Pool().Exec(ctx(t), sql, args...); err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+	}
+	// ListLiveRoutes returns nothing without a hostname, so give it one.
+	exec(`UPDATE environments SET hostname='omit.example.com'
+	      WHERE id=(SELECT environment_id FROM deployments WHERE id=$1)`, depID)
+
+	rtr := &captureRouter{}
+	// routeStrand stays zero, which disables reachability withdrawal entirely —
+	// so the only thing that can drop a route here is the branch under test.
+	c := newControllerForOrg(st, discardLog(), rtr, orgID)
+	sync := func(why string) []router.Route {
+		t.Helper()
+		if err := c.syncRouter(ctx(t)); err != nil {
+			t.Fatalf("syncRouter (%s): %v", why, err)
+		}
+		return rtr.last
+	}
+
+	// The agent has not reported a published port yet: address known, port not.
+	if got := sync("no port"); len(got) != 0 {
+		t.Fatalf("a live route with no published port must be omitted, got %+v", got)
+	}
+
+	// Once the port is reported the same route is served. Without this half the
+	// assertion above would also pass against a syncRouter that omitted every
+	// route unconditionally.
+	exec(`UPDATE service_instances SET ingress_port=32768
+	      WHERE deployment_id=$1 AND service_name='api'`, depID)
+	if got := sync("port reported"); len(got) != 1 || got[0].Target != "10.0.0.1" || got[0].Port != 32768 {
+		t.Fatalf("expected one route to 10.0.0.1:32768, got %+v", got)
+	}
+
+	// An environment whose home node row is gone reports no address at all
+	// (home_node_id is ON DELETE SET NULL), which must drop the route the same
+	// way a missing port does.
+	exec(`UPDATE environments SET home_node_id=NULL
+	      WHERE id=(SELECT environment_id FROM deployments WHERE id=$1)`, depID)
+	if got := sync("no node address"); len(got) != 0 {
+		t.Fatalf("a live route with no node address must be omitted, got %+v", got)
 	}
 }

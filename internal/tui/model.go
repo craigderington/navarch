@@ -39,12 +39,13 @@ func (p pane) title() string {
 	return "?"
 }
 
-// Refresh cadence is tiered because the cost of the panes is not equal. Fleet,
-// events and health are one request each; the environment catalog is a walk of
-// apps → stacks → envs and grows with the catalog (15 requests against the dev
-// fleet at the time of writing). Polling the walk on the fast tier would put
-// steady double-digit request rates on a control plane that is also running the
-// scheduler, controller and reaper loops.
+// Refresh cadence is tiered because the panes did not cost the same. Fleet,
+// events and health are one request each, and since handleListOrgEnvs landed
+// the environment catalog is one request too — it replaced a walk of apps →
+// stacks → envs that grew with the catalog rather than with what was on
+// display. The slow tier has outlived the cost that justified it and stays on
+// its own merits: a catalog listing changes when someone deploys, which is not
+// something an operator watches for sub-second change.
 const (
 	fastInterval = 3 * time.Second
 	slowInterval = 20 * time.Second
@@ -68,8 +69,8 @@ func (s section) stale(now time.Time) bool {
 	return s.updatedAt.IsZero() || now.Sub(s.updatedAt) > staleAfter
 }
 
-// envRow is one row of the environment catalog, flattened from the walk so the
-// pane can render without holding the tree.
+// envRow is one row of the environment catalog, flattened so the pane can
+// render without holding the tree the server assembled.
 type envRow struct {
 	App      string
 	Stack    string
@@ -361,9 +362,10 @@ func (m Model) due() fetches {
 	f.health = elapsed(m.health, m.now, fastInterval)
 	f.fleet = elapsed(m.fleet, m.now, fastInterval)
 	f.events = elapsed(m.events, m.now, fastInterval)
-	// The catalog walk runs on the slow tier, and only while its pane is in
-	// front. An operator watching the fleet has no use for a background walk
-	// that costs a request per stack.
+	// The catalog runs on the slow tier, and only while its pane is in front.
+	// Request volume no longer forces either — it is one request — but an
+	// operator watching the fleet has no use for a background refresh of a
+	// listing that only moves when someone deploys.
 	if m.active == paneEnvs || m.catalog.updatedAt.IsZero() {
 		f.catalog = elapsed(m.catalog, m.now, slowInterval)
 	}

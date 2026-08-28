@@ -829,8 +829,8 @@ would be permanent). `POST /v1/stacks/{stack}/versions` takes the compose
 file as the **raw body** (`curl --data-binary @compose.yaml`), authorship
 via `?created_by=`.
 
-**Sprint 4 — multi-node fleet. IN PROGRESS** (branch `sprint4-multi-node`).
-Design: `docs/superpowers/specs/2026-08-15-sprint4-multi-node-design.md`.
+**Sprint 4 — multi-node fleet. DONE** (merged to `master` in `240f5d1` and
+`3e710ec`). Design: `docs/superpowers/specs/2026-08-15-sprint4-multi-node-design.md`.
 Settled: a deployment is placed **whole onto one node** (no cross-node overlay,
 so the agent's container model is untouched); **one ingress node** reaches
 tenants over the mesh; the dev fleet is **Docker-in-Docker** so nodes are real
@@ -854,14 +854,29 @@ separate daemons.
   placement filter was scaffolding for exactly this and is gone;
   `AttachRouterToNetwork` went with it. `make demo-fleet` asserts a stack on the
   router-less node is served through the node that has one.
-- **Slice D** — drain and failover. Planned, not built:
+- **Slice D — drain and route withdrawal. DONE.** Plan:
   `docs/superpowers/plans/2026-08-16-sprint4-slice-d-drain-and-failover.md`.
-  The drain one-way door is already fixed (see the uncordon invariant above);
-  what remains is that `ListLiveRoutes` filters only on `d.state='live'` and
-  joins `nodes` purely for the address, so a drained or unreachable node keeps
-  serving routes — users get hangs rather than errors.
+  `ListLiveRoutes` now judges reachability on its own threshold, drain cordons
+  and evacuates what it safely can, and uncordon reopens the one-way door — all
+  three recorded as invariants above, which is where the reasoning lives.
+  Failover stayed deliberately manual and `retired` is still set by nothing.
 
-**Sprint 5** — Bubble Tea TUI, log aggregation, metrics
+**Sprint 5 — TUI, on-demand logs, org environment listing. DONE** (merged in
+`d07d7b6`). A read-only Bubble Tea dashboard over `internal/client`, container
+logs fetched through the agent poll and stored nowhere, and
+`GET /v1/orgs/{org}/environments` so the catalog is one request. The invariants
+sections above carry the reasoning; metrics landed earlier, with the audit work.
+
+**Sprint 6 — make green mean green + audit remediation. DONE.** Plan:
+`docs/superpowers/plans/2026-08-19-finish-line.md`; findings:
+`docs/audits/2026-08-19-qa-security-audit.md`. `make test` stops the dev
+control plane and fails the run on any `--- SKIP`, CI enforces the same plus
+the boundary guards and the `examples/webapp` digest baseline, and every audit
+finding is closed or listed there as consciously accepted. Coverage moved where
+the risk was: `internal/api` 50% → 78.5%, `internal/client` 27.8% → 82.8%.
+Accepted rather than fixed: S3 (a single oversized chunk is bounded at 2×) and
+S10's cosmetics. Deferred to Sprint 7 by design: **S4** (no TLS anywhere) and
+**S9** (the shared operator token, the gating item for calling this a product).
 
 **Post-review hardening. DONE.** Every API route except `/healthz` requires
 the shared `COMPOSECTL_AGENT_TOKEN`; both binaries fail closed when it is
