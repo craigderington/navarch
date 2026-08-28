@@ -231,3 +231,46 @@ func TestTakeBoolFlag(t *testing.T) {
 		})
 	}
 }
+
+// A bare "-" is a positional, not a flag.
+//
+// It parsed as a flag with an empty name, so the documented stdin form —
+// `navarch secret set --env E KEY -`, which exists specifically to keep a
+// secret out of shell history, `ps` and exec audit logs — failed with
+// "flag -- requires a value". The only way through was to pass the value on
+// argv, which is the handling S6 was closing.
+func TestBareDashIsAPositionalNotAFlag(t *testing.T) {
+	flags, pos, err := flagMap([]string{"--env", "dev/app/main/prod", "db_password", "-"})
+	if err != nil {
+		t.Fatalf("flagMap: %v", err)
+	}
+	if flags["env"] != "dev/app/main/prod" {
+		t.Fatalf("--env was lost: %v", flags)
+	}
+	if len(pos) != 2 || pos[0] != "db_password" || pos[1] != "-" {
+		t.Fatalf("expected [db_password -] as positionals, got %v", pos)
+	}
+	if _, ok := flags[""]; ok {
+		t.Fatal(`"-" was recorded as a flag with an empty name`)
+	}
+
+	// A dash in any other position is still a positional, and real flags around
+	// it keep working.
+	flags, pos, err = flagMap([]string{"-", "--org", "dev"})
+	if err != nil {
+		t.Fatalf("flagMap (leading dash): %v", err)
+	}
+	if flags["org"] != "dev" || len(pos) != 1 || pos[0] != "-" {
+		t.Fatalf("leading dash mishandled: flags=%v pos=%v", flags, pos)
+	}
+
+	// "--" still means "everything after this is positional", and "-x" is still
+	// a flag — the fix is narrow.
+	if _, pos, err = flagMap([]string{"--", "--not-a-flag"}); err != nil ||
+		len(pos) != 1 || pos[0] != "--not-a-flag" {
+		t.Fatalf(`"--" passthrough broke: pos=%v err=%v`, pos, err)
+	}
+	if flags, _, err = flagMap([]string{"--limit", "5"}); err != nil || flags["limit"] != "5" {
+		t.Fatalf("ordinary flag parsing broke: %v %v", flags, err)
+	}
+}

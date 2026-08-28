@@ -359,6 +359,17 @@ func (c *Client) UncordonNode(ctx context.Context, id string) (string, error) {
 	return out.Status, nil
 }
 
+// RotateNodeRecipient promotes the age key a node has advertised. The operator
+// approves what the node is already offering; there is no key to send, because
+// the control plane only ever sees public halves.
+func (c *Client) RotateNodeRecipient(ctx context.Context, id string) (*Node, error) {
+	var out Node
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/nodes/"+id+"/rotate-recipient", map[string]any{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) ListEvents(ctx context.Context, orgID string, limit int, beforeID int64) ([]Event, error) {
 	q := url.Values{}
 	if limit > 0 {

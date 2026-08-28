@@ -158,8 +158,13 @@ type Node struct {
 	Labels           map[string]string `json:"labels"`
 	AgentVersion     string            `json:"agent_version,omitempty"`
 	AgeRecipient     string            `json:"age_recipient,omitempty"`
-	LastHeartbeat    *time.Time        `json:"last_heartbeat,omitempty"`
-	CreatedAt        time.Time         `json:"created_at"`
+	// PendingAgeRecipient is a key the node has advertised that no operator has
+	// approved. It is never sealed to: RecipientsForEnvironment does not read
+	// it, because sealing to an unapproved key is the failure the pending state
+	// exists to prevent. Promote it with RotateNodeRecipient.
+	PendingAgeRecipient string     `json:"pending_age_recipient,omitempty"`
+	LastHeartbeat       *time.Time `json:"last_heartbeat,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
 	// Token is the plaintext node credential, returned once at first
 	// registration. It is never stored and is omitted on later reads.
 	Token string `json:"token,omitempty"`

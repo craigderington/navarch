@@ -1,0 +1,18 @@
+-- A node's age recipient stops being something the node can change.
+--
+-- RegisterNode upserts by (org_id, hostname) and assigned age_recipient from
+-- whatever registered. Anyone holding the shared service token could therefore
+-- re-register an existing hostname with their own key, and every secret set
+-- afterwards for environments homed there was sealed to it. The previous pass
+-- made that change audited, which records a credential redirect after it has
+-- happened; this makes it require a human.
+--
+-- A differing recipient is recorded here instead of taking effect. Nothing
+-- seals to this column -- RecipientsForEnvironment never reads it -- because
+-- sealing to a key nobody approved is the exact failure being closed. An
+-- operator promotes it with POST /v1/nodes/{id}/rotate-recipient.
+--
+-- The node keeps registering and heartbeating throughout. Refusing the
+-- registration would take its capacity out of the fleet over a key it has not
+-- been allowed to use, which punishes the fleet for someone else's request.
+ALTER TABLE nodes ADD COLUMN pending_age_recipient TEXT;

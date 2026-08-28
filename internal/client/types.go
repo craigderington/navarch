@@ -86,20 +86,24 @@ type Deployment struct {
 }
 
 type Node struct {
-	ID               string            `json:"id"`
-	OrgID            string            `json:"org_id"`
-	Hostname         string            `json:"hostname"`
-	AdvertiseAddr    string            `json:"advertise_addr"`
-	State            string            `json:"state"`
-	CPUMillis        int               `json:"cpu_millis"`
-	MemoryBytes      int64             `json:"memory_bytes"`
-	AllocCPUMillis   int               `json:"alloc_cpu_millis"`
-	AllocMemoryBytes int64             `json:"alloc_memory_bytes"`
-	AgentVersion     string            `json:"agent_version,omitempty"`
-	AgeRecipient     string            `json:"age_recipient,omitempty"`
-	Labels           map[string]string `json:"labels,omitempty"`
-	LastHeartbeat    *time.Time        `json:"last_heartbeat,omitempty"`
-	CreatedAt        time.Time         `json:"created_at"`
+	ID               string `json:"id"`
+	OrgID            string `json:"org_id"`
+	Hostname         string `json:"hostname"`
+	AdvertiseAddr    string `json:"advertise_addr"`
+	State            string `json:"state"`
+	CPUMillis        int    `json:"cpu_millis"`
+	MemoryBytes      int64  `json:"memory_bytes"`
+	AllocCPUMillis   int    `json:"alloc_cpu_millis"`
+	AllocMemoryBytes int64  `json:"alloc_memory_bytes"`
+	AgentVersion     string `json:"agent_version,omitempty"`
+	AgeRecipient     string `json:"age_recipient,omitempty"`
+	// PendingAgeRecipient is a key this node advertised that no operator has
+	// approved. Nothing is sealed to it until `navarch node rotate-recipient`
+	// promotes it.
+	PendingAgeRecipient string            `json:"pending_age_recipient,omitempty"`
+	Labels              map[string]string `json:"labels,omitempty"`
+	LastHeartbeat       *time.Time        `json:"last_heartbeat,omitempty"`
+	CreatedAt           time.Time         `json:"created_at"`
 }
 
 type SecretMeta struct {

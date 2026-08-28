@@ -246,6 +246,16 @@ func flagMap(args []string) (map[string]string, []string, error) {
 			pos = append(pos, args[i+1:]...)
 			break
 		}
+		if a == "-" {
+			// A bare dash is the conventional "read the value from stdin"
+			// marker and can never be a flag name. Without this it parses as a
+			// flag called "" and the documented
+			// `navarch secret set --env E KEY -` fails with "flag -- requires a
+			// value" — pushing the operator back to passing the secret on argv,
+			// which is precisely what that form exists to avoid.
+			pos = append(pos, a)
+			continue
+		}
 		if !strings.HasPrefix(a, "-") {
 			pos = append(pos, a)
 			continue
@@ -312,7 +322,7 @@ Commands:
   promote ID           Manually promote a healthy deployment
   rollback             Re-deploy an earlier revision
   secret               Set, list, and delete environment secrets
-  node                 List, get, drain, and uncordon nodes
+  node                 List, get, drain, uncordon, and rotate a node's age key
   events               Organization audit timeline
   logs ENV             Container output for one service (--service, --follow)
   wait ID              Block until a deployment reaches a state

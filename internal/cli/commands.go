@@ -554,7 +554,7 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 
 func cmdNode(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch node list|get|drain|uncordon ...")
+		return usage("usage: navarch node list|get|drain|uncordon|rotate-recipient ...")
 	}
 	switch args[0] {
 	case "list":
@@ -576,9 +576,10 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		rows := make([][]string, 0, len(nodes))
 		for _, n := range nodes {
 			rows = append(rows, []string{n.ID, n.Hostname, n.State, n.AdvertiseAddr,
-				strconv.Itoa(n.CPUMillis), formatLabels(n.Labels)})
+				strconv.Itoa(n.CPUMillis), formatLabels(n.Labels), pendingKey(n)})
 		}
-		return emit(e, nodes, []string{"ID", "HOSTNAME", "STATE", "ADDR", "CPU_MILLIS", "LABELS"}, rows)
+		return emit(e, nodes,
+			[]string{"ID", "HOSTNAME", "STATE", "ADDR", "CPU_MILLIS", "LABELS", "KEY"}, rows)
 	case "get":
 		if err := need(args, 2, "usage: navarch node get ORG/HOSTNAME"); err != nil {
 			return err
@@ -591,8 +592,19 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		if err != nil {
 			return err
 		}
-		return emitOne(e, n, []string{"ID", "HOSTNAME", "STATE", "ADDR", "LABELS"},
-			[]string{n.ID, n.Hostname, n.State, n.AdvertiseAddr, formatLabels(n.Labels)})
+		if err := emitOne(e, n, []string{"ID", "HOSTNAME", "STATE", "ADDR", "LABELS", "KEY"},
+			[]string{n.ID, n.Hostname, n.State, n.AdvertiseAddr, formatLabels(n.Labels), pendingKey(*n)}); err != nil {
+			return err
+		}
+		// Said in words as well as in a column: a pending key means secrets are
+		// still sealed to the old one, so this node cannot open anything written
+		// since it rotated. That is a live breakage, not a note.
+		if n.PendingAgeRecipient != "" && e.cfg.Output != "json" {
+			fmt.Fprintf(e.out, "\nThis node is advertising a new age key that no operator has approved.\n"+
+				"Secrets stay sealed to the old key until you run:\n"+
+				"  navarch node rotate-recipient %s\n", args[1])
+		}
+		return nil
 	case "drain":
 		if err := need(args, 2, "usage: navarch node drain ORG/HOSTNAME"); err != nil {
 			return err
@@ -647,9 +659,43 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		}
 		fmt.Fprintf(e.out, "%s\t%s\n", state, nodeID)
 		return nil
+	case "rotate-recipient":
+		if err := need(args, 2, "usage: navarch node rotate-recipient ORG/HOSTNAME"); err != nil {
+			return err
+		}
+		nodeID, err := e.resolveNode(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		// No key is passed. The operator approves the one the node is already
+		// advertising — the agent holds the private half and the control plane
+		// has never seen it, so "approve what is pending" is the only thing a
+		// human can meaningfully assert here.
+		n, err := e.c.RotateNodeRecipient(ctx, nodeID)
+		if err != nil {
+			return err
+		}
+		if e.cfg.Output == "json" {
+			return printJSON(e.out, n)
+		}
+		fmt.Fprintf(e.out, "rotated\t%s\t%s\n", n.Hostname, n.AgeRecipient)
+		return nil
 	default:
-		return usage("usage: navarch node list|get|drain|uncordon ...")
+		return usage("usage: navarch node list|get|drain|uncordon|rotate-recipient ...")
 	}
+}
+
+// pendingKey renders the one thing about a node's age key worth a column: not
+// the key itself, which is long and which nobody compares by eye, but whether
+// the platform and the node currently disagree about which one is in force.
+func pendingKey(n client.Node) string {
+	if n.PendingAgeRecipient != "" {
+		return "rotation pending"
+	}
+	if n.AgeRecipient == "" {
+		return "-"
+	}
+	return "ok"
 }
 
 // waitPollInterval paces `navarch wait`'s polling. A package var rather than

@@ -142,7 +142,8 @@ func (s *Store) GetNode(ctx context.Context, id uuid.UUID) (*Node, error) {
 	nodes, err := s.queryNodes(ctx, `
 		SELECT id, org_id, hostname, host(advertise_addr), state,
 		       cpu_millis, memory_bytes, alloc_cpu_millis, alloc_memory_bytes,
-		       labels, COALESCE(agent_version,''), COALESCE(age_recipient,''), last_heartbeat, created_at
+		       labels, COALESCE(agent_version,''), COALESCE(age_recipient,''),
+		       COALESCE(pending_age_recipient,''), last_heartbeat, created_at
 		FROM nodes WHERE id=$1
 	`, id)
 	if err != nil {

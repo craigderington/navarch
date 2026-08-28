@@ -31,10 +31,32 @@ type RegisterNodeParams struct {
 // is issued only when the node has no token_hash yet (first register or
 // post-migration); re-registration does not rotate it.
 //
-// A changing age_recipient is the one field whose update is a security
-// event: every secret set afterward for environments homed here is sealed to
-// the new key, so a silent overwrite is a credential redirect with no trace.
-// The first registration is not — there is no previous recipient to displace.
+// A changing age_recipient is the one field a node may not simply assign.
+// Every secret set afterwards for environments homed here would be sealed to
+// the new key, so accepting it on the word of whoever registered is a
+// credential redirect — and anyone holding the shared service token can
+// register. A differing key is therefore recorded as *pending* and takes no
+// effect until an operator promotes it (RotateNodeRecipient).
+//
+// Three cases, and they are not the same:
+//
+//   - no recorded recipient yet: set it. Nothing is displaced, and a node with
+//     no key was excluded from every prior sealing decision anyway.
+//   - same recipient: no change, and any stale pending value is cleared.
+//   - a different non-empty recipient: recorded as pending; the effective one
+//     is untouched.
+//
+// An empty incoming recipient is ignored rather than treated as a removal.
+// Writing it through would let any agent erase the platform's record of its own
+// key by failing to read a file — a denial-of-decryption with no operator in
+// the loop. An agent that genuinely lost its identity generates a new one and
+// advertises that, which is the pending case; empty means "not doing secrets
+// right now", and the answer to that is to keep what we already know.
+//
+// The node still registers, heartbeats and keeps its capacity throughout.
+// Refusing the registration would take a node out of the fleet over a key it
+// has not been allowed to use, which punishes the fleet for someone else's
+// request.
 func (s *Store) RegisterNode(ctx context.Context, p RegisterNodeParams) (*Node, error) {
 	labels, err := json.Marshal(orEmpty(p.Labels))
 	if err != nil {
@@ -48,13 +70,13 @@ func (s *Store) RegisterNode(ctx context.Context, p RegisterNodeParams) (*Node, 
 	var labelsOut []byte
 	var issuedHash *string
 	err = s.tx(ctx, func(tx pgx.Tx) error {
-		// The old recipient is needed to detect rotation, and RETURNING only
-		// sees post-update values — so read it first. A node that does not
-		// exist yet has none, and a first registration is not a rotation.
-		var oldRecipient *string
+		// The prior values are needed to decide whether this registration is
+		// proposing a change, and RETURNING only sees post-update values — so
+		// read them first. A node that does not exist yet has neither.
+		var oldRecipient, oldPending *string
 		if err := tx.QueryRow(ctx,
-			`SELECT age_recipient FROM nodes WHERE org_id=$1 AND hostname=$2`,
-			p.OrgID, p.Hostname).Scan(&oldRecipient); err != nil &&
+			`SELECT age_recipient, pending_age_recipient FROM nodes WHERE org_id=$1 AND hostname=$2`,
+			p.OrgID, p.Hostname).Scan(&oldRecipient, &oldPending); err != nil &&
 			!errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
@@ -71,29 +93,46 @@ func (s *Store) RegisterNode(ctx context.Context, p RegisterNodeParams) (*Node, 
 				memory_bytes   = EXCLUDED.memory_bytes,
 				labels         = EXCLUDED.labels,
 				agent_version  = EXCLUDED.agent_version,
-				age_recipient  = EXCLUDED.age_recipient,
+				-- The recipient rules above, in SQL. EXCLUDED.age_recipient is
+				-- already NULLIF'd, so NULL here means "the agent advertised
+				-- nothing", not "the agent asked for removal".
+				age_recipient = CASE
+					WHEN EXCLUDED.age_recipient IS NULL THEN nodes.age_recipient
+					WHEN nodes.age_recipient IS NULL    THEN EXCLUDED.age_recipient
+					ELSE nodes.age_recipient
+				END,
+				pending_age_recipient = CASE
+					WHEN EXCLUDED.age_recipient IS NULL              THEN nodes.pending_age_recipient
+					WHEN nodes.age_recipient IS NULL                 THEN NULL
+					WHEN EXCLUDED.age_recipient = nodes.age_recipient THEN NULL
+					ELSE EXCLUDED.age_recipient
+				END,
 				token_hash     = COALESCE(nodes.token_hash, EXCLUDED.token_hash),
 				last_heartbeat = now()
 			RETURNING id, org_id, hostname, host(advertise_addr), state,
 			          cpu_millis, memory_bytes, alloc_cpu_millis, alloc_memory_bytes,
 			          labels, COALESCE(agent_version,''), COALESCE(age_recipient,''),
-			          last_heartbeat, created_at, token_hash
+			          COALESCE(pending_age_recipient,''), last_heartbeat, created_at, token_hash
 		`, p.OrgID, p.Hostname, p.AdvertiseAddr, p.CPUMillis, p.MemoryBytes,
 			labels, p.AgentVersion, p.AgeRecipient, tokenHash).
 			Scan(&n.ID, &n.OrgID, &n.Hostname, &n.AdvertiseAddr, &n.State,
 				&n.CPUMillis, &n.MemoryBytes, &n.AllocCPUMillis, &n.AllocMemoryBytes,
-				&labelsOut, &n.AgentVersion, &n.AgeRecipient, &n.LastHeartbeat, &n.CreatedAt,
-				&issuedHash)
+				&labelsOut, &n.AgentVersion, &n.AgeRecipient, &n.PendingAgeRecipient,
+				&n.LastHeartbeat, &n.CreatedAt, &issuedHash)
 		if err != nil {
 			return err
 		}
-		// Same recipient spelled the same way (including both absent) is not a
-		// rotation. An empty incoming recipient is: a node dropping its key
-		// makes future secret writes for its environments fail, which is
-		// exactly the kind of change an operator must see in the timeline.
-		if oldRecipient != nil && p.AgeRecipient != *oldRecipient {
+		// A newly pending key is worth an event; the same key still pending is
+		// not. An agent that restarts in a loop re-registers each time, and a
+		// timeline that repeats the same request forever buries the one entry
+		// an operator needs to see.
+		proposed := p.AgeRecipient != "" && oldRecipient != nil && *oldRecipient != "" &&
+			p.AgeRecipient != *oldRecipient
+		alreadyPending := oldPending != nil && *oldPending == p.AgeRecipient
+		if proposed && !alreadyPending {
 			if err := appendEventTx(ctx, tx, p.OrgID, nil, &n.ID,
-				"node.recipient_rotated", "node age recipient changed on re-register",
+				"node.recipient_rotation_pending",
+				"node advertised a new age recipient; it takes no effect until an operator rotates it",
 				map[string]any{"hostname": p.Hostname}); err != nil {
 				return err
 			}
@@ -262,7 +301,8 @@ func (s *Store) ListNodes(ctx context.Context, orgID uuid.UUID) ([]Node, error) 
 	return s.queryNodes(ctx, `
 		SELECT id, org_id, hostname, host(advertise_addr), state,
 		       cpu_millis, memory_bytes, alloc_cpu_millis, alloc_memory_bytes,
-		       labels, COALESCE(agent_version,''), COALESCE(age_recipient,''), last_heartbeat, created_at
+		       labels, COALESCE(agent_version,''), COALESCE(age_recipient,''),
+		       COALESCE(pending_age_recipient,''), last_heartbeat, created_at
 		FROM nodes WHERE org_id=$1 ORDER BY hostname
 	`, orgID)
 }
@@ -272,7 +312,8 @@ func (s *Store) ListReadyNodes(ctx context.Context, orgID uuid.UUID) ([]Node, er
 	return s.queryNodes(ctx, `
 		SELECT id, org_id, hostname, host(advertise_addr), state,
 		       cpu_millis, memory_bytes, alloc_cpu_millis, alloc_memory_bytes,
-		       labels, COALESCE(agent_version,''), COALESCE(age_recipient,''), last_heartbeat, created_at
+		       labels, COALESCE(agent_version,''), COALESCE(age_recipient,''),
+		       COALESCE(pending_age_recipient,''), last_heartbeat, created_at
 		FROM nodes
 		WHERE org_id=$1 AND state='ready'
 		  AND last_heartbeat > now() - interval '30 seconds'
@@ -292,7 +333,8 @@ func (s *Store) queryNodes(ctx context.Context, sql string, args ...any) ([]Node
 		var labels []byte
 		if err := rows.Scan(&n.ID, &n.OrgID, &n.Hostname, &n.AdvertiseAddr, &n.State,
 			&n.CPUMillis, &n.MemoryBytes, &n.AllocCPUMillis, &n.AllocMemoryBytes,
-			&labels, &n.AgentVersion, &n.AgeRecipient, &n.LastHeartbeat, &n.CreatedAt); err != nil {
+			&labels, &n.AgentVersion, &n.AgeRecipient, &n.PendingAgeRecipient,
+			&n.LastHeartbeat, &n.CreatedAt); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(labels, &n.Labels); err != nil {
@@ -334,4 +376,65 @@ func (s *Store) EnvironmentsHomedPerNode(ctx context.Context, orgID uuid.UUID) (
 		out[id] = n
 	}
 	return out, rows.Err()
+}
+
+// RotateNodeRecipient promotes the key a node has been advertising to the one
+// its environments' secrets are sealed to.
+//
+// The operator does not supply the key — they approve the one already recorded
+// as pending. That is the only workable shape: the agent generates its identity
+// and the control plane never sees the private half, so what a human is
+// asserting here is "this node legitimately has a new key", which is precisely
+// the judgement the control plane cannot make and they can.
+//
+// Nothing pending is ErrConflict rather than a quiet success. A rotation that
+// reports "done" without having changed anything is exactly the ambiguity this
+// whole path exists to remove.
+func (s *Store) RotateNodeRecipient(ctx context.Context, nodeID uuid.UUID) (*Node, error) {
+	var n *Node
+	err := s.tx(ctx, func(tx pgx.Tx) error {
+		var orgID uuid.UUID
+		var hostname, promoted string
+		err := tx.QueryRow(ctx, `
+			UPDATE nodes
+			SET age_recipient = pending_age_recipient,
+			    pending_age_recipient = NULL
+			WHERE id = $1
+			  AND pending_age_recipient IS NOT NULL
+			  AND pending_age_recipient <> ''
+			RETURNING org_id, hostname, age_recipient
+		`, nodeID).Scan(&orgID, &hostname, &promoted)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Nothing was promoted. Separate "no such node" from "nothing to
+			// do", because they call for different actions from the operator.
+			var exists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT true FROM nodes WHERE id=$1`, nodeID).Scan(&exists); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrNotFound
+				}
+				return err
+			}
+			return fmt.Errorf("%w: node has no pending age recipient", ErrConflict)
+		}
+		if err != nil {
+			return err
+		}
+		// The event names the promotion, not the request — node.recipient_rotated
+		// now means it actually took effect. The actor rides on the context.
+		if err := appendEventTx(ctx, tx, orgID, nil, &nodeID,
+			"node.recipient_rotated", "operator promoted the node's pending age recipient",
+			map[string]any{"hostname": hostname}); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	n, err = s.GetNode(ctx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	return n, nil
 }

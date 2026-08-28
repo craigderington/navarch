@@ -60,6 +60,11 @@ token, and the shared `COMPOSECTL_AGENT_TOKEN` now opens only node registration
 and the metrics endpoint — a node has no identity of its own until it has
 registered. `navarch whoami` reports who a token belongs to and what it can see.
 
+A node can *advertise* a new age key but not adopt one: a changed recipient is
+held pending, nothing is sealed to it, and an operator promotes it with
+`navarch node rotate-recipient`. Otherwise anyone able to register a node could
+redirect the keys that every later secret is sealed to.
+
 **There is still no TLS.** Tokens and age ciphertext travel over plain HTTP, so
 the control plane belongs behind a reverse proxy that terminates TLS, or on a
 network you already trust. The compose file binds Postgres, the API, and Traefik
@@ -294,3 +299,8 @@ Named here rather than discovered in production:
   policy loop with no operational history behind it is a guess on a schedule.
 - **Roles are recorded but not enforced.** Every organization member has the
   same authority; the column exists so finer grants are a data migration later.
+- **Nodes are not shared between organizations.** A node is a trust boundary:
+  one agent holds one decryption identity for every environment it hosts, and
+  tenant containers share a kernel. An organization brings its own nodes.
+  Sharing them safely would need per-tenant sandboxing, which is a different
+  product.

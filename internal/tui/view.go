@@ -190,6 +190,14 @@ func (m Model) fleetPane(maxRows int) string {
 			pad(ratio(n.AllocMemoryBytes, n.MemoryBytes), 6) +
 			pad(hb, 10) +
 			labels(n.Labels)
+		// A node advertising an unapproved age key cannot open secrets sealed
+		// to the old one, so its next rollout there fails. It is a waiting
+		// operator decision, and an operator watching this dashboard is exactly
+		// who has to make it — silence here would mean noticing at the failure
+		// instead of before it.
+		if n.PendingAgeRecipient != "" {
+			line += styleWarn.Render("  ⚠ key rotation pending")
+		}
 		rows = append(rows, m.cursorLine(paneFleet, i, line))
 	}
 	return head + "\n" + window(rows, m.cursor[paneFleet], maxRows-1)

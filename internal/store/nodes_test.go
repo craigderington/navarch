@@ -174,12 +174,13 @@ func TestGetOrganizationBySlugUnknownIsNotFound(t *testing.T) {
 	}
 }
 
-// A changing age_recipient is a credential redirect: every secret set after
-// it is sealed to the new key. It must leave a trace in the org timeline —
-// "why can this node read our secrets" deserves an answer that is not
-// guesswork — while an unchanged recipient, a first registration, and a
-// routine capacity refresh must not add noise.
-func TestRegisterNodeRecipientRotationIsAudited(t *testing.T) {
+// A node may propose an age key; it may not assign one. Every secret set after
+// a recipient change is sealed to the new key, and anyone holding the shared
+// service token can register a node — so accepting the change on the word of
+// whoever registered is a credential redirect. Auditing it was the previous
+// pass and records the redirect after the fact; this refuses it until a human
+// approves.
+func TestARegisteringNodeCannotChangeItsOwnRecipient(t *testing.T) {
 	st := testStore(t)
 	org := newOrg(t, st)
 	host := uniq("node")
@@ -194,8 +195,7 @@ func TestRegisterNodeRecipientRotationIsAudited(t *testing.T) {
 		}
 		return n
 	}
-
-	countRotations := func() int {
+	countKind := func(kind string) int {
 		t.Helper()
 		evs, err := st.ListEvents(testCtx(t), org.ID, 0, 200)
 		if err != nil {
@@ -203,27 +203,181 @@ func TestRegisterNodeRecipientRotationIsAudited(t *testing.T) {
 		}
 		n := 0
 		for _, e := range evs {
-			if e.Kind == "node.recipient_rotated" {
+			if e.Kind == kind {
 				n++
 			}
 		}
 		return n
 	}
 
-	reg("age1first")   // first registration: no event
-	reg("age1first")   // same recipient: no event
-	reg("age1rotated") // rotation: one event
-	reg("age1rotated") // unchanged again: no event
-	if got := countRotations(); got != 1 {
-		t.Fatalf("expected exactly 1 rotation event, got %d", got)
+	// First registration: nothing is displaced, so it takes effect directly.
+	n := reg("age1first")
+	if n.AgeRecipient != "age1first" || n.PendingAgeRecipient != "" {
+		t.Fatalf("first registration must set the recipient outright: %+v", n)
+	}
+
+	// The same key again is not a change.
+	n = reg("age1first")
+	if n.AgeRecipient != "age1first" || n.PendingAgeRecipient != "" {
+		t.Fatalf("an unchanged recipient must not become pending: %+v", n)
+	}
+
+	// A different key is a request, not an assignment. This is the assertion
+	// the whole slice exists for.
+	n = reg("age1attacker")
+	if n.AgeRecipient != "age1first" {
+		t.Fatalf("a re-registration changed the effective recipient to %q", n.AgeRecipient)
+	}
+	if n.PendingAgeRecipient != "age1attacker" {
+		t.Fatalf("the proposed recipient must be recorded as pending, got %q", n.PendingAgeRecipient)
+	}
+	if got := countKind("node.recipient_rotation_pending"); got != 1 {
+		t.Fatalf("expected exactly 1 pending event, got %d", got)
+	}
+
+	// A crashlooping agent re-registers on every restart. The same request
+	// repeated must not bury the timeline.
+	reg("age1attacker")
+	if got := countKind("node.recipient_rotation_pending"); got != 1 {
+		t.Fatalf("a repeated proposal must not append a second event, got %d", got)
+	}
+
+	// An empty recipient must not erase what we know. Writing it through would
+	// let any agent revoke its own key by failing to read a file.
+	n = reg("")
+	if n.AgeRecipient != "age1first" {
+		t.Fatalf("an empty recipient erased the recorded one: %q", n.AgeRecipient)
+	}
+	if n.PendingAgeRecipient != "age1attacker" {
+		t.Fatalf("an empty recipient dropped the pending one: %q", n.PendingAgeRecipient)
+	}
+
+	// Advertising the original key again withdraws the request.
+	n = reg("age1first")
+	if n.PendingAgeRecipient != "" {
+		t.Fatalf("re-advertising the effective key must clear pending, got %q", n.PendingAgeRecipient)
 	}
 
 	evs, _ := st.ListEvents(testCtx(t), org.ID, 0, 200)
 	for _, e := range evs {
-		if e.Kind == "node.recipient_rotated" && e.NodeID == nil {
-			t.Fatal("rotation event must name the node it happened to")
+		if e.Kind == "node.recipient_rotation_pending" && e.NodeID == nil {
+			t.Fatal("a pending-rotation event must name the node it happened to")
 		}
 	}
+}
+
+// The operator half: promotion is the only thing that changes an effective
+// recipient, and it is what `node.recipient_rotated` now means.
+func TestRotateNodeRecipientPromotesOnlyWhatIsPending(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	host := uniq("node")
+	reg := func(recipient string) *Node {
+		t.Helper()
+		n, err := st.RegisterNode(testCtx(t), RegisterNodeParams{
+			OrgID: org.ID, Hostname: host, AdvertiseAddr: "10.0.0.7",
+			CPUMillis: 1000, MemoryBytes: 1 << 30, AgeRecipient: recipient,
+		})
+		if err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		return n
+	}
+	n := reg("age1old")
+
+	// Nothing pending is a conflict, not a quiet success: a rotation that
+	// reports "done" without changing anything is the ambiguity this removes.
+	if _, err := st.RotateNodeRecipient(testCtx(t), n.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("rotating with nothing pending must be ErrConflict, got %v", err)
+	}
+	if _, err := st.RotateNodeRecipient(testCtx(t), uuid.New()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rotating an unknown node must be ErrNotFound, got %v", err)
+	}
+
+	reg("age1new")
+	got, err := st.RotateNodeRecipient(testCtx(t), n.ID)
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if got.AgeRecipient != "age1new" || got.PendingAgeRecipient != "" {
+		t.Fatalf("promotion should have moved pending into effect: %+v", got)
+	}
+
+	// Promotion is what the rotated event means now, and rotating twice is not
+	// a second promotion.
+	evs, _ := st.ListEvents(testCtx(t), org.ID, 0, 200)
+	rotated := 0
+	for _, e := range evs {
+		if e.Kind == "node.recipient_rotated" {
+			rotated++
+		}
+	}
+	if rotated != 1 {
+		t.Fatalf("expected exactly 1 rotated event, got %d", rotated)
+	}
+	if _, err := st.RotateNodeRecipient(testCtx(t), n.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a second rotate must be ErrConflict, got %v", err)
+	}
+}
+
+// Nothing is ever sealed to a key nobody approved — which is the entire point
+// of the pending state, and the one place it could quietly leak back in.
+func TestSecretsAreNeverSealedToAPendingRecipient(t *testing.T) {
+	st := testStore(t)
+	org := newOrg(t, st)
+	app := newApp(t, st, org.ID)
+	stack := newStack(t, st, app.ID)
+	env, err := st.CreateEnvironment(testCtx(t), CreateEnvironmentParams{StackID: stack.ID, Slug: "prod"})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	host := uniq("node")
+	for _, r := range []string{"age1approved", "age1pending"} {
+		if _, err := st.RegisterNode(testCtx(t), RegisterNodeParams{
+			OrgID: org.ID, Hostname: host, AdvertiseAddr: "10.0.0.7",
+			CPUMillis: 4000, MemoryBytes: 8 << 30, AgeRecipient: r,
+		}); err != nil {
+			t.Fatalf("register %s: %v", r, err)
+		}
+	}
+
+	// RecipientsForEnvironment has three paths — home node, nodes already
+	// running the environment, then every ready node — and they read the
+	// recipient in different places. Checking only the fallback would leave the
+	// primary one free to leak, so both are asserted.
+	check := func(why string) {
+		t.Helper()
+		recipients, err := st.RecipientsForEnvironment(testCtx(t), env.ID)
+		if err != nil {
+			t.Fatalf("RecipientsForEnvironment (%s): %v", why, err)
+		}
+		var sawApproved bool
+		for _, r := range recipients {
+			if r == "age1pending" {
+				t.Fatalf("a pending recipient was used to seal a secret (%s): %v", why, recipients)
+			}
+			if r == "age1approved" {
+				sawApproved = true
+			}
+		}
+		if !sawApproved {
+			t.Fatalf("the approved recipient should still be sealed to (%s), got %v", why, recipients)
+		}
+	}
+
+	// No home node yet: the ready-node fallback.
+	check("unbound environment")
+
+	// Bound: the home-node path, which is the one a deployed environment uses.
+	nodes, err := st.ListNodes(testCtx(t), org.ID)
+	if err != nil || len(nodes) == 0 {
+		t.Fatalf("ListNodes: %v (%d)", err, len(nodes))
+	}
+	if _, err := st.Pool().Exec(testCtx(t),
+		`UPDATE environments SET home_node_id=$2 WHERE id=$1`, env.ID, nodes[0].ID); err != nil {
+		t.Fatalf("bind home node: %v", err)
+	}
+	check("homed environment")
 }
 
 // The regression this fixes: draining was a one-way door. DrainNode set

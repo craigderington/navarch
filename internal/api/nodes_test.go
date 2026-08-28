@@ -452,3 +452,84 @@ func TestUncordonIsAnOperatorEndpoint(t *testing.T) {
 		}
 	})
 }
+
+// The operator half of S7, over HTTP: a node's proposed key does nothing until
+// somebody with an identity approves it.
+//
+// The route is org-scoped like every other node route — TestEveryOperatorRoute
+// IsOrgScoped covers that — so what is left to check here is the transition
+// itself and the refusal when there is nothing to approve.
+func TestRotateRecipientIsAnOperatorAction(t *testing.T) {
+	srv := testServer(t, WithBearerToken("shared-service-token"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	org, err := srv.st.GetOrganizationBySlug(ctx, "dev")
+	if err != nil {
+		t.Fatalf("GetOrganizationBySlug: %v", err)
+	}
+	op := newScopedOperator(t, srv.st)
+	if err := srv.st.AddOrgMember(ctx, org.ID, op.id, "owner"); err != nil {
+		t.Fatalf("AddOrgMember: %v", err)
+	}
+
+	host := "rotate-" + uuid.NewString()[:8]
+	register := func(recipient string) *store.Node {
+		t.Helper()
+		n, err := srv.st.RegisterNode(ctx, store.RegisterNodeParams{
+			OrgID: org.ID, Hostname: host, AdvertiseAddr: "10.9.9.11",
+			CPUMillis: 1000, MemoryBytes: 1 << 30, AgeRecipient: recipient,
+		})
+		if err != nil {
+			t.Fatalf("RegisterNode(%s): %v", recipient, err)
+		}
+		return n
+	}
+	node := register("age1original")
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.st.Pool().Exec(c, `DELETE FROM nodes WHERE id=$1`, node.ID)
+	})
+	path := "/v1/nodes/" + node.ID.String() + "/rotate-recipient"
+
+	// Nothing pending: a conflict, so "rotated" never means "did nothing".
+	if rec := doAs(t, srv, http.MethodPost, path, op.token, ""); rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 with nothing pending, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The node proposes a new key. Over HTTP, the effective one must not move.
+	register("age1rotated")
+	got, err := srv.st.GetNode(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if got.AgeRecipient != "age1original" || got.PendingAgeRecipient != "age1rotated" {
+		t.Fatalf("re-registration should propose, not assign: %+v", got)
+	}
+
+	// A node cannot approve itself: its own token does not reach this route at
+	// all, which is what keeps the proposal and the approval separate parties.
+	if rec := doAs(t, srv, http.MethodPost, path, node.Token, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a node token must not reach an operator route, got %d", rec.Code)
+	}
+	if rec := doAs(t, srv, http.MethodPost, path, "shared-service-token", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("the shared service token must not approve a rotation, got %d", rec.Code)
+	}
+	if got, _ := srv.st.GetNode(ctx, node.ID); got.AgeRecipient != "age1original" {
+		t.Fatal("a refused request changed the effective recipient")
+	}
+
+	// The operator approves, and only then does it take effect.
+	rec := doAs(t, srv, http.MethodPost, path, op.token, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, err = srv.st.GetNode(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if got.AgeRecipient != "age1rotated" || got.PendingAgeRecipient != "" {
+		t.Fatalf("approval should have promoted the pending key: %+v", got)
+	}
+}

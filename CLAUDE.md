@@ -708,6 +708,51 @@ says and cannot know a number is unreasonable. `Tail` counts lines and a line ha
 no length limit, so `dockerd` caps bytes too and says so in the output — a
 silently short answer is indistinguishable from a container that stopped logging.
 
+**A node is a trust boundary, not a resource pool.** `nodes.org_id` is not an
+accounting detail and shared multi-org pools were considered in Sprint 7 Slice B
+and refused. Two things make a shared node a cross-tenant exposure, and neither
+is fixable with placement rules: **one agent holds one age identity and decrypts
+for every environment on its node**, so two tenants there means one key opens
+both tenants' secrets and compromising the node yields both — the whole value of
+sealing per node is that a node's blast radius is the node; and **one kernel**,
+where tenant containers are separated by Docker, which is not a boundary against
+a hostile tenant. The parser rejects `privileged`, `cap_add`, `pid`, `devices`
+and `security_opt` because they would be a host escape *if applied* — that keeps
+an honest tenant from breaking the platform, and is not an argument that a
+determined one cannot. Navarch's isolation — a network per revision, no shared
+mesh, secrets decrypted per environment — is isolation *within* a trust domain.
+Sharing a node safely needs per-tenant sandboxing (a VM or a gVisor/Kata-class
+runtime each), which is a different product; `internal/agent/dockerd` being the
+only package that knows the runtime is what keeps that door openable, but
+walking through it is a sprint about sandboxing, not a placement flag.
+
+**A node advertises its age recipient; it does not assign one.** `RegisterNode`
+upserts by `(org_id, hostname)` and anyone holding the shared service token can
+register, so accepting a recipient change on the registrant's word is a
+credential redirect: every secret set afterwards for environments homed there
+would be sealed to the new key. A *differing* non-empty recipient is recorded in
+`pending_age_recipient` and takes no effect; `RecipientsForEnvironment` never
+reads that column, because sealing to an unapproved key is the exact failure
+being closed. An operator promotes it with `POST /v1/nodes/{id}/rotate-recipient`
+(`navarch node rotate-recipient`), which is the only thing that moves an
+effective recipient and is now what `node.recipient_rotated` means —
+`node.recipient_rotation_pending` marks the request, once per distinct proposal
+so a crashlooping agent cannot bury the timeline.
+
+Three cases differ and the distinction is load-bearing: **no recorded recipient
+yet** is set outright (nothing is displaced, and that node was excluded from
+every prior sealing decision anyway); **the same key** clears any stale pending;
+**an empty incoming recipient is ignored, never treated as removal** — writing
+it through would let any agent erase the platform's record of its own key by
+failing to read a file, a denial-of-decryption with no operator in the loop. The
+node keeps registering and heartbeating throughout: refusing the registration
+would take its capacity out of the fleet over a key it has not been allowed to
+use. The operator never types a key — they approve the one the node is already
+advertising, because the agent holds the private half and the control plane has
+only ever seen public ones. A node that rotated without approval fails loudly
+(it cannot open secrets sealed to the old key) rather than quietly redirecting
+them, which is the trade this makes on purpose.
+
 **Authentication happens before the mux; authorization happens inside the
 handler.** `ServeHTTP` runs before any route has matched, so `r.PathValue` is
 empty there — the trap that once made every per-node endpoint return 401
@@ -873,7 +918,8 @@ The design and per-slice plan live in `docs/superpowers/`:
 `service_instances`); the agent is a dumb reconciler. Nodes are org-scoped,
 so the agent registers into a stable **`dev` org** (bootstrapped at
 control-plane startup via `BootstrapDevOrg`); `make demo` deploys into it.
-Multi-org node pools are Sprint 4.
+Nodes stay org-scoped — see the trust-boundary invariant above; shared pools
+were considered in Sprint 7 Slice B and deliberately refused.
 
 **Store methods** now also include, beyond the Sprint 1 catalog set:
 `RegisterNode`, `Heartbeat`, `ListNodes`, `ListReadyNodes`,
@@ -950,9 +996,12 @@ rather than documented.
   against org membership, and 30 routes are pinned by a test that enumerates the
   mux. `navarch whoami` and `navarch member` manage identity; the dev stack
   bootstraps `dev@navarch.local`. See the invariants above for the reasoning.
-- **Slice B** — the tenant edges: S7 completes (recipient rotation becomes an
-  operator action now that operators exist), and the multi-org node-pool
-  question gets decided rather than deferred again.
+- **Slice B — the tenant edges. DONE.** Plan:
+  `docs/superpowers/plans/2026-08-28-sprint7-slice-b-tenant-edges.md`. S7 is
+  closed: a re-registering node proposes a recipient (0014's
+  `pending_age_recipient`) and an operator promotes it. The multi-org node-pool
+  question is decided — nodes stay org-scoped, for the trust-boundary reason
+  recorded in the invariants above.
 - **Slice C** — transport (S4). No TLS anywhere today; the posture is a reverse
   proxy in front of the control plane, plus a client/agent guard refusing a
   non-TLS base URL outside loopback without `COMPOSECTL_INSECURE=1`.
@@ -1080,13 +1129,22 @@ unit tests ran green against all three bugs.
 ## Verification
 
 `go build ./...` before claiming anything compiles. Tested packages:
-`internal/parser` (16, pure), `internal/store` (~27), `internal/rollout`
-(scheduler + controller + reaper), `internal/api` (node, secret and preview
-handlers), `internal/agent` (reconcile logic, fake driver — pure),
-`internal/agent/dockerd` (against a real daemon), `internal/cli` (9, pure —
-argv, output, config precedence), `internal/client` (6, pure — `httptest`),
-`internal/router`, `internal/secrets`, `internal/metrics`, `internal/spec` and
-`internal/config`. The catalog/deployment half of `internal/api` still has none.
+`internal/parser` (40, pure), `internal/store` (88), `internal/rollout` (16 —
+scheduler, controller, reaper, router sync), `internal/api` (55 — catalog,
+deployments, nodes, secrets, previews, logs, auth and org scoping),
+`internal/agent` (29 — reconcile logic, fake driver — pure),
+`internal/agent/dockerd` (against a real daemon), `internal/cli` (26, pure —
+argv, output, config precedence), `internal/client` (13, pure — `httptest`),
+`internal/router`, `internal/secrets`, `internal/metrics`, `internal/logbuf`,
+`internal/tui`, `internal/spec`, `internal/config` and `cmd/controlplane`.
+Counts drift; treat them as a shape, and `grep -c "^func Test"` for the number.
+
+Two of those carry more weight than their count suggests.
+`TestEveryOperatorRouteIsOrgScoped` enumerates the mux rather than a list, so a
+new route is covered the moment it is registered — a new path *placeholder*
+fails it until the fixture can fill one, which is the point. And
+`internal/parser`'s `baseline_test.go` pins the `examples/webapp` digest, so a
+classification change fails a build instead of a demo.
 
 A `router` unit test can only check the *bytes* written — whether Traefik
 accepts them is outside Go's reach, which is exactly how the empty-config bug

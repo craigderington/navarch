@@ -273,6 +273,31 @@ func (s *Server) handleDrainNode(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRotateNodeRecipient promotes the age key a node has been advertising.
+//
+// This is the operator action that S7 was missing. A re-registering node can
+// propose a recipient but not assign one, so a compromised or merely
+// mistaken registration cannot redirect the keys that future secrets are sealed
+// to. Approving it is a human judgement — the control plane only ever sees
+// public halves and cannot tell a legitimate new key from a hostile one.
+func (s *Server) handleRotateNodeRecipient(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	id, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	if !s.authorizeNode(w, r, id) {
+		return
+	}
+	n, err := s.st.RotateNodeRecipient(ctx, id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, n)
+}
+
 // handleUncordonNode lifts a drain. It reports the state the node actually
 // landed in rather than a fixed "ready", because the store derives that from the
 // last heartbeat — telling the caller "ready" when the row says `unreachable`

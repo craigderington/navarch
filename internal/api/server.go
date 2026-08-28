@@ -404,6 +404,7 @@ func (s *Server) routes() {
 	s.handle("POST /v1/nodes/{id}/logs", s.handleLogDelivery)
 	s.handle("POST /v1/nodes/{id}/drain", s.handleDrainNode)
 	s.handle("POST /v1/nodes/{id}/uncordon", s.handleUncordonNode)
+	s.handle("POST /v1/nodes/{id}/rotate-recipient", s.handleRotateNodeRecipient)
 
 	// Secrets — encrypted at rest, plaintext never stored. The list response
 	// never includes values; see internal/secrets for the encrypt boundary.
