@@ -97,18 +97,27 @@ revisions, not slugs.
 ## Quickstart
 
 ```bash
-make tidy         # only after changing deps — go.sum is committed
-make up           # postgres + migrations + control plane + node agent
+make tidy          # only after changing deps — go.sum is committed
+make up            # postgres + migrations + control plane + a four-node fleet
 make health
-make validate     # parse examples/webapp, see classification
-make demo         # agent-driven rollout to healthy, over HTTP, real containers
-make demo-failure # bad image → failed, prior deployment untouched
-make demo-fleet   # two nodes, two daemons: ingress pinned, worker spread
-make agent-logs   # tail the node agent
-make psql         # database shell
-make logs         # tail control plane
-make nuke         # down + delete volumes
+make validate      # parse examples/webapp, see classification
+make demo          # agent-driven rollout to healthy, over HTTP, real containers
+make demo-failure  # bad image → failed, prior deployment untouched
+make demo-fleet    # two nodes, two daemons: ingress pinned, worker spread
+make demo-tls      # real Caddy in front of the API; plaintext refused elsewhere
+make demo-site     # this platform's own marketing site, deployed on it
+make migrate-check # every migration up, down and up again on a scratch database
+make release       # versioned, reproducible navarch binaries into dist/
+make agent-logs    # tail the node agent
+make psql          # database shell
+make logs          # tail control plane
+make nuke          # down + delete volumes
 ```
+
+`make demo-secrets`, `demo-rollback`, `demo-preview` and `demo-logs` are the
+rest of the suite. All of them need `make up` first, and the whole suite is
+expected to pass **from `make nuke`** — reservations are never released, so a
+fleet several demo runs deep will legitimately refuse to place the next one.
 
 ---
 
@@ -932,177 +941,43 @@ returned nil and left a file behind — and why that let the bug through:
 
 ---
 
-## Sprint status
+## History
 
-**Sprint 1 — control plane foundation. DONE.** Schema, parser, constraint
-validation, catalog + deployment endpoints, dev stack. Parser (16 cases)
-and store (now ~27 cases) tested against real Postgres.
+Eight sprints, all landed. The **Invariants** section above is the real
+documentation — it says what is true now and why, which is what a reader needs.
+This is only enough history to date a decision, and the design artifacts under
+`docs/superpowers/` carry the reasoning in full.
 
-**Sprint 2 — node agent + rollouts. DONE.**
+| Sprint | What it landed |
+|---|---|
+| 1 | Schema, parser, constraint validation, catalog + deployment endpoints, dev stack |
+| 2 | Node agent and the reconciliation spine; Traefik routing; auto-promotion; rollback |
+| 3 | Age-sealed secrets the control plane cannot read; preview environments with TTL and tombstoned teardown |
+| 4 | Multi-node fleet: environment affinity, scored placement, cross-node ingress, drain and route withdrawal |
+| 5 | Read-only TUI, on-demand container logs stored nowhere, one-request org environment listing |
+| 6 | Made green mean green — skip-failing test runner, CI, and the 2026-08-19 audit's findings closed |
+| 7 | Operator identity with per-org authorization, node recipient rotation as an operator action, TLS posture |
+| 8 | Module rename, versioned release binaries, the single-host deployment story, and its tested upgrade path |
 
-The design and per-slice plan live in `docs/superpowers/`:
-`specs/2026-07-23-sprint2-agent-rollouts-design.md` and
-`plans/2026-07-23-sprint2-slice-a-reconciliation-spine.md`.
+Two earlier passes are worth naming because their results are load-bearing and
+easy to mistake for incidental:
 
-- **Slice A** — the reconciliation spine. The agent drives a real Docker
-  daemon; the control-plane scheduler places pending deployments and writes
-  desired instances; the controller aggregates instance health and drives
-  `scheduling → starting → healthy`, failing the deployment (blue untouched)
-  if an instance fails. `make demo` is agent-driven end to end — **no SQL
-  fakery** — and shows blue/green coexistence with one shared pinned db.
-  `make demo-failure` shows a bad image → `failed`.
-- **Slice B** — Traefik as a real compose service, `internal/router`
-  generating its file-provider config, and the controller *auto-promoting*
-  on healthy (`PromoteDeployment` → router resync → old swappable torn
-  down). `make demo`'s traffic-flip step exercises this: revision 2 goes
-  live and Traefik moves traffic to it with zero downtime, no manual
-  `POST /promote` involved.
-- **Slice C** — `POST /v1/envs/{env}/rollback` re-deploys an older stack
-  version as a new revision through the same spine (append-only: rollback is
-  a new row, never a mutation of the old one). `make demo-rollback` exercises
-  it.
+**Post-review hardening.** Instance reports are scoped to the node in the
+request. Unsupported rollout strategies are rejected rather than silently
+treated as blue/green. Agent heartbeats report unique-container CPU/memory
+allocation, and placement checks both resources. Existing pinned services cannot
+change or disappear across a deployment, and Docker adoption verifies a
+resolved-runtime fingerprint — so a rotated secret cannot be silently claimed by
+an adopted container still running the old value.
 
-**Sprint 3 — secrets + preview environments. DONE.**
-
-- **Slice A (secrets)** — `POST /v1/envs/{env}/secrets` stores age
-  ciphertext, sealed to every ready node's recipient at write time; the
-  control plane never holds a decryption key. The agent decrypts
-  per-environment at container start using an identity that persists across
-  restarts (`COMPOSECTL_AGE_IDENTITY_FILE`, on the `age-identity` volume) and
-  injects into `${secret:KEY}` references. A deployment whose resolved spec
-  needs a secret the target environment never set is rejected with 422
-  before it reaches a node. This retired the Sprint 2 dev stand-in
-  (`COMPOSECTL_DEV_SECRETS`, a static `k=v` map baked into the agent's
-  environment) entirely. `make demo-secrets` exercises ciphertext-at-rest,
-  decrypt+inject, and the 422 fail-fast.
-- **Slice B (previews)** — `POST /v1/stacks/{stack}/previews` creates an
-  ephemeral environment, its first deployment, and (optionally) a copy of
-  another environment's secret ciphertext, all in one transaction. The
-  reaper loop expires previews past `expires_at`, writes a tombstone before
-  deleting the environment row, and the agent acts on that tombstone to
-  destroy the pinned container and named volumes an ordinary reconcile tick
-  would never touch. Hostnames are generated as
-  `{slug}-{stack}-{env8}.{COMPOSECTL_PREVIEW_DOMAIN}` and TTL is the only
-  lifecycle control — see **Preview environments** above. `make demo-preview`
-  exercises the full lifecycle: inherited secret served through Traefik, then
-  complete teardown.
-
-**Placement/agent model:** the scheduler owns placement (writes desired
-`service_instances`); the agent is a dumb reconciler. Nodes are org-scoped,
-so the agent registers into a stable **`dev` org** (bootstrapped at
-control-plane startup via `BootstrapDevOrg`); `make demo` deploys into it.
-Nodes stay org-scoped — see the trust-boundary invariant above; shared pools
-were considered in Sprint 7 Slice B and deliberately refused.
-
-**Store methods** now also include, beyond the Sprint 1 catalog set:
-`RegisterNode`, `Heartbeat`, `ListNodes`, `ListReadyNodes`,
-`GetOrganizationBySlug`, `CreateServiceInstances`, `DesiredStateForNode`,
-`ReportInstance`, `InstanceStates`, `DeleteInstances`,
-`ListPendingDeployments`, `ListRolloutsInState`, `CreatePreview`,
-`ExpireEnvironments`, `TombstonesForNode`, `SweepTombstones`, `GetStack`,
-`GetEnvironmentBySlug`. All node/deployment/preview endpoints are wired.
-Handler files in `internal/api`: `catalog.go`, `deployments.go`,
-`validate.go`, `nodes.go`, `previews.go`.
-
-`POST /v1/orgs` is self-serve (orgs are the root; a seeded migration UUID
-would be permanent). `POST /v1/stacks/{stack}/versions` takes the compose
-file as the **raw body** (`curl --data-binary @compose.yaml`), authorship
-via `?created_by=`.
-
-**Sprint 4 — multi-node fleet. DONE** (merged to `master` in `240f5d1` and
-`3e710ec`). Design: `docs/superpowers/specs/2026-08-15-sprint4-multi-node-design.md`.
-Settled: a deployment is placed **whole onto one node** (no cross-node overlay,
-so the agent's container model is untouched); **one ingress node** reaches
-tenants over the mesh; the dev fleet is **Docker-in-Docker** so nodes are real
-separate daemons.
-
-- **Slice A — environment affinity + scored placement. DONE.** `home_node_id`,
-  refusal to relocate, spread-first scoring, secret recipients keyed to the home
-  node. It landed first because the affinity bug was live in the code and needed
-  only a second node to become data loss.
-- **Slice B — the dev fleet. DONE.** `dind-b` + `agent-b` give node 2 its own
-  Docker daemon (`DOCKER_HOST`, no socket mount, its own age identity), nodes
-  advertise capabilities via `COMPOSECTL_NODE_LABELS`, and the scheduler places
-  against them. `make demo-fleet` proves an ingress stack lands on the router
-  node while a no-ingress stack spreads to the other *and runs on that node's
-  daemon*. Node 1 stays on the host daemon this slice: moving Traefik into DinD
-  means solving cross-node ingress, which is Slice C's subject, and would leave
-  `make demo` broken in between.
-- **Slice C — cross-node ingress. DONE.** The router targets a node address and
-  a published port instead of a container name, so ingress no longer requires
-  the router to share a daemon with the tenant. Slice B's `ingress=true`
-  placement filter was scaffolding for exactly this and is gone;
-  `AttachRouterToNetwork` went with it. `make demo-fleet` asserts a stack on the
-  router-less node is served through the node that has one.
-- **Slice D — drain and route withdrawal. DONE.** Plan:
-  `docs/superpowers/plans/2026-08-16-sprint4-slice-d-drain-and-failover.md`.
-  `ListLiveRoutes` now judges reachability on its own threshold, drain cordons
-  and evacuates what it safely can, and uncordon reopens the one-way door — all
-  three recorded as invariants above, which is where the reasoning lives.
-  Failover stayed deliberately manual and `retired` is still set by nothing.
-
-**Sprint 5 — TUI, on-demand logs, org environment listing. DONE** (merged in
-`d07d7b6`). A read-only Bubble Tea dashboard over `internal/client`, container
-logs fetched through the agent poll and stored nowhere, and
-`GET /v1/orgs/{org}/environments` so the catalog is one request. The invariants
-sections above carry the reasoning; metrics landed earlier, with the audit work.
-
-**Sprint 6 — make green mean green + audit remediation. DONE.** Plan:
-`docs/superpowers/plans/2026-08-19-finish-line.md`; findings:
-`docs/audits/2026-08-19-qa-security-audit.md`. `make test` stops the dev
-control plane and fails the run on any `--- SKIP`, CI enforces the same plus
-the boundary guards and the `examples/webapp` digest baseline, and every audit
-finding is closed or listed there as consciously accepted. Coverage moved where
-the risk was: `internal/api` 50% → 78.5%, `internal/client` 27.8% → 82.8%.
-Accepted rather than fixed: S3 (a single oversized chunk is bounded at 2×) and
-S10's cosmetics. Deferred to Sprint 7 by design: **S4** (no TLS anywhere) and
-**S9** (the shared operator token, the gating item for calling this a product).
-
-**Sprint 7 — operator identity and transport. DONE.** Plan:
-`docs/superpowers/plans/2026-08-28-sprint7-slice-a-operator-identity.md`.
-The finish line was settled as a **multi-tenant product**, so S9 is closed
-rather than documented.
-
-- **Slice A — operator identity + per-org authorization. DONE.** `operators`,
-  `operator_tokens` and `organization_members` (0012); `events.actor_operator_id`
-  (0013). Authentication resolves an identity before the mux, handlers authorize
-  against org membership, and 30 routes are pinned by a test that enumerates the
-  mux. `navarch whoami` and `navarch member` manage identity; the dev stack
-  bootstraps `dev@navarch.local`. See the invariants above for the reasoning.
-- **Slice B — the tenant edges. DONE.** Plan:
-  `docs/superpowers/plans/2026-08-28-sprint7-slice-b-tenant-edges.md`. S7 is
-  closed: a re-registering node proposes a recipient (0014's
-  `pending_age_recipient`) and an operator promotes it. The multi-org node-pool
-  question is decided — nodes stay org-scoped, for the trust-boundary reason
-  recorded in the invariants above.
-- **Slice C — transport. DONE.** S4 closed: `internal/transport` refuses
-  plaintext credentials outside loopback and container networks in both
-  binaries, `deploy/tls/` documents the reverse-proxy posture, and
-  `make demo-tls` proves it against a real Caddy rather than asserting it. See
-  the invariants above.
-
-**Sprint 8 — packaging and the 1.0 line.** Not started. Release engineering
-(and the module rename decision, which is this slice's one atomic commit or
-never), the deployment story, the deliberate non-features named in the README,
-and refreshed baselines asserted in CI.
-
-**Post-review hardening. DONE.** Every API route except `/healthz` requires
-the shared `COMPOSECTL_AGENT_TOKEN`; both binaries fail closed when it is
-absent. Instance reports are scoped to the node in the request. Unsupported
-rollout strategies are rejected (only blue/green is implemented). Agent
-heartbeats report unique-container CPU/memory allocation and placement checks
-both resources. Existing pinned services cannot change or disappear across a
-deployment, and Docker adoption verifies a resolved-runtime fingerprint so a
-secret rotation cannot be silently claimed without recreating the container.
-
-**Audit + operational metrics. DONE.** Deployment lifecycle changes, preview
-expiry, and secret key/version mutations append events transactionally. Events
-survive deployment deletion (`0004_audit_events` changes the FK to `SET NULL`),
-and `GET /v1/orgs/{org}/events` provides newest-first cursor pagination.
-`GET /metrics` is authenticated Prometheus text format: bounded HTTP route
-labels, loop results/durations, DB availability, deployment states, ready
-nodes, active previews, and recent tombstones. Never add secret values, raw
-request paths, compose bodies, or environment values to events or metric labels.
+**Audit + operational metrics.** Deployment lifecycle changes, preview expiry,
+and secret key/version mutations append events transactionally; events survive
+deployment deletion (`0004_audit_events` moves the FK to `SET NULL`) and now
+name the operator who caused them. `GET /metrics` is Prometheus text format with
+bounded labels: route patterns, loop results and durations, DB availability,
+deployment states, ready nodes, active previews, recent tombstones. **Never add
+secret values, raw request paths, compose bodies, or environment values to
+events or metric labels.**
 
 ---
 
@@ -1178,7 +1053,20 @@ unit tests ran green against all three bugs.
   value into its HTTP response (`hello`'s services don't echo anything, so
   it can't prove secret content that way); `preview` pairs that same
   echoing service with a pinned db, so an expiring preview has a pinned
-  container and a named volume actually worth destroying.
+  container and a named volume actually worth destroying. `examples/site` is
+  this platform's own marketing page — one swappable service with an ingress and
+  no durable state, so a rollout there is a blue/green flip with nothing else in
+  the way, which is exactly why it was the demo that exposed the teardown race.
+  Its image is built and distributed by `make site-image`; the platform never
+  builds anything, so that script is the operator side of the same contract that
+  makes `build:` a rejected directive.
+- **Isolated single-request failures during a router config swap are not fully
+  explained.** The systematic ~1.2s outage is fixed (see the teardown-grace
+  invariant), but roughly one probe in a hundred still fails at the moment
+  Traefik swaps backends. `make demo-site` therefore asserts on *consecutive*
+  failures — the regression signature — and counts the rest. Worth chasing with
+  Traefik access logs and a longer probe run; not worth making the demo flaky
+  over, because a flaky demo teaches people to re-run rather than to look.
 - Revision-network cleanup is agent-owned. Reconcile keeps the current desired
   project-network set, disconnects same-environment managed containers **and
   the platform's own ingress router** from obsolete labelled networks, and

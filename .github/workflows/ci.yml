@@ -63,6 +63,18 @@ jobs:
             -path=/migrations \
             -database "$COMPOSECTL_TEST_DATABASE_URL" up
 
+      # The down migrations are otherwise never run: written once, and found to
+      # be wrong at the moment somebody needs to roll back. This round-trips the
+      # whole chain up, down and up again on a throwaway database.
+      - name: Migrations round-trip
+        run: make migrate-check
+
+      # A release must build for every platform it claims, and the binary must
+      # report the version it was stamped with — a release that says "dev" is
+      # one nobody can identify later.
+      - name: Release build
+        run: make release
+
       # Postgres is a hard dependency of store/rollout/api and the Docker
       # daemon of the dockerd suite; the runner has both, so any skip means
       # a test quietly proved nothing — which fails the build here exactly

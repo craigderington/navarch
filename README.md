@@ -49,6 +49,10 @@ The platform loop is implemented end to end across a multi-node fleet:
 - A read-only terminal dashboard (`navarch tui`)
 - Operator identity with per-organization authorization, and an audit timeline
   that names who did what
+- TLS terminated at a reverse proxy, with both binaries refusing to send
+  credentials over plaintext they cannot contain
+- Versioned, reproducible release binaries and a single-host deployment whose
+  upgrade path is tested rather than described
 
 Only `blue_green` is currently supported. Requests for `rolling` or `recreate`
 are rejected rather than silently receiving different behavior.
@@ -82,6 +86,25 @@ warns every time it does.
 The compose file binds Postgres, the API, and Traefik to loopback so fleet
 containers cannot hairpin to the control plane. Traefik's insecure API is
 disabled.
+
+## Install
+
+```bash
+go install github.com/craigderington/navarch/cmd/navarch@latest
+```
+
+Or take a binary from a release (`linux/amd64`, `linux/arm64`, `darwin/amd64`,
+`darwin/arm64`), verify it, and put it on your PATH:
+
+```bash
+sha256sum -c SHA256SUMS
+tar -xzf navarch_1.0.0_linux_amd64.tar.gz && sudo mv navarch /usr/local/bin/
+navarch version
+```
+
+Running the control plane itself is a compose file and four environment
+variables — see [deploy/README.md](deploy/README.md), which also documents the
+upgrade sequence (pull, migrate, restart) and what to back up.
 
 ## Quickstart
 

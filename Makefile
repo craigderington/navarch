@@ -94,6 +94,12 @@ demo-preview: ## Create a preview env with inherited secrets, then watch it expi
 	@API_TOKEN=$(API_TOKEN) ./scripts/demo-preview.sh
 
 .PHONY: demo-fleet
+migrate-check: ## Round-trip every migration up/down/up on a throwaway database
+	./scripts/migrate-check.sh
+
+release: ## Build versioned, reproducible navarch binaries into dist/
+	./scripts/release.sh
+
 site-image: ## Build the marketing-site image and load it onto every node
 	./scripts/site-image.sh
 

@@ -1,8 +1,8 @@
 // Command navarch is the operator CLI for the Navarch control plane.
 //
-// The directory is named for the binary, not the module: the import path stays
-// github.com/craigderington/navarch so the rename does not churn every internal
-// package, while `go build ./cmd/navarch` still produces a `navarch`.
+// The directory is named for the binary so `go build ./cmd/navarch` and
+// `go install github.com/craigderington/navarch/cmd/navarch@latest` both
+// produce a `navarch`.
 package main
 
 import (

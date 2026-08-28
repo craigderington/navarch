@@ -1,0 +1,142 @@
+# Navarch on a single host.
+#
+# This is the whole control plane: Postgres, migrations, the API, the router,
+# and one node agent on the same box. It is what you would put on a small VM —
+# a Lightsail instance, a Hetzner box, an EC2 t4g — to run your own stacks.
+#
+# It differs from the repository's dev compose.yaml in four ways that matter,
+# and each is a thing the dev stack does deliberately that production must not:
+#
+#   1. Images are pulled by tag, not built. A host that builds its own control
+#      plane cannot tell you what it is running.
+#   2. Secrets come from the environment (a .env file beside this one), never
+#      from literals in the file. `docker compose config` prints this file.
+#   3. The agent drives the host's own Docker daemon over a mounted socket.
+#      The dev stack uses Docker-in-Docker to fake a fleet; a real single-node
+#      install has one real daemon and should use it.
+#   4. Nothing but the TLS proxy is published. The API listens on the compose
+#      network only — see deploy/tls/ for terminating TLS in front of it.
+#
+# Bring it up:
+#   cp deploy/production/env.example .env && $EDITOR .env
+#   docker compose -f deploy/production/compose.yaml up -d
+#
+# Upgrading is pull, migrate, restart, in that order — see deploy/README.md.
+# Migrations are immutable and only ever additive, which is what makes that
+# sequence safe to run before the new binaries start.
+
+name: navarch
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-navarch}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # Never published. Anything that needs the database is on this network.
+
+  # Runs to completion on every `up`, before the control plane starts. Applying
+  # migrations from a one-shot rather than from the API process means an upgrade
+  # cannot half-migrate because two replicas raced to do it.
+  migrate:
+    image: migrate/migrate:v4.18.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-navarch}?sslmode=disable"
+      - "up"
+
+  controlplane:
+    image: ${NAVARCH_IMAGE:-ghcr.io/craigderington/navarch/controlplane}:${NAVARCH_VERSION:?set NAVARCH_VERSION in .env}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      COMPOSECTL_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-navarch}?sslmode=disable
+      COMPOSECTL_LISTEN_ADDR: 0.0.0.0:8417
+      # The shared token now opens only node registration and /metrics. It is
+      # still a credential: an attacker holding it can enrol a node.
+      COMPOSECTL_AGENT_TOKEN: ${NAVARCH_SERVICE_TOKEN:?set NAVARCH_SERVICE_TOKEN in .env}
+      # The first operator. Leave the token unset: the control plane mints one
+      # from crypto/rand and logs it exactly once on first boot. Read it with
+      # `docker compose logs controlplane | grep bootstrap`, store it, and it
+      # will never be printed again.
+      COMPOSECTL_BOOTSTRAP_OPERATOR_EMAIL: ${NAVARCH_OPERATOR_EMAIL:?set NAVARCH_OPERATOR_EMAIL in .env}
+      COMPOSECTL_ROUTER_DIR: /dynamic
+      COMPOSECTL_PREVIEW_DOMAIN: ${NAVARCH_PREVIEW_DOMAIN:-preview.localhost}
+    volumes:
+      - traefik-dynamic:/dynamic
+    healthcheck:
+      test: ["CMD", "/composectl-controlplane", "-healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    # Deliberately no `ports:`. Put deploy/tls/ in front of it.
+
+  traefik:
+    image: traefik:v3.3
+    restart: unless-stopped
+    command:
+      - "--entryPoints.web.address=:80"
+      - "--providers.file.directory=/dynamic"
+      - "--providers.file.watch=true"
+      # Traefik batches provider updates at 2s by default, which is how long a
+      # promoted rollout can keep sending traffic to the revision it just
+      # superseded. The control plane's teardown grace covers that window; this
+      # shortens it. See CLAUDE.md's teardown-grace invariant.
+      - "--providers.providersThrottleDuration=100ms"
+      - "--log.level=INFO"
+    ports:
+      # This is the tenant ingress — the port your deployed stacks are served
+      # on. It is the one thing here that faces the world.
+      - "80:80"
+    volumes:
+      - traefik-dynamic:/dynamic:ro
+
+  agent:
+    image: ${NAVARCH_AGENT_IMAGE:-ghcr.io/craigderington/navarch/agent}:${NAVARCH_VERSION}
+    restart: unless-stopped
+    depends_on:
+      controlplane:
+        condition: service_healthy
+    environment:
+      COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
+      COMPOSECTL_ORG: ${NAVARCH_ORG:-dev}
+      COMPOSECTL_NODE_HOSTNAME: ${NAVARCH_NODE_HOSTNAME:-node-1}
+      # What Traefik connects to when routing to this node's containers. On a
+      # single host this is the address the agent's containers publish on, which
+      # is the host as seen from the compose network.
+      COMPOSECTL_ADVERTISE_ADDR: ${NAVARCH_ADVERTISE_ADDR:-172.17.0.1}
+      COMPOSECTL_AGENT_TOKEN: ${NAVARCH_SERVICE_TOKEN}
+      COMPOSECTL_NODE_LABELS: ingress=true
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-4096}
+    volumes:
+      # The agent drives this host's Docker daemon. This is the one genuinely
+      # privileged thing in the file: the socket is root-equivalent, which is
+      # why the control plane and the agent are separate processes and only this
+      # one gets it.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The node's age identity. Secrets are sealed to this key, so losing this
+      # volume means every secret must be re-set — back it up with pgdata.
+      - age-identity:/identity
+
+volumes:
+  pgdata:
+  traefik-dynamic:
+  age-identity:

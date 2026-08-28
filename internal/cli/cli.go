@@ -1,4 +1,4 @@
-// Package cli is the composectl command-line interface.
+// Package cli is the navarch command-line interface.
 package cli
 
 import (
@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -14,7 +15,15 @@ import (
 	"github.com/craigderington/navarch/internal/client"
 )
 
-const version = "0.1.0"
+// Build metadata, stamped by the linker at release time
+// (scripts/release.sh). Vars, not consts, because -X can only set vars — and
+// the defaults are deliberately not a version number: a binary someone built
+// from a working tree should say so rather than claim to be a release.
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
 
 // Run executes composectl with the given argv (no program name) and returns
 // the process exit code. stdout/stderr are injected so tests can capture them.
@@ -45,7 +54,16 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if cmd == "version" {
-		fmt.Fprintf(stdout, "navarch %s\n", version)
+		// Commit and build date are here because the first question about a
+		// misbehaving deployment is "which build is this", and a bare semver
+		// cannot answer it for anything built between tags.
+		if flags.cfg.Output == "json" {
+			return printExit(printJSON(stdout, map[string]string{
+				"version": version, "commit": commit, "built": date, "go": runtime.Version(),
+			}), stderr)
+		}
+		fmt.Fprintf(stdout, "navarch %s\ncommit  %s\nbuilt   %s\ngo      %s\n",
+			version, commit, date, runtime.Version())
 		return 0
 	}
 
@@ -361,3 +379,13 @@ Examples:
   navarch events --org dev --limit 20
   navarch logs dev/shop/main/staging --service api --follow
 `
+
+// printExit turns an output error into an exit code, for the handful of
+// commands that run before the client (and its error handling) exists.
+func printExit(err error, stderr io.Writer) int {
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return 0
+}
