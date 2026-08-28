@@ -49,6 +49,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	// Before any credential is put on the wire, not after a request has already
+	// carried it.
+	if err := guardTransport(cfg.URL, stderr); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
 	c, err := client.New(cfg.URL, cfg.Token)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -304,6 +310,8 @@ Usage:
 Global flags:
   --url URL            Control plane URL (env NAVARCH_URL, default http://localhost:8417)
   --token TOKEN        Operator token (env NAVARCH_TOKEN or NAVARCH_AGENT_TOKEN)
+                       Plaintext http:// is refused outside loopback and
+                       container networks; NAVARCH_INSECURE=1 overrides.
   --token-file PATH    Read token from a file
   --output, -o FMT     table (default) or json
 

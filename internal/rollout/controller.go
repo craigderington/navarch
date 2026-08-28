@@ -32,6 +32,40 @@ type Controller struct {
 	// production constructor sets it from config, and the test constructors
 	// choose deliberately rather than inheriting a number.
 	routeStrand time.Duration
+	// teardownGrace is how long a deployment must have been terminal before its
+	// instance rows are deleted. See ReconcileOnce for why it is a duration and
+	// not a tick count.
+	teardownGrace time.Duration
+	// firstTerminal records when each deployment was first seen terminal.
+	// Unmutexed because the controller runs in one goroutine, the same
+	// invariant the agent's Reconciler documents for its own maps.
+	firstTerminal map[uuid.UUID]time.Time
+	// now is injectable so the grace can be tested without sleeping.
+	now func() time.Time
+}
+
+// DefaultTeardownGrace is how long a superseded revision keeps serving after
+// the router has been repointed away from it.
+//
+// It must exceed the time for a router config change to actually take effect,
+// which is not the time to write the file. Traefik's file provider throttles
+// provider updates — `providers.providersThrottleDuration`, 2s by default — so
+// for up to two seconds after Sync returns, Traefik is still sending traffic to
+// the revision this is about to delete. Measured: with no grace at all, every
+// promotion dropped ~1.2s of requests with 502s, while both containers were up
+// and healthy the whole time. The containers were never the problem; the router
+// was still pointing at the old one when its rows were deleted.
+//
+// Five seconds is deliberately more than double the throttle. The cost is that
+// a superseded revision lives a few seconds longer; the benefit is that
+// "zero-downtime" is a property rather than a hope.
+const DefaultTeardownGrace = 5 * time.Second
+
+// WithTeardownGrace overrides how long a superseded revision is kept after the
+// router stops pointing at it. Zero tears down immediately, which is only
+// correct when nothing external routes to it.
+func WithTeardownGrace(d time.Duration) func(*Controller) {
+	return func(c *Controller) { c.teardownGrace = d }
 }
 
 // WithRouteStrand sets how long a node may go unheard from before its routes
@@ -52,7 +86,8 @@ func (c *Controller) listRollouts(ctx context.Context, states ...store.Deploymen
 }
 
 func NewController(st *store.Store, log *slog.Logger, rtr RouterSync, opts ...func(*Controller)) *Controller {
-	c := &Controller{st: st, log: log, rtr: rtr, startTimeout: 5 * time.Minute}
+	c := &Controller{st: st, log: log, rtr: rtr, startTimeout: 5 * time.Minute,
+		teardownGrace: DefaultTeardownGrace}
 	for _, o := range opts {
 		o(c)
 	}
@@ -75,28 +110,66 @@ func (c *Controller) ReconcileOnce(ctx context.Context) error {
 		}
 	}
 
+	// Repoint external traffic FIRST, before anything is torn down. Doing this
+	// every tick (not only on promote) is also self-healing: a router restart
+	// or a missed write reconverges within a tick.
+	//
+	// The order is load-bearing. Teardown used to run first, and the two steps
+	// then raced: DeleteInstances made the agent GC the superseded revision's
+	// containers on its next poll, while Traefik only stopped pointing at them
+	// once it had reloaded the file this writes. Whichever lost, external
+	// requests hit an address with nothing behind it — a measured ~1.2s window
+	// of 502s on every promotion, found by deploying this platform's own
+	// marketing site on it and asserting that not one request failed.
+	if c.rtr != nil {
+		if err := c.syncRouter(ctx); err != nil {
+			c.log.Warn("router sync failed", "err", err)
+			// Do not tear anything down on a tick where the router could not be
+			// updated: the old revision is still the only thing serving.
+			return nil
+		}
+	}
+
 	// Teardown: a superseded or failed deployment's instance rows are deleted;
 	// the agent then GCs their swappable containers. Pinned containers survive
 	// because the now-live deployment still holds its own rows for them.
+	//
+	// Held for teardownGrace after a deployment first appears terminal. Writing
+	// the router config is not the same as the router having applied it —
+	// Traefik throttles provider updates and keeps serving the old target
+	// meanwhile — and the agent's GC is a poll interval away on a clock nothing
+	// here controls. Ordering alone narrows the race; only waiting closes it.
 	terminal, err := c.listRollouts(ctx, store.DeploySuperseded, store.DeployFailed)
 	if err != nil {
 		return err
 	}
+	seen := make(map[uuid.UUID]time.Time, len(terminal))
+	now := c.clock()
 	for _, dep := range terminal {
+		first, known := c.firstTerminal[dep.ID]
+		if !known {
+			first = now
+		}
+		if now.Sub(first) < c.teardownGrace {
+			// Still serving, on purpose. Remember when it became terminal so the
+			// grace is measured from that moment and not from this tick.
+			seen[dep.ID] = first
+			continue
+		}
 		if err := c.st.DeleteInstances(ctx, dep.ID); err != nil {
 			c.log.Warn("teardown failed", "deployment", dep.ID, "err", err)
+			seen[dep.ID] = first // retry next tick rather than forgetting it
 		}
 	}
-
-	// Repoint external traffic to the current live routes. Doing this every
-	// tick (not only on promote) is self-healing: a router restart or a missed
-	// write reconverges within a tick.
-	if c.rtr != nil {
-		if err := c.syncRouter(ctx); err != nil {
-			c.log.Warn("router sync failed", "err", err)
-		}
-	}
+	c.firstTerminal = seen
 	return nil
+}
+
+func (c *Controller) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 func (c *Controller) syncRouter(ctx context.Context) error {

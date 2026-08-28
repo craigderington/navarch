@@ -1,0 +1,40 @@
+# TLS termination in front of the Navarch control plane.
+#
+# The control plane speaks plaintext HTTP and always has. That is correct for a
+# process listening on loopback or a container network, and wrong the moment the
+# API is reachable from anywhere else: an operator token is a bearer credential
+# and a node token pulls that node's age ciphertext, so anyone on the path gets
+# both for as long as the token is valid. TLS terminates here.
+#
+# Replace navarch.example.com with your hostname and Caddy obtains a certificate
+# from Let's Encrypt automatically on first request. The site block below is the
+# whole production configuration; `tls internal` in the local block is the same
+# shape with a self-signed CA, which is what `make demo-tls` exercises.
+
+{
+	# No admin API. It is unauthenticated and bound to localhost by default,
+	# which is one container-network hop from every tenant on this host.
+	admin off
+	auto_https disable_redirects
+}
+
+navarch.example.com {
+	reverse_proxy controlplane:8417
+
+	# The control plane sets no HSTS of its own — it does not know whether it
+	# is behind TLS. The proxy does.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
+
+# Local verification: the same reverse_proxy line, with a certificate from
+# Caddy's internal CA instead of ACME. `make demo-tls` curls through this and
+# checks that the API answers over TLS and that a node token still reaches its
+# own endpoints.
+navarch.localhost {
+	tls internal
+	reverse_proxy controlplane:8417
+	header -Server
+}

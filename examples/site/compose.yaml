@@ -1,0 +1,27 @@
+# Navarch's own marketing site, deployed by Navarch.
+#
+# The proof-of-concept the platform most needs to pass: if it cannot run a
+# static site with a health check and an ingress, it cannot run anything. It is
+# also the smallest honest end-to-end demo — one swappable service, no durable
+# state, so a rollout is visible as a clean blue/green flip with nothing pinned
+# to complicate it.
+#
+# The image is built and distributed by `make site-image`, never by the
+# platform: `build:` is rejected at parse time, and pre-build-and-push is the
+# contract that makes a deployed revision reproducible.
+
+services:
+  web:
+    image: navarch-site:1
+    # swap is the whole point here. The site is stateless — it mounts nothing
+    # and coordinates with nobody — so two copies during a rollout are not just
+    # safe, they are how the traffic flip happens without downtime.
+    x-composectl:
+      rollout: swap
+      ingress:
+        port: 80
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M

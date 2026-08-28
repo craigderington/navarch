@@ -274,3 +274,49 @@ func TestBareDashIsAPositionalNotAFlag(t *testing.T) {
 		t.Fatalf("ordinary flag parsing broke: %v %v", flags, err)
 	}
 }
+
+// The operator token must not go on the wire in the clear to somewhere it can
+// be read, and the refusal has to happen before the first request rather than
+// after one has already carried it.
+func TestGuardTransportRefusesPlaintextThatCanLeave(t *testing.T) {
+	var errb bytes.Buffer
+
+	// Contained URLs pass silently — the default and the dev stack among them.
+	for _, u := range []string{"http://localhost:8417", "http://controlplane:8417", "https://navarch.example.com"} {
+		errb.Reset()
+		if err := guardTransport(u, &errb); err != nil {
+			t.Fatalf("guardTransport(%q) = %v, want nil", u, err)
+		}
+		if errb.Len() != 0 {
+			t.Fatalf("guardTransport(%q) warned unnecessarily: %s", u, errb.String())
+		}
+	}
+
+	// A LAN address is refused, and the message names the way through.
+	errb.Reset()
+	err := guardTransport("http://10.0.1.7:8417", &errb)
+	if err == nil {
+		t.Fatal("plaintext to a private address must be refused")
+	}
+	if !strings.Contains(err.Error(), "NAVARCH_INSECURE") {
+		t.Fatalf("the refusal must name the opt-in, got: %v", err)
+	}
+
+	// Opted in: allowed, and warned about every time rather than once.
+	t.Setenv("NAVARCH_INSECURE", "1")
+	for i := 0; i < 2; i++ {
+		errb.Reset()
+		if err := guardTransport("http://10.0.1.7:8417", &errb); err != nil {
+			t.Fatalf("NAVARCH_INSECURE=1 should allow it: %v", err)
+		}
+		if !strings.Contains(errb.String(), "10.0.1.7") {
+			t.Fatalf("call %d did not warn: %q", i, errb.String())
+		}
+	}
+
+	// And it does not turn a broken URL into a working one.
+	errb.Reset()
+	if err := guardTransport("ftp://localhost:8417", &errb); err == nil {
+		t.Fatal("the opt-in must not rescue an unsupported scheme")
+	}
+}

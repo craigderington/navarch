@@ -94,13 +94,26 @@ demo-preview: ## Create a preview env with inherited secrets, then watch it expi
 	@API_TOKEN=$(API_TOKEN) ./scripts/demo-preview.sh
 
 .PHONY: demo-fleet
-demo-fleet: ## Two nodes, two daemons: ingress stack pinned to the router node, worker stack spread to the other
+site-image: ## Build the marketing-site image and load it onto every node
+	./scripts/site-image.sh
+
+# The CLI-driven demos depend on `build`. A stale ./bin/navarch is the worst
+# kind of green: the demo passes, against code nobody is running. This was hit
+# twice in one session — a guard that refuses plaintext credentials was verified
+# "working" by a binary that predated it.
+demo-fleet: build ## Two nodes, two daemons: ingress stack pinned to the router node, worker stack spread to the other
 	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-fleet.sh
 
 .PHONY: demo-logs
-demo-logs: ## Read a container's output through the fleet, and prove none of it is stored
+demo-logs: build ## Read a container's output through the fleet, and prove none of it is stored
 	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-logs.sh
 
 .PHONY: agent-logs
+demo-tls: build ## Put TLS in front of the control plane and prove it, both directions
+	./scripts/demo-tls.sh
+
+demo-site: build site-image ## Deploy Navarch's own marketing site onto Navarch
+	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-site.sh
+
 agent-logs: ## Tail the node agent logs
 	docker compose logs -f $(AGENTS)

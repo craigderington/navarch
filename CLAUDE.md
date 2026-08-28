@@ -708,6 +708,70 @@ says and cannot know a number is unreasonable. `Tail` counts lines and a line ha
 no length limit, so `dockerd` caps bytes too and says so in the output — a
 silently short answer is indistinguishable from a container that stopped logging.
 
+**A superseded revision is torn down late, on purpose, and the router is
+repointed first.** Promotion used to drop traffic: `ReconcileOnce` deleted the
+superseded revision's instance rows *before* syncing the router, the agent then
+GC'd its containers, and Traefik was still pointing at them. Measured on
+`examples/site` — a single stateless service, so nothing else could be blamed —
+every promotion produced **~1.2s of 502s**, three consecutive failed requests,
+while both containers were up and healthy the whole time. `docker ps` showed a
+clean overlap and a direct request to the new container's published port
+succeeded throughout; only the path through Traefik failed. The containers were
+never the problem.
+
+Three things together close it, and each is doing separate work:
+
+- **`syncRouter` runs before teardown**, and a tick whose router sync *failed*
+  tears nothing down at all — on that tick the superseded revision is still the
+  only thing serving.
+- **`DefaultTeardownGrace` (5s)** holds the rows after a deployment first goes
+  terminal, measured from when it became terminal rather than from the tick that
+  noticed. Writing the router config is not the router applying it, and the
+  agent's GC is a poll interval away on a clock the control plane does not own.
+  Ordering narrows the race; only waiting closes it.
+- **`--providers.providersThrottleDuration=100ms`** on Traefik. It batches
+  provider updates at **2s by default**, which is the actual propagation delay
+  the grace has to exceed. This is why the grace is a duration and not a tick
+  count: it must be stated against the router's behaviour, not the loop's.
+
+`TestSupersededRevisionOutlivesTheRouterUpdate` pins the grace with an injected
+clock. `make demo-site` asserts the *regression signature* — consecutive
+failures — rather than a perfect score: isolated single-request blips still
+occur occasionally during the config swap and are not yet fully explained.
+Counting them is honest; failing on them would make the demo flaky, and a flaky
+demo teaches people to re-run rather than to look.
+
+**The control plane speaks plaintext HTTP, and that is not an oversight — TLS
+terminates in front of it.** It does not know whether it is behind a proxy, and
+a process listening on loopback has no need of a certificate. `deploy/tls/`
+carries the pattern (Caddy, ACME in production, `tls internal` locally) and
+`make demo-tls` runs the real proxy in front of the real control plane, because
+the empty-router-config bug is the standing lesson that a config file nobody has
+put the software in front of is a claim rather than a fact. The demo asserts
+`ssl_verify_result=0`; one that accepted any certificate would pass against a
+man in the middle, which is the single thing TLS is there to stop.
+
+**Neither binary will put a credential on a plaintext connection that could be
+read.** `internal/transport` is a leaf package — no dependencies, imported by
+both `internal/cli` and `internal/agent`, so the two cannot drift on the answer
+— and it allows plaintext only where the traffic cannot reach a network someone
+else is on: loopback, `.localhost` (RFC 6761), a `.internal` name, or a
+single-label name like `controlplane`, which Docker's embedded DNS resolves only
+within the container network. **Private ranges are refused**, deliberately:
+`http://10.0.1.7:8417` is not the safe case, it is the exact case the audit
+named — a shared network where a captured node token reads that node's age
+ciphertext for as long as it is valid. `NAVARCH_INSECURE` (CLI) and
+`COMPOSECTL_INSECURE` (agent) override, and the override warns **every**
+invocation rather than once: a one-shot notice is one nobody sees again after
+the day they set the variable. The opt-in is scoped to that one judgement — it
+never rescues a malformed URL or an unusable scheme, which is why
+`InsecureError` is a distinct type rather than a flag on a generic error.
+
+The dev stack needs no opt-in and that is load-bearing, not luck: agents reach
+`http://controlplane:8417` (single-label) and the CLI defaults to
+`http://localhost:8417`. A guard that made the ordinary case worse would be
+turned off, and then it would be protecting nothing.
+
 **A node is a trust boundary, not a resource pool.** `nodes.org_id` is not an
 accounting detail and shared multi-org pools were considered in Sprint 7 Slice B
 and refused. Two things make a shared node a cross-tenant exposure, and neither
@@ -985,7 +1049,7 @@ Accepted rather than fixed: S3 (a single oversized chunk is bounded at 2×) and
 S10's cosmetics. Deferred to Sprint 7 by design: **S4** (no TLS anywhere) and
 **S9** (the shared operator token, the gating item for calling this a product).
 
-**Sprint 7 — operator identity and transport. IN PROGRESS.** Plan:
+**Sprint 7 — operator identity and transport. DONE.** Plan:
 `docs/superpowers/plans/2026-08-28-sprint7-slice-a-operator-identity.md`.
 The finish line was settled as a **multi-tenant product**, so S9 is closed
 rather than documented.
@@ -1002,9 +1066,11 @@ rather than documented.
   `pending_age_recipient`) and an operator promotes it. The multi-org node-pool
   question is decided — nodes stay org-scoped, for the trust-boundary reason
   recorded in the invariants above.
-- **Slice C** — transport (S4). No TLS anywhere today; the posture is a reverse
-  proxy in front of the control plane, plus a client/agent guard refusing a
-  non-TLS base URL outside loopback without `COMPOSECTL_INSECURE=1`.
+- **Slice C — transport. DONE.** S4 closed: `internal/transport` refuses
+  plaintext credentials outside loopback and container networks in both
+  binaries, `deploy/tls/` documents the reverse-proxy posture, and
+  `make demo-tls` proves it against a real Caddy rather than asserting it. See
+  the invariants above.
 
 **Sprint 8 — packaging and the 1.0 line.** Not started. Release engineering
 (and the module rename decision, which is this slice's one atomic commit or

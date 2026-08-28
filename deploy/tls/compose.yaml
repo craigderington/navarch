@@ -1,0 +1,27 @@
+# Run this alongside the control plane to put TLS in front of it:
+#
+#   docker compose -f compose.yaml -f deploy/tls/compose.yaml up -d
+#
+# In production the control plane's own port should NOT be published at all —
+# only this proxy is reachable. The dev stack publishes 8417 on loopback, which
+# is why both can coexist here.
+services:
+  tls-proxy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      controlplane:
+        condition: service_healthy
+    volumes:
+      - ./deploy/tls/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports:
+      # 80 is needed for the ACME HTTP challenge in production. Loopback-bound
+      # here because the dev box is not the internet.
+      - "127.0.0.1:8443:443"
+      - "127.0.0.1:8480:80"
+
+volumes:
+  caddy-data:
+  caddy-config:

@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/craig/composectl/internal/transport"
 )
 
 // The CLI is named navarch; NAVARCH_* is the name for its environment. Each
@@ -32,6 +36,14 @@ const (
 	envTokenFileLegacy  = "COMPOSECTL_TOKEN_FILE"
 	envAgentTokenLegacy = "COMPOSECTL_AGENT_TOKEN"
 	envConfigPathLegacy = "COMPOSECTL_CONFIG"
+
+	// The opt-in for sending an operator token over plaintext HTTP to something
+	// that is not loopback or a container network. Deliberately not a config
+	// file key: a decision this consequential should have to be made in the
+	// environment where the command runs, not inherited from a file somebody
+	// edited months ago.
+	envInsecure       = "NAVARCH_INSECURE"
+	envInsecureLegacy = "COMPOSECTL_INSECURE"
 )
 
 // Config is how composectl finds the control plane. Precedence, highest first:
@@ -150,4 +162,33 @@ func firstEnv(keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// guardTransport refuses to send an operator token in the clear to somewhere it
+// could be read, and says so loudly when the operator has opted in anyway.
+//
+// The CLI is where this belongs rather than internal/client: the client is the
+// only package that knows the wire format, and "is this network trustworthy" is
+// not the wire format. Putting it here also covers the TUI, which is handed the
+// client this configuration built.
+func guardTransport(rawURL string, stderr io.Writer) error {
+	err := transport.CheckBaseURL(rawURL)
+	if err == nil {
+		return nil
+	}
+	var insecure *transport.InsecureError
+	if !errors.As(err, &insecure) {
+		// Malformed or unusable. No opt-in rescues this.
+		return err
+	}
+	if !transport.Insecure(firstEnv(envInsecure, envInsecureLegacy)) {
+		return fmt.Errorf("%w\n\nSet %s=1 to proceed anyway", err, envInsecure)
+	}
+	// Warned every single invocation, not once. A warning an operator has
+	// learned to expect is still the last thing standing between a token and a
+	// network, and a one-shot notice is one they will never see again after the
+	// day they set the variable.
+	fmt.Fprintf(stderr, "warning: sending credentials in the clear to %s (%s is set)\n",
+		insecure.Host, envInsecure)
+	return nil
 }

@@ -65,11 +65,23 @@ held pending, nothing is sealed to it, and an operator promotes it with
 `navarch node rotate-recipient`. Otherwise anyone able to register a node could
 redirect the keys that every later secret is sealed to.
 
-**There is still no TLS.** Tokens and age ciphertext travel over plain HTTP, so
-the control plane belongs behind a reverse proxy that terminates TLS, or on a
-network you already trust. The compose file binds Postgres, the API, and Traefik
-to loopback so fleet containers cannot hairpin to the control plane. Traefik's
-insecure API is disabled.
+**TLS terminates in front of the control plane, not inside it.** The API speaks
+plaintext HTTP and does not know whether it is behind a proxy — correct for a
+process on loopback, wrong the moment it is reachable from anywhere else.
+`deploy/tls/` is the pattern: Caddy, with ACME in production and a local CA for
+`make demo-tls`, which runs the real proxy in front of the real control plane
+and checks the certificate actually verifies.
+
+Neither the CLI nor the agent will send a credential over plaintext HTTP to
+anywhere the traffic could be read. Loopback, `.localhost`, `.internal` and
+container-network names are allowed; private LAN addresses are not, because a
+shared network is exactly where a captured token is worth having.
+`NAVARCH_INSECURE=1` (or `COMPOSECTL_INSECURE=1` for the agent) overrides, and
+warns every time it does.
+
+The compose file binds Postgres, the API, and Traefik to loopback so fleet
+containers cannot hairpin to the control plane. Traefik's insecure API is
+disabled.
 
 ## Quickstart
 
@@ -89,6 +101,8 @@ make demo-failure  # bad image fails without disturbing the live revision
 make demo-rollback # append-only rollback through the normal rollout path
 make demo-secrets  # encrypted storage and agent-side secret injection
 make demo-preview  # preview creation, routing, expiry, and full teardown
+make demo-tls      # TLS terminated at a real proxy, and refused where absent
+make demo-site     # Navarch's own marketing site, deployed on Navarch
 make test          # race-enabled Go test suite
 ```
 
@@ -277,9 +291,8 @@ control plane binary does not link the Docker SDK.
 
 ## Direction
 
-Next: TLS posture (a documented reverse-proxy pattern, and a client guard that
-refuses a non-loopback plaintext URL without an explicit opt-in), then packaging
-— versioned binaries and a deployment story for the control plane itself.
+Next: packaging — versioned binaries and a deployment story for the control
+plane itself, so a machine that is not the one it was written on can run it.
 
 ### What Navarch deliberately does not do
 

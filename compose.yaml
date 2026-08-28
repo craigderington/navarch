@@ -142,6 +142,12 @@ services:
       - "--entryPoints.web.address=:80"
       - "--providers.file.directory=/dynamic"
       - "--providers.file.watch=true"
+      # Traefik batches provider updates: providersThrottleDuration defaults to
+      # 2s, so for up to that long after the control plane writes a new route
+      # file Traefik is still sending traffic to the revision the rollout has
+      # already superseded. That is the window a promotion drops requests in.
+      # The control plane's teardown grace covers it, and this shortens it.
+      - "--providers.providersThrottleDuration=100ms"
       - "--log.level=INFO"
       # No --api flag: Traefik v3 leaves the API and dashboard off unless one
       # is passed. There is no `--api.disabled`; passing it aborts startup with

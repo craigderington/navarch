@@ -36,12 +36,25 @@ type Config struct {
 	// them. `ingress=true` marks a node running the platform's router: until the
 	// mesh lands, a stack with an ingress service is only servable there.
 	Labels map[string]string
+	// InsecureTransport records that the control-plane URL is plaintext to
+	// somewhere it could be read, and that COMPOSECTL_INSECURE allowed it
+	// anyway. Kept as a field rather than re-derived so Run warns about exactly
+	// what LoadConfig decided.
+	InsecureTransport bool
 }
 
 // Run registers this node and then reconciles on a ticker until ctx is done.
 // The agent speaks only HTTP to the control plane — it never touches Postgres,
 // preserving the store's exclusive ownership of pgx across binaries.
 func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
+	if cfg.InsecureTransport {
+		// Every start, at warn level. A node token is a long-lived credential
+		// and this agent pulls age ciphertext for every environment it hosts;
+		// anyone on the path gets both for as long as the token is valid.
+		log.Warn("control plane URL is plaintext HTTP and not loopback or a container network — "+
+			"the node token and every secret's ciphertext cross it unencrypted",
+			"url", cfg.ControlPlaneURL, "override", "COMPOSECTL_INSECURE")
+	}
 	drv, err := dockerd.New(cfg.DockerHost)
 	if err != nil {
 		return err

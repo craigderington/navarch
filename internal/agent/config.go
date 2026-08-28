@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/craig/composectl/internal/transport"
 )
 
 // LoadConfig reads the node agent's configuration from the environment.
@@ -39,6 +42,18 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.AgentToken == "" {
 		return Config{}, fmt.Errorf("COMPOSECTL_AGENT_TOKEN is required")
+	}
+	// The agent carries a node token and pulls age ciphertext over this URL, so
+	// where it points is a security decision, not a connectivity detail.
+	if err := transport.CheckBaseURL(cfg.ControlPlaneURL); err != nil {
+		var insecure *transport.InsecureError
+		if !errors.As(err, &insecure) {
+			return Config{}, err
+		}
+		if !transport.Insecure(os.Getenv("COMPOSECTL_INSECURE")) {
+			return Config{}, fmt.Errorf("%w\n\nSet COMPOSECTL_INSECURE=1 to proceed anyway", err)
+		}
+		cfg.InsecureTransport = true
 	}
 	addr, err := resolveAdvertiseAddr(cfg.AdvertiseAddr)
 	if err != nil {

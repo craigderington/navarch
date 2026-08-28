@@ -2,6 +2,7 @@ package rollout
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -199,7 +200,8 @@ func TestControllerFailsOnInstanceFailure(t *testing.T) {
 	_ = newSchedulerForOrg(st, discardLog(), orgID).ScheduleOnce(ctx(t))
 	reportAll(t, st, nodeID, store.InstanceFailed, "exited")
 
-	if err := newControllerForOrg(st, discardLog(), nil, orgID).ReconcileOnce(ctx(t)); err != nil {
+	c := newControllerForOrg(st, discardLog(), nil, orgID)
+	if err := c.ReconcileOnce(ctx(t)); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	dep, _ := st.GetDeployment(ctx(t), depID)
@@ -218,13 +220,52 @@ func TestControllerTearsDownSuperseded(t *testing.T) {
 	reportAll(t, st, nodeID, store.InstanceRunning, "healthy")
 	advance(t, st, depID, store.DeployStarting, store.DeployHealthy, store.DeployLive, store.DeploySuperseded)
 
-	if err := newControllerForOrg(st, discardLog(), nil, orgID).ReconcileOnce(ctx(t)); err != nil {
+	c := newControllerForOrg(st, discardLog(), nil, orgID)
+	if err := c.ReconcileOnce(ctx(t)); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if states, _ := st.InstanceStates(ctx(t), depID); len(states) != 0 {
 		t.Fatalf("superseded deployment instances must be torn down, got %v", states)
 	}
 }
+
+// The router is repointed before anything is torn down, and a tick whose router
+// sync failed tears nothing down at all — on that tick the superseded revision
+// is still the only thing serving.
+func TestTeardownWaitsForTheRouter(t *testing.T) {
+	st := testStore(t)
+	depID, nodeID, orgID := fixture(t, st)
+	_ = newSchedulerForOrg(st, discardLog(), orgID).ScheduleOnce(ctx(t))
+	reportAll(t, st, nodeID, store.InstanceRunning, "healthy")
+	advance(t, st, depID, store.DeployStarting, store.DeployHealthy, store.DeployLive, store.DeploySuperseded)
+
+	failing := &failingRouter{}
+	c := newControllerForOrg(st, discardLog(), failing, orgID)
+	for i := 0; i < 2; i++ {
+		if err := c.ReconcileOnce(ctx(t)); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+	}
+	if states, _ := st.InstanceStates(ctx(t), depID); len(states) == 0 {
+		t.Fatal("nothing may be torn down while the router cannot be updated")
+	}
+
+	// With a working router the same deployment tears down, so the guard above
+	// is about the failure and not about teardown never happening.
+	c2 := newControllerForOrg(st, discardLog(), &captureRouter{}, orgID)
+	if err := c2.ReconcileOnce(ctx(t)); err != nil {
+		t.Fatalf("recovered reconcile: %v", err)
+	}
+	if states, _ := st.InstanceStates(ctx(t), depID); len(states) != 0 {
+		t.Fatalf("teardown should resume once the router syncs, got %v", states)
+	}
+}
+
+type failingRouter struct{}
+
+func (f *failingRouter) Sync([]router.Route) error { return errRouterDown }
+
+var errRouterDown = errors.New("router unavailable")
 
 func TestControllerAutoPromotes(t *testing.T) {
 	st := testStore(t)
@@ -579,5 +620,55 @@ func TestSyncRouterOmitsARouteWithNoReportedTarget(t *testing.T) {
 	      WHERE id=(SELECT environment_id FROM deployments WHERE id=$1)`, depID)
 	if got := sync("no node address"); len(got) != 0 {
 		t.Fatalf("a live route with no node address must be omitted, got %+v", got)
+	}
+}
+
+// A superseded revision keeps serving until the router has actually stopped
+// pointing at it.
+//
+// Writing the router config is not the same as the router applying it: Traefik
+// throttles provider updates (2s by default), so for a moment after Sync
+// returns it is still sending traffic to the revision about to be deleted.
+// Measured before this existed: ~1.2s of 502s on every promotion, with both
+// containers up and healthy throughout — the containers were never the problem.
+func TestSupersededRevisionOutlivesTheRouterUpdate(t *testing.T) {
+	st := testStore(t)
+	depID, nodeID, orgID := fixture(t, st)
+	_ = newSchedulerForOrg(st, discardLog(), orgID).ScheduleOnce(ctx(t))
+	reportAll(t, st, nodeID, store.InstanceRunning, "healthy")
+	advance(t, st, depID, store.DeployStarting, store.DeployHealthy, store.DeployLive, store.DeploySuperseded)
+
+	// A clock the test moves by hand, so the grace is asserted rather than
+	// slept through.
+	now := time.Now()
+	c := newControllerForOrg(st, discardLog(), &captureRouter{}, orgID)
+	c.teardownGrace = 5 * time.Second
+	c.now = func() time.Time { return now }
+
+	if err := c.ReconcileOnce(ctx(t)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if states, _ := st.InstanceStates(ctx(t), depID); len(states) == 0 {
+		t.Fatal("a just-superseded revision must keep serving")
+	}
+
+	// Still inside the grace.
+	now = now.Add(4 * time.Second)
+	if err := c.ReconcileOnce(ctx(t)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if states, _ := st.InstanceStates(ctx(t), depID); len(states) == 0 {
+		t.Fatal("teardown happened before the grace elapsed")
+	}
+
+	// Past it. The grace is measured from when the deployment became terminal,
+	// not from the tick that noticed, or a busy control plane would extend it
+	// indefinitely.
+	now = now.Add(2 * time.Second)
+	if err := c.ReconcileOnce(ctx(t)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if states, _ := st.InstanceStates(ctx(t), depID); len(states) != 0 {
+		t.Fatalf("teardown should have happened once the grace elapsed, got %v", states)
 	}
 }

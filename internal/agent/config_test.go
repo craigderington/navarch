@@ -91,3 +91,53 @@ func TestResolveAdvertiseAddr(t *testing.T) {
 		})
 	}
 }
+
+// The agent holds a node token and pulls every hosted environment's age
+// ciphertext over this URL, so a plaintext one that can leave the container
+// network must stop it starting rather than be a line in a log nobody reads.
+func TestLoadConfigRefusesPlaintextItCannotContain(t *testing.T) {
+	base := map[string]string{
+		"COMPOSECTL_AGENT_TOKEN":    "t",
+		"COMPOSECTL_ADVERTISE_ADDR": "127.0.0.1",
+	}
+	load := func(t *testing.T, url, insecure string) (Config, error) {
+		t.Helper()
+		for k, v := range base {
+			t.Setenv(k, v)
+		}
+		t.Setenv("COMPOSECTL_CONTROLPLANE_URL", url)
+		t.Setenv("COMPOSECTL_INSECURE", insecure)
+		return LoadConfig()
+	}
+
+	// The dev stack's own URL is a compose service name and must keep working
+	// with no opt-in, or this guard lands as a fleet outage.
+	if cfg, err := load(t, "http://controlplane:8417", ""); err != nil {
+		t.Fatalf("a compose service name must be allowed: %v", err)
+	} else if cfg.InsecureTransport {
+		t.Fatal("a contained URL must not be flagged insecure")
+	}
+	if _, err := load(t, "https://navarch.example.com", ""); err != nil {
+		t.Fatalf("https must be allowed: %v", err)
+	}
+
+	// A LAN address is the case this exists for.
+	if _, err := load(t, "http://10.0.1.7:8417", ""); err == nil {
+		t.Fatal("plaintext to a private address must refuse to start")
+	}
+
+	// The opt-in works and is recorded, so Run can warn about it every start.
+	cfg, err := load(t, "http://10.0.1.7:8417", "1")
+	if err != nil {
+		t.Fatalf("COMPOSECTL_INSECURE=1 should allow it: %v", err)
+	}
+	if !cfg.InsecureTransport {
+		t.Fatal("an opted-in insecure URL must be recorded so the agent warns")
+	}
+
+	// The opt-in is scoped to that one judgement: it does not make an unusable
+	// URL usable.
+	if _, err := load(t, "ftp://controlplane:8417", "1"); err == nil {
+		t.Fatal("the insecure opt-in must not rescue an unsupported scheme")
+	}
+}
