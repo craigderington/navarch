@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 type whoamiResponse struct {

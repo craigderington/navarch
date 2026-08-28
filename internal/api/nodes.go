@@ -7,9 +7,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/rollout"
-	"github.com/craig/composectl/internal/secrets"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/rollout"
+	"github.com/craigderington/navarch/internal/secrets"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // Node-facing handlers. The agent speaks only this HTTP surface — it never

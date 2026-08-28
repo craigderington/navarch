@@ -8,7 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/craig/composectl/internal/client"
+	"github.com/craigderington/navarch/internal/client"
 )
 
 // Every request the TUI makes goes through internal/client. Nothing here

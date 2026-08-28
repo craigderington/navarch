@@ -16,7 +16,7 @@ change for no user-visible gain:
 |---|---|---|
 | Product, CLI binary | `Navarch`, `navarch` | what a user says and types |
 | CLI environment, config | `NAVARCH_*`, `~/.config/navarch/` | user-facing; `COMPOSECTL_*` still read at lower precedence |
-| Go module | `github.com/craig/composectl` | renaming churns every import for nothing a user sees |
+| Go module | `github.com/craigderington/navarch` | matches the repository, so `go install` works |
 | Control plane / agent env | `COMPOSECTL_*` | set by `compose.yaml`, not by hand |
 | Container, network, volume prefix | `cc-`, labels `cc.*` | **not branding** — see below |
 | Compose extension key | `x-composectl.rollout`, `x-composectl.ingress` | it is in every user's compose file; renaming it breaks all of them |

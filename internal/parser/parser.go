@@ -17,7 +17,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/loader"
 	"github.com/compose-spec/compose-go/v2/types"
 
-	"github.com/craig/composectl/internal/spec"
+	"github.com/craigderington/navarch/internal/spec"
 )
 
 // Defaults applied when the compose file omits resource limits. Without

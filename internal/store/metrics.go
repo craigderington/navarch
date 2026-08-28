@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 
-	"github.com/craig/composectl/internal/metrics"
+	"github.com/craigderington/navarch/internal/metrics"
 )
 
 func (s *Store) OperationalGauges(ctx context.Context) (metrics.Gauges, error) {

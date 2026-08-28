@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/craig/composectl/internal/transport"
+	"github.com/craigderington/navarch/internal/transport"
 )
 
 // LoadConfig reads the node agent's configuration from the environment.

@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/parser"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/parser"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // Handlers for the catalog hierarchy: organization → application → stack →

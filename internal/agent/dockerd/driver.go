@@ -24,7 +24,7 @@ import (
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
 
-	"github.com/craig/composectl/internal/spec"
+	"github.com/craigderington/navarch/internal/spec"
 )
 
 const specFingerprintLabel = "cc.spec-fingerprint"

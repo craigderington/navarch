@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/craig/composectl/internal/spec"
+	"github.com/craigderington/navarch/internal/spec"
 )
 
 func baseSpec() *spec.DeploymentSpec {

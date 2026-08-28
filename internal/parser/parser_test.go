@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/craig/composectl/internal/spec"
+	"github.com/craigderington/navarch/internal/spec"
 )
 
 // mustParse parses yaml and fails the test if it is rejected.

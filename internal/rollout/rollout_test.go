@@ -12,9 +12,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/router"
-	"github.com/craig/composectl/internal/spec"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/router"
+	"github.com/craigderington/navarch/internal/spec"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

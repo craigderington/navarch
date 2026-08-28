@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/craig/composectl/internal/agent"
+	"github.com/craigderington/navarch/internal/agent"
 )
 
 func main() {

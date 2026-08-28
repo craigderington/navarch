@@ -7,7 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/craig/composectl/internal/client"
+	"github.com/craigderington/navarch/internal/client"
 )
 
 // Colours are ANSI palette indices rather than hex, so they resolve through the

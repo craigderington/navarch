@@ -3,8 +3,8 @@ package agent
 import (
 	"context"
 
-	"github.com/craig/composectl/internal/agent/dockerd"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/agent/dockerd"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // LogDelivery is one request's answer on its way back to the control plane.

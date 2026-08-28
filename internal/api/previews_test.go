@@ -11,8 +11,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/spec"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/spec"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // env8 is part of the generated hostname because {slug}-{stack} alone is not

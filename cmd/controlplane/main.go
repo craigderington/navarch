@@ -14,13 +14,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/craig/composectl/internal/api"
-	"github.com/craig/composectl/internal/config"
-	"github.com/craig/composectl/internal/logbuf"
-	"github.com/craig/composectl/internal/metrics"
-	"github.com/craig/composectl/internal/rollout"
-	"github.com/craig/composectl/internal/router"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/api"
+	"github.com/craigderington/navarch/internal/config"
+	"github.com/craigderington/navarch/internal/logbuf"
+	"github.com/craigderington/navarch/internal/metrics"
+	"github.com/craigderington/navarch/internal/rollout"
+	"github.com/craigderington/navarch/internal/router"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 func main() {

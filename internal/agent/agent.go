@@ -15,9 +15,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/agent/dockerd"
-	"github.com/craig/composectl/internal/secrets"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/agent/dockerd"
+	"github.com/craigderington/navarch/internal/secrets"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 type Config struct {

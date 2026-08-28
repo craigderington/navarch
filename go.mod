@@ -1,4 +1,4 @@
-module github.com/craig/composectl
+module github.com/craigderington/navarch
 
 go 1.25.0
 

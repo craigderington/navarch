@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/craig/composectl/internal/client"
-	"github.com/craig/composectl/internal/tui"
+	"github.com/craigderington/navarch/internal/client"
+	"github.com/craigderington/navarch/internal/tui"
 )
 
 func cmdHealth(ctx context.Context, e env) error {

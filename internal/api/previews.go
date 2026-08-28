@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // DefaultPreviewDomain works on a dev box with no DNS at all: Traefik routes on

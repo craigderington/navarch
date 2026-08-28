@@ -9,9 +9,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/agent/dockerd"
-	"github.com/craig/composectl/internal/spec"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/agent/dockerd"
+	"github.com/craigderington/navarch/internal/spec"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // fakeDriver records calls and returns canned health.

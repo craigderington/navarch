@@ -30,10 +30,19 @@ it opportunistically; each remaining layer has a reason:
 |---|---|---|
 | CLI binary, help, usage strings, README | **renamed** | user-facing |
 | `NAVARCH_*` env vars, `~/.config/navarch/` | **renamed**, legacy read as fallback | see below |
-| Go module `github.com/craig/composectl` | unchanged | churns every import for no user-visible gain; one atomic commit whenever it's wanted |
+| Go module `github.com/craigderington/navarch` | **renamed** at 1.0 | it did not match the remote, so `go install` could not work at all |
 | `cc-` container/network/volume prefix, `cc.*` labels | unchanged | **this is the dangerous one** |
 | Control plane / agent `COMPOSECTL_*` vars | unchanged | set by `compose.yaml`, not by hand |
 | Postgres role + database `composectl` | unchanged | pure data migration, zero user-visible gain |
+
+The module rename finally happened in Sprint 8, and the reason was not
+branding. `go.mod` said `github.com/craig/composectl` while the repository lives
+at `github.com/craigderington/navarch`, so the path named a module that does not
+exist: `go install github.com/craig/composectl/cmd/navarch@latest` could never
+have worked for anyone who was not already cloning the source. It was done as
+one atomic commit — `go mod edit`, a mechanical rewrite of every import, gofmt —
+because the alternative is a half-renamed tree, and it was done *before* tagging
+a release, because after that the old path is in other people's `go.sum`.
 
 **Why `cc-` must not be renamed casually.** The prefix and labels are not
 branding — nobody types them — and renaming them breaks three things at once:

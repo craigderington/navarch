@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // previewStack builds the org/app/stack/version a preview environment hangs

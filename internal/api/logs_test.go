@@ -13,9 +13,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/logbuf"
-	"github.com/craig/composectl/internal/spec"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/logbuf"
+	"github.com/craigderington/navarch/internal/spec"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // Two routes end in "/logs" and they must authorize differently: an operator

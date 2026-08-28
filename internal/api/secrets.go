@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/craig/composectl/internal/secrets"
+	"github.com/craigderington/navarch/internal/secrets"
 )
 
 // secretKeyPattern is the anchored form of the ${secret:KEY} key charset. It

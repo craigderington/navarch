@@ -11,7 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/craig/composectl/internal/client"
+	"github.com/craigderington/navarch/internal/client"
 )
 
 const version = "0.1.0"

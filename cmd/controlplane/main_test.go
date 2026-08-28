@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/craig/composectl/internal/metrics"
+	"github.com/craigderington/navarch/internal/metrics"
 )
 
 // ---------------------------------------------------------------- healthCheck

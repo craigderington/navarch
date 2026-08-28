@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/spec"
+	"github.com/craigderington/navarch/internal/spec"
 )
 
 // devDSN is the local dev stack from compose.yaml. Postgres is mandatory —

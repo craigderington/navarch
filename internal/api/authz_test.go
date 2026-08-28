@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/spec"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/spec"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // unscopedRoutes are the routes that legitimately do not check org membership.

@@ -11,9 +11,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/parser"
-	"github.com/craig/composectl/internal/secrets"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/parser"
+	"github.com/craigderington/navarch/internal/secrets"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // secretRequiringCompose is a minimal compose file whose one service

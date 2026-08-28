@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/router"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/router"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // RouterSync repoints external traffic to the current set of live routes. It is

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/craig/composectl/internal/client"
+	"github.com/craigderington/navarch/internal/client"
 )
 
 // catalogServer answers the list endpoints resolution walks, and records every

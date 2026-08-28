@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // TombstoneRetention is how long a teardown instruction is offered to agents.

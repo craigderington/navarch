@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/craig/composectl/internal/spec"
+	"github.com/craigderington/navarch/internal/spec"
 )
 
 // The known-good baseline for examples/webapp. CLAUDE.md records this

@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/craig/composectl/internal/logbuf"
-	"github.com/craig/composectl/internal/metrics"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/logbuf"
+	"github.com/craigderington/navarch/internal/metrics"
+	"github.com/craigderington/navarch/internal/store"
 	"github.com/google/uuid"
 )
 

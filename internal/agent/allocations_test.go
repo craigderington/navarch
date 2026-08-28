@@ -3,8 +3,8 @@ package agent
 import (
 	"testing"
 
-	"github.com/craig/composectl/internal/spec"
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/spec"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 func TestDesiredAllocationsDeduplicatesPinnedContainers(t *testing.T) {

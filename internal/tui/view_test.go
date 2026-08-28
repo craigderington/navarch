@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/craig/composectl/internal/client"
+	"github.com/craigderington/navarch/internal/client"
 )
 
 // Rendering is not asserted line by line — that tests the layout, which is

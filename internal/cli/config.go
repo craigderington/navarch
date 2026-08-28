@@ -10,7 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/craig/composectl/internal/transport"
+	"github.com/craigderington/navarch/internal/transport"
 )
 
 // The CLI is named navarch; NAVARCH_* is the name for its environment. Each

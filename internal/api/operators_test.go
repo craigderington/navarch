@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/craig/composectl/internal/store"
+	"github.com/craigderington/navarch/internal/store"
 )
 
 // whoami is the escape hatch from the deliberate 404 ambiguity: since "not

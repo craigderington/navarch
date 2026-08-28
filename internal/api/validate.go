@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/craig/composectl/internal/parser"
+	"github.com/craigderington/navarch/internal/parser"
 )
 
 // contextWithTimeout derives a bounded context from the request.

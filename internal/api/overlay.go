@@ -3,7 +3,7 @@ package api
 import (
 	"maps"
 
-	"github.com/craig/composectl/internal/spec"
+	"github.com/craigderington/navarch/internal/spec"
 )
 
 // applyEnvConfig produces the resolved spec for a deployment by overlaying
