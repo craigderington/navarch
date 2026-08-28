@@ -208,4 +208,9 @@ type Event struct {
 	Message      string         `json:"message"`
 	Payload      map[string]any `json:"payload"`
 	CreatedAt    time.Time      `json:"created_at"`
+	// ActorEmail is denormalized so a purged operator still leaves a readable
+	// name. An audit trail that degrades to a null uuid answers "someone" when
+	// the question is "who".
+	ActorOperatorID *uuid.UUID `json:"actor_operator_id,omitempty"`
+	ActorEmail      *string    `json:"actor_email,omitempty"`
 }

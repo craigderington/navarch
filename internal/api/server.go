@@ -28,6 +28,11 @@ type Server struct {
 	// logs holds delivered container output in memory and nowhere else. It is
 	// not a cache of something durable — there is no durable copy, on purpose.
 	logs *logbuf.Buffer
+	// patterns records every route as it is registered. It exists so the
+	// org-scoping test can enumerate the real surface rather than be handed a
+	// hand-written list, which would drift the moment someone adds a route and
+	// would then pass by omitting exactly the route nobody checked.
+	patterns []string
 }
 
 // ServerOption keeps NewServer's existing two-argument form working; only the
@@ -72,13 +77,31 @@ func NewServer(st *store.Store, log *slog.Logger, opts ...ServerOption) *Server 
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-	if r.URL.Path != "/healthz" && s.bearerToken != "" && !s.authorized(r) {
-		rw.Header().Set("WWW-Authenticate", `Bearer realm="composectl"`)
-		writeError(rw, http.StatusUnauthorized, "authentication required", nil)
-		if s.metrics != nil {
-			s.metrics.ObserveHTTP(r.Method, "unauthenticated", rw.status)
+	if r.URL.Path != "/healthz" && s.bearerToken != "" {
+		id, ok := s.authenticate(r)
+		if !ok {
+			rw.Header().Set("WWW-Authenticate", `Bearer realm="composectl"`)
+			writeError(rw, http.StatusUnauthorized, "authentication required", nil)
+			if s.metrics != nil {
+				s.metrics.ObserveHTTP(r.Method, "unauthenticated", rw.status)
+			}
+			return
 		}
-		return
+		// The identity travels on the request context so handlers can scope
+		// themselves without re-reading the Authorization header — and so a
+		// handler that forgets to is a missing call, not a silently different
+		// interpretation of the same header.
+		ctx := withIdentity(r.Context(), id)
+		// Tagging the same context with the actor is what makes the audit log
+		// attributable. Done once here rather than at each of the dozen store
+		// methods that append an event: handlers derive their contexts from
+		// this one, so an event written anywhere below inherits the actor
+		// without a signature carrying it. Machine identities add nothing,
+		// which is correct — an agent's report has no human behind it.
+		if actorID, email := id.actor(); actorID != nil {
+			ctx = store.WithActor(ctx, *actorID, email)
+		}
+		r = r.WithContext(ctx)
 	}
 	s.mux.ServeHTTP(rw, r)
 	if s.metrics != nil {
@@ -90,22 +113,66 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// authorized accepts the operator API token for catalog and register, and a
-// per-node token only for that node's heartbeat / desired-state / report.
-func (s *Server) authorized(r *http.Request) bool {
-	// Agent endpoints accept only that node's token so the operator token
-	// cannot be used to pull another node's desired-state ciphertext.
-	if id, ok := nodeAgentPathID(r); ok {
+// authenticate resolves the credential on the request to an identity. It
+// answers who, never what they may touch — see identity.go for why that split
+// is load-bearing rather than tidy.
+func (s *Server) authenticate(r *http.Request) (identity, bool) {
+	// Agent endpoints accept only that node's own token, so no other
+	// credential can pull a node's desired-state ciphertext.
+	if nodeID, ok := nodeAgentPathID(r); ok {
 		plain := bearerToken(r)
 		if plain == "" {
-			return false
+			return identity{}, false
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
-		ok, err := s.st.NodeTokenValid(ctx, id, plain)
-		return err == nil && ok
+		valid, err := s.st.NodeTokenValid(ctx, nodeID, plain)
+		if err != nil || !valid {
+			return identity{}, false
+		}
+		return identity{kind: identityNode, nodeID: nodeID}, true
 	}
-	return validBearerToken(r, s.bearerToken)
+
+	if bearerToken(r) == "" {
+		return identity{}, false
+	}
+
+	// The shared token, on the two routes it still opens. Checked before the
+	// operator lookup so node enrolment and metrics scraping cost no database
+	// round trip, and so a fleet restart cannot be slowed by the operators
+	// table being busy.
+	if isServicePath(r) && validBearerToken(r, s.bearerToken) {
+		return identity{kind: identityService}, true
+	}
+
+	if s.st == nil {
+		// Only reachable from an in-package test that builds a Server without
+		// a store. There is no credential to check against, so the answer is
+		// no — a nil store must never be a way past authentication.
+		return identity{}, false
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	op, err := s.st.OperatorForToken(ctx, bearerToken(r))
+	if err != nil {
+		// Unknown, expired and disabled are all one answer here. Telling a
+		// caller which of its guesses named a real token is a gift.
+		return identity{}, false
+	}
+	return identity{kind: identityOperator, operator: op}, true
+}
+
+// isServicePath reports whether r targets one of the two machine-to-machine
+// routes the shared token still opens. Exact matches only: a prefix test would
+// hand the shared token every route that happens to start the same way.
+func isServicePath(r *http.Request) bool {
+	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/nodes/register":
+		return true
+	case r.Method == http.MethodGet && r.URL.Path == "/metrics":
+		return true
+	}
+	return false
 }
 
 // nodeAgentPathID reports whether r targets a per-node agent endpoint, and
@@ -203,69 +270,151 @@ func (s *Server) BootstrapDevOrg(ctx context.Context) {
 	}
 }
 
+// BootstrapOperator ensures a first operator exists, so a fresh install has
+// somebody who can log in. Idempotent, like BootstrapDevOrg: an existing email
+// is a no-op, so a restart never mints a second credential.
+//
+// The first operator comes from the environment rather than from a seeded
+// migration, for the same reason POST /v1/orgs is self-serve: a constant baked
+// into a migration is permanent and identical on every install, which is the
+// one property a root credential must not have.
+//
+// If token is set, it is pinned rather than generated. That is for the dev
+// stack, where compose, the Makefile and the demo scripts share a constant and
+// the alternative is scraping a generated value out of a log line on every
+// `make up`. Production leaves it empty and gets crypto/rand.
+func (s *Server) BootstrapOperator(ctx context.Context, email, token string) {
+	if email == "" {
+		return
+	}
+	op, err := s.st.GetOperatorByEmail(ctx, email)
+	if errors.Is(err, store.ErrNotFound) {
+		op, err = s.st.CreateOperator(ctx, email, email)
+	}
+	if err != nil {
+		s.log.Warn("could not bootstrap operator", "email", email, "err", err)
+		return
+	}
+	// The dev org is where the local agents register and where the demos
+	// deploy, so the bootstrap operator has to be able to see it. Any other org
+	// they create themselves, and POST /v1/orgs makes its creator an owner.
+	if org, orgErr := s.st.GetOrganizationBySlug(ctx, "dev"); orgErr == nil {
+		if err := s.st.AddOrgMember(ctx, org.ID, op.ID, "owner"); err != nil {
+			s.log.Warn("could not add bootstrap operator to the dev org", "err", err)
+		}
+	}
+
+	if token != "" {
+		if err := s.st.EnsureOperatorToken(ctx, op.ID, "bootstrap", token); err != nil {
+			s.log.Warn("could not pin the bootstrap operator token", "err", err)
+		}
+		return
+	}
+
+	existing, err := s.st.ListOperatorTokens(ctx, op.ID)
+	if err != nil {
+		s.log.Warn("could not read bootstrap operator tokens", "err", err)
+		return
+	}
+	if len(existing) > 0 {
+		return
+	}
+	t, err := s.st.IssueOperatorToken(ctx, op.ID, "bootstrap", nil)
+	if err != nil {
+		s.log.Warn("could not issue the bootstrap operator token", "err", err)
+		return
+	}
+	// The one place this codebase deliberately logs a secret. Everything else
+	// goes to great lengths not to -- logbuf will not even log a chunk -- but a
+	// generated root credential that is never shown is an install nobody can
+	// use, and the alternatives (a file the operator may not be able to read, a
+	// fixed default) are worse. It happens once, on first boot, for a token the
+	// operator should replace.
+	s.log.Info("bootstrap operator created — this token is shown once and never again",
+		"email", email, "token", t.Plaintext)
+}
+
+// handle registers a route and records its pattern. Every route goes through
+// here rather than calling s.mux directly, so `patterns` cannot fall behind the
+// mux.
+func (s *Server) handle(pattern string, h http.HandlerFunc) {
+	s.patterns = append(s.patterns, pattern)
+	s.mux.HandleFunc(pattern, h)
+}
+
+// Patterns returns every registered route pattern. Exported for tests in this
+// package's own test binary; nothing in the running server reads it.
+func (s *Server) Patterns() []string { return append([]string(nil), s.patterns...) }
+
 // routes uses Go 1.22+ method-and-wildcard patterns, so no router
 // dependency is needed.
 func (s *Server) routes() {
-	s.mux.HandleFunc("GET /healthz", s.handleHealth)
-	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
+	s.handle("GET /healthz", s.handleHealth)
+	s.handle("GET /metrics", s.handleMetrics)
 
 	// Organizations — the root of the catalog. Without a way to create one
 	// nothing below it is reachable, so this is deliberately self-serve
 	// rather than a seeded row (migrations are immutable, a seeded UUID
 	// would be permanent).
-	s.mux.HandleFunc("POST /v1/orgs", s.handleCreateOrg)
-	s.mux.HandleFunc("GET /v1/orgs", s.handleListOrgs)
-	s.mux.HandleFunc("GET /v1/orgs/{org}/events", s.handleListEvents)
+	// Operator identity: who am I, and who else may see this org.
+	s.handle("GET /v1/whoami", s.handleWhoami)
+	s.handle("GET /v1/orgs/{org}/members", s.handleListMembers)
+	s.handle("POST /v1/orgs/{org}/members", s.handleAddMember)
+	s.handle("DELETE /v1/orgs/{org}/members/{operator}", s.handleRemoveMember)
+
+	s.handle("POST /v1/orgs", s.handleCreateOrg)
+	s.handle("GET /v1/orgs", s.handleListOrgs)
+	s.handle("GET /v1/orgs/{org}/events", s.handleListEvents)
 
 	// Applications
-	s.mux.HandleFunc("POST /v1/orgs/{org}/apps", s.handleCreateApp)
-	s.mux.HandleFunc("GET /v1/orgs/{org}/apps", s.handleListApps)
-	s.mux.HandleFunc("GET /v1/orgs/{org}/environments", s.handleListOrgEnvs)
+	s.handle("POST /v1/orgs/{org}/apps", s.handleCreateApp)
+	s.handle("GET /v1/orgs/{org}/apps", s.handleListApps)
+	s.handle("GET /v1/orgs/{org}/environments", s.handleListOrgEnvs)
 
 	// Stacks — POST accepts a compose file, parses it, stores a version
-	s.mux.HandleFunc("POST /v1/apps/{app}/stacks", s.handleCreateStack)
-	s.mux.HandleFunc("GET /v1/apps/{app}/stacks", s.handleListStacks)
-	s.mux.HandleFunc("GET /v1/stacks/{stack}", s.handleGetStack)
-	s.mux.HandleFunc("POST /v1/stacks/{stack}/versions", s.handleCreateStackVersion)
-	s.mux.HandleFunc("GET /v1/stacks/{stack}/versions", s.handleListStackVersions)
+	s.handle("POST /v1/apps/{app}/stacks", s.handleCreateStack)
+	s.handle("GET /v1/apps/{app}/stacks", s.handleListStacks)
+	s.handle("GET /v1/stacks/{stack}", s.handleGetStack)
+	s.handle("POST /v1/stacks/{stack}/versions", s.handleCreateStackVersion)
+	s.handle("GET /v1/stacks/{stack}/versions", s.handleListStackVersions)
 
 	// Validation without persistence — the CLI's `composectl validate`
-	s.mux.HandleFunc("POST /v1/validate", s.handleValidate)
+	s.handle("POST /v1/validate", s.handleValidate)
 
 	// Environments
-	s.mux.HandleFunc("POST /v1/stacks/{stack}/envs", s.handleCreateEnv)
-	s.mux.HandleFunc("GET /v1/stacks/{stack}/envs", s.handleListEnvs)
-	s.mux.HandleFunc("GET /v1/envs/{env}", s.handleGetEnv)
-	s.mux.HandleFunc("POST /v1/stacks/{stack}/previews", s.handleCreatePreview)
+	s.handle("POST /v1/stacks/{stack}/envs", s.handleCreateEnv)
+	s.handle("GET /v1/stacks/{stack}/envs", s.handleListEnvs)
+	s.handle("GET /v1/envs/{env}", s.handleGetEnv)
+	s.handle("POST /v1/stacks/{stack}/previews", s.handleCreatePreview)
 
 	// Deployments
-	s.mux.HandleFunc("POST /v1/envs/{env}/deployments", s.handleCreateDeployment)
-	s.mux.HandleFunc("GET /v1/envs/{env}/deployments", s.handleListDeployments)
-	s.mux.HandleFunc("GET /v1/deployments/{id}", s.handleGetDeployment)
-	s.mux.HandleFunc("POST /v1/deployments/{id}/promote", s.handlePromote)
-	s.mux.HandleFunc("POST /v1/envs/{env}/rollback", s.handleRollback)
+	s.handle("POST /v1/envs/{env}/deployments", s.handleCreateDeployment)
+	s.handle("GET /v1/envs/{env}/deployments", s.handleListDeployments)
+	s.handle("GET /v1/deployments/{id}", s.handleGetDeployment)
+	s.handle("POST /v1/deployments/{id}/promote", s.handlePromote)
+	s.handle("POST /v1/envs/{env}/rollback", s.handleRollback)
 
 	// Nodes — agent-facing
-	s.mux.HandleFunc("POST /v1/nodes/register", s.handleRegisterNode)
-	s.mux.HandleFunc("POST /v1/nodes/{id}/heartbeat", s.handleHeartbeat)
-	s.mux.HandleFunc("GET /v1/nodes/{id}/desired-state", s.handleDesiredState)
-	s.mux.HandleFunc("POST /v1/nodes/{id}/report", s.handleInstanceReport)
-	s.mux.HandleFunc("GET /v1/nodes", s.handleListNodes)
-	s.mux.HandleFunc("GET /v1/nodes/{id}", s.handleGetNode)
-	s.mux.HandleFunc("POST /v1/nodes/{id}/logs", s.handleLogDelivery)
-	s.mux.HandleFunc("POST /v1/nodes/{id}/drain", s.handleDrainNode)
-	s.mux.HandleFunc("POST /v1/nodes/{id}/uncordon", s.handleUncordonNode)
+	s.handle("POST /v1/nodes/register", s.handleRegisterNode)
+	s.handle("POST /v1/nodes/{id}/heartbeat", s.handleHeartbeat)
+	s.handle("GET /v1/nodes/{id}/desired-state", s.handleDesiredState)
+	s.handle("POST /v1/nodes/{id}/report", s.handleInstanceReport)
+	s.handle("GET /v1/nodes", s.handleListNodes)
+	s.handle("GET /v1/nodes/{id}", s.handleGetNode)
+	s.handle("POST /v1/nodes/{id}/logs", s.handleLogDelivery)
+	s.handle("POST /v1/nodes/{id}/drain", s.handleDrainNode)
+	s.handle("POST /v1/nodes/{id}/uncordon", s.handleUncordonNode)
 
 	// Secrets — encrypted at rest, plaintext never stored. The list response
 	// never includes values; see internal/secrets for the encrypt boundary.
-	s.mux.HandleFunc("POST /v1/envs/{env}/secrets", s.handleSetSecret)
-	s.mux.HandleFunc("GET /v1/envs/{env}/secrets", s.handleListSecrets)
-	s.mux.HandleFunc("DELETE /v1/envs/{env}/secrets/{key}", s.handleDeleteSecret)
+	s.handle("POST /v1/envs/{env}/secrets", s.handleSetSecret)
+	s.handle("GET /v1/envs/{env}/secrets", s.handleListSecrets)
+	s.handle("DELETE /v1/envs/{env}/secrets/{key}", s.handleDeleteSecret)
 
 	// Logs — a request is an instruction; the answer lives in memory only.
-	s.mux.HandleFunc("POST /v1/envs/{env}/logs", s.handleCreateLogRequest)
-	s.mux.HandleFunc("GET /v1/logs/{id}", s.handleGetLogs)
-	s.mux.HandleFunc("DELETE /v1/logs/{id}", s.handleCloseLogRequest)
+	s.handle("POST /v1/envs/{env}/logs", s.handleCreateLogRequest)
+	s.handle("GET /v1/logs/{id}", s.handleGetLogs)
+	s.handle("DELETE /v1/logs/{id}", s.handleCloseLogRequest)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {

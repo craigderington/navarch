@@ -6,7 +6,7 @@
 set -euo pipefail
 
 API=${API:-http://localhost:8417}
-API_TOKEN=${API_TOKEN:-dev-token-change-me}
+API_TOKEN=${API_TOKEN:-dev-operator-token-change-me}
 CURL_AUTH=(-H "Authorization: Bearer $API_TOKEN")
 GW=${GW:-http://localhost:8095}          # Traefik web entrypoint
 COMPOSE=${COMPOSE:-examples/hello/compose.yaml}

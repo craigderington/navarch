@@ -8,7 +8,7 @@
 set -euo pipefail
 
 API=${API:-http://localhost:8417}
-API_TOKEN=${API_TOKEN:-dev-token-change-me}
+API_TOKEN=${API_TOKEN:-dev-operator-token-change-me}
 CURL_AUTH=(-H "Authorization: Bearer $API_TOKEN")
 GW=${GW:-http://localhost:8095}
 DB_URL=${DB_URL:-postgres://composectl:composectl@localhost:5473/composectl?sslmode=disable}

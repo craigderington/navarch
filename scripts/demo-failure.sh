@@ -5,7 +5,7 @@
 # blue/green is the absence of a promotion.
 set -euo pipefail
 API=${API:-http://localhost:8417}
-API_TOKEN=${API_TOKEN:-dev-token-change-me}
+API_TOKEN=${API_TOKEN:-dev-operator-token-change-me}
 CURL_AUTH=(-H "Authorization: Bearer $API_TOKEN")
 
 ORG=$(curl -sS "${CURL_AUTH[@]}" "$API/v1/orgs" | jq -r '.organizations[]|select(.slug=="dev")|.id')

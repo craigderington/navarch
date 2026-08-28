@@ -31,6 +31,9 @@ func (s *Server) handleCreateDeployment(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	if !s.authorizeEnv(w, r, envID) {
+		return
+	}
 
 	var req createDeploymentRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -122,6 +125,9 @@ func (s *Server) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeDeployment(w, r, id) {
+		return
+	}
 	d, err := s.st.GetDeployment(ctx, id)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -139,6 +145,9 @@ func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 
 	envID, ok := pathUUID(w, r, "env")
 	if !ok {
+		return
+	}
+	if !s.authorizeEnv(w, r, envID) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -160,6 +169,9 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 
 	id, ok := pathUUID(w, r, "id")
 	if !ok {
+		return
+	}
+	if !s.authorizeDeployment(w, r, id) {
 		return
 	}
 

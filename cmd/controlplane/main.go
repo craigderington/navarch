@@ -113,9 +113,12 @@ func run(log *slog.Logger) error {
 		api.WithLogBuffer(logBuffer),
 	)
 
-	// Bootstrap the dev org the local agent registers into.
+	// Bootstrap the dev org the local agent registers into, then the first
+	// operator — in that order, because the operator is made a member of the
+	// dev org and cannot join an org that does not exist yet.
 	bootCtx, bootCancel := context.WithTimeout(ctx, 5*time.Second)
 	srvHandler.BootstrapDevOrg(bootCtx)
+	srvHandler.BootstrapOperator(bootCtx, cfg.BootstrapOperatorEmail, cfg.BootstrapOperatorToken)
 	bootCancel()
 
 	// Scheduler + rollout controller + reaper: three loops over the deployment

@@ -708,6 +708,67 @@ says and cannot know a number is unreasonable. `Tail` counts lines and a line ha
 no length limit, so `dockerd` caps bytes too and says so in the output — a
 silently short answer is indistinguishable from a container that stopped logging.
 
+**Authentication happens before the mux; authorization happens inside the
+handler.** `ServeHTTP` runs before any route has matched, so `r.PathValue` is
+empty there — the trap that once made every per-node endpoint return 401
+unconditionally, and the reason `nodeAgentPathID` re-parses the path by hand.
+Answering "which org owns `/v1/deployments/{id}`" needs a database lookup keyed
+on a path id, and doing that before the mux would mean a *second* hand-written
+parser for every route. That parser failing open leaks a tenant, which is far
+worse than the 401 the first one caused. So `ServeHTTP` answers **who**
+(`internal/api/identity.go`) and handlers answer **may they**
+(`internal/api/authz.go`), through resolvers in the store — the mapping is a
+join, and handlers do not write SQL.
+
+**A non-member gets 404, never 403.** 403 confirms the object exists, which
+turns the status code into a probe for another tenant's ids. The store's
+`OrgFor*` resolvers return `ErrNotFound` for a missing object, so "no such
+environment" and "not yours" arrive identically and leave identically. The cost
+is a genuinely ambiguous 404, which is what `navarch whoami` exists to
+disambiguate.
+
+**`TestEveryOperatorRouteIsOrgScoped` enumerates the mux, not a list.** Routes
+register through `Server.handle`, which records the pattern, so the test walks
+the real surface: a route added later without an `authorize` call fails there
+rather than shipping open. The risk was never a helper that checks wrongly — it
+is a handler that forgets to call one, and that is invisible until a tenant
+finds it. Exemptions live in `unscopedRoutes` **with a reason each**, because an
+undocumented entry is how a leak ships. The test builds its server *with* a
+bearer token deliberately: without one authentication is skipped entirely and
+every assertion would pass against a wide-open server — the exact shape of the
+bug that kept the suite green through the 401 sprint.
+
+**`COMPOSECTL_AGENT_TOKEN` is now a service credential, not an operator one.**
+It opens exactly two machine-to-machine routes: `POST /v1/nodes/register` and
+`GET /metrics`. It survives, rather than being deleted, because **an agent has
+no identity of its own until it has registered** — it authenticates that one
+call with the shared token and receives its node token in the response.
+Replacing it outright would mean every agent in the fleet failing to rejoin on
+the restart that deployed the change. Metrics rides along because a scraper is
+not a person and the surface carries no tenant identifiers. Removing it entirely
+wants an operator-issued join token, which is its own decision.
+
+**The audit actor rides on the context, not on signatures.** Events are appended
+deep inside store transactions — `CreateDeployment`, `PromoteDeployment`,
+`SetSecret`, `RegisterNode`, the reaper — so threading an actor argument would
+churn a dozen signatures and every caller, including the control-plane loops
+that legitimately have no actor. `store.WithActor` tags the request context in
+`ServeHTTP` and `appendEventTx` reads it. The key lives in `store` because the
+dependency runs api → store; the store must not learn about HTTP to record who
+called it. An event with no actor is the honest record for a loop: nobody asked,
+something noticed.
+
+**The first operator comes from the environment, never a migration.**
+`COMPOSECTL_BOOTSTRAP_OPERATOR_EMAIL` creates it at startup, idempotently, for
+the reason `POST /v1/orgs` is self-serve: a constant baked into a migration is
+permanent and identical on every install. `COMPOSECTL_BOOTSTRAP_OPERATOR_TOKEN`
+pins the token and exists for the dev stack alone, so compose, the Makefile and
+`scripts/*.sh` share `dev-operator-token-change-me` instead of scraping a
+generated value out of a log line on every `make up`. Left empty, the token is
+minted from crypto/rand and **logged once** — the one place this codebase
+deliberately logs a secret, because a root credential that is never shown is an
+install nobody can use.
+
 **Two routes end in `/logs` and authorize differently.**
 `POST /v1/nodes/{id}/logs` is a node delivering and takes that node's token;
 `POST /v1/envs/{env}/logs` and `GET`/`DELETE /v1/logs/{id}` are operator-facing.
@@ -877,6 +938,29 @@ the risk was: `internal/api` 50% → 78.5%, `internal/client` 27.8% → 82.8%.
 Accepted rather than fixed: S3 (a single oversized chunk is bounded at 2×) and
 S10's cosmetics. Deferred to Sprint 7 by design: **S4** (no TLS anywhere) and
 **S9** (the shared operator token, the gating item for calling this a product).
+
+**Sprint 7 — operator identity and transport. IN PROGRESS.** Plan:
+`docs/superpowers/plans/2026-08-28-sprint7-slice-a-operator-identity.md`.
+The finish line was settled as a **multi-tenant product**, so S9 is closed
+rather than documented.
+
+- **Slice A — operator identity + per-org authorization. DONE.** `operators`,
+  `operator_tokens` and `organization_members` (0012); `events.actor_operator_id`
+  (0013). Authentication resolves an identity before the mux, handlers authorize
+  against org membership, and 30 routes are pinned by a test that enumerates the
+  mux. `navarch whoami` and `navarch member` manage identity; the dev stack
+  bootstraps `dev@navarch.local`. See the invariants above for the reasoning.
+- **Slice B** — the tenant edges: S7 completes (recipient rotation becomes an
+  operator action now that operators exist), and the multi-org node-pool
+  question gets decided rather than deferred again.
+- **Slice C** — transport (S4). No TLS anywhere today; the posture is a reverse
+  proxy in front of the control plane, plus a client/agent guard refusing a
+  non-TLS base URL outside loopback without `COMPOSECTL_INSECURE=1`.
+
+**Sprint 8 — packaging and the 1.0 line.** Not started. Release engineering
+(and the module rename decision, which is this slice's one atomic commit or
+never), the deployment story, the deliberate non-features named in the README,
+and refreshed baselines asserted in CI.
 
 **Post-review hardening. DONE.** Every API route except `/healthz` requires
 the shared `COMPOSECTL_AGENT_TOKEN`; both binaries fail closed when it is

@@ -105,13 +105,21 @@ func cleanupDevNodes(t *testing.T, st *store.Store) {
 // the path directly.
 func TestNodeTokenAuthorizesAgentEndpoints(t *testing.T) {
 	srv := testServer(t)
-	WithBearerToken("operator-token")(srv)
+	WithBearerToken("shared-service-token")(srv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	org, err := srv.st.GetOrganizationBySlug(ctx, "dev")
 	if err != nil {
 		t.Fatalf("GetOrganizationBySlug: %v", err)
+	}
+	// A real operator, and a member of the node's own org, so the refusals
+	// below are about the credential being the wrong *kind* rather than about
+	// membership. An operator with every right to the node is still not the
+	// node, and a node endpoint must say so.
+	op := newScopedOperator(t, srv.st)
+	if err := srv.st.AddOrgMember(ctx, org.ID, op.id, "owner"); err != nil {
+		t.Fatalf("AddOrgMember: %v", err)
 	}
 	node, err := srv.st.RegisterNode(ctx, store.RegisterNodeParams{
 		OrgID: org.ID, Hostname: "auth-" + uuid.NewString()[:8],
@@ -145,7 +153,7 @@ func TestNodeTokenAuthorizesAgentEndpoints(t *testing.T) {
 	// holding it pull another node's desired-state ciphertext.
 	t.Run("operator token is refused", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
-		req.Header.Set("Authorization", "Bearer operator-token")
+		req.Header.Set("Authorization", "Bearer "+op.token)
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 		if rec.Code != http.StatusUnauthorized {
@@ -165,7 +173,7 @@ func TestNodeTokenAuthorizesAgentEndpoints(t *testing.T) {
 
 	t.Run("malformed node id is refused", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/nodes/not-a-uuid/desired-state", nil)
-		req.Header.Set("Authorization", "Bearer operator-token")
+		req.Header.Set("Authorization", "Bearer "+op.token)
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 		if rec.Code != http.StatusUnauthorized {
@@ -396,6 +404,15 @@ func TestUncordonIsAnOperatorEndpoint(t *testing.T) {
 	if err := srv.st.DrainNode(ctx, node.ID); err != nil {
 		t.Fatalf("DrainNode: %v", err)
 	}
+	// An operator route now needs an operator, not the shared token — that
+	// token opens node registration and metrics and nothing else. The operator
+	// must be a member of the node's org or the route answers 404 rather than
+	// 401, which would pass the "a node token is refused" case below for
+	// entirely the wrong reason.
+	op := newScopedOperator(t, srv.st)
+	if err := srv.st.AddOrgMember(ctx, org.ID, op.id, "owner"); err != nil {
+		t.Fatalf("AddOrgMember: %v", err)
+	}
 	path := "/v1/nodes/" + node.ID.String() + "/uncordon"
 
 	t.Run("a node token is refused", func(t *testing.T) {
@@ -410,7 +427,7 @@ func TestUncordonIsAnOperatorEndpoint(t *testing.T) {
 
 	t.Run("the operator token works and reports the derived state", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, path, nil)
-		req.Header.Set("Authorization", "Bearer operator-token")
+		req.Header.Set("Authorization", "Bearer "+op.token)
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {

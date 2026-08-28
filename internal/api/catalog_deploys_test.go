@@ -48,7 +48,9 @@ func TestCatalogLifecycleOverHTTP(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create org: %d %s", rec.Code, rec.Body.String())
 	}
-	var org struct{ ID string `json:"id"` }
+	var org struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &org)
 
 	// a duplicate slug is a conflict, not a second org
@@ -61,7 +63,9 @@ func TestCatalogLifecycleOverHTTP(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create app: %d %s", rec.Code, rec.Body.String())
 	}
-	var app struct{ ID string `json:"id"` }
+	var app struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &app)
 
 	// app under an org that does not exist: the FK violation is a client
@@ -83,7 +87,9 @@ func TestCatalogLifecycleOverHTTP(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create stack: %d %s", rec.Code, rec.Body.String())
 	}
-	var stack struct{ ID string `json:"id"` }
+	var stack struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &stack)
 	// stacks under an unknown app are 404 — the handler checks the parent
 	// exists so the error names the level that is wrong
@@ -215,8 +221,8 @@ func TestValidateEndpoint(t *testing.T) {
 		t.Fatalf("valid compose: %d %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Valid  bool   `json:"valid"`
-		Digest string `json:"digest"`
+		Valid   bool   `json:"valid"`
+		Digest  string `json:"digest"`
 		Summary struct {
 			Services  []string `json:"services"`
 			Swappable []string `json:"swappable"`
@@ -277,7 +283,9 @@ services:
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("push: %d %s", rec.Code, rec.Body.String())
 	}
-	var sv struct{ ID string `json:"id"` }
+	var sv struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &sv)
 
 	rec = httptest.NewRecorder()
@@ -285,7 +293,9 @@ services:
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create env: %d %s", rec.Code, rec.Body.String())
 	}
-	var env struct{ ID string `json:"id"` }
+	var env struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &env)
 
 	// Missing secret: 422 naming the key, before anything reaches a node.
@@ -356,7 +366,9 @@ services:
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("push other stack: %d", rec.Code)
 	}
-	var otherSV struct{ ID string `json:"id"` }
+	var otherSV struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &otherSV)
 	rec = httptest.NewRecorder()
 	srv.ServeHTTP(rec, jsonRequest(http.MethodPost, "/v1/envs/"+env.ID+"/deployments",
@@ -391,7 +403,9 @@ func apiStackUnderFreshOrg(t *testing.T, srv *Server) string {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create org: %d %s", rec.Code, rec.Body.String())
 	}
-	var org struct{ ID string `json:"id"` }
+	var org struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &org)
 
 	rec = httptest.NewRecorder()
@@ -399,7 +413,9 @@ func apiStackUnderFreshOrg(t *testing.T, srv *Server) string {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create app: %d %s", rec.Code, rec.Body.String())
 	}
-	var app struct{ ID string `json:"id"` }
+	var app struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &app)
 
 	rec = httptest.NewRecorder()
@@ -407,7 +423,9 @@ func apiStackUnderFreshOrg(t *testing.T, srv *Server) string {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create stack: %d %s", rec.Code, rec.Body.String())
 	}
-	var stack struct{ ID string `json:"id"` }
+	var stack struct {
+		ID string `json:"id"`
+	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &stack)
 	return stack.ID
 }

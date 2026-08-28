@@ -527,20 +527,35 @@ func TestSyncRouterOmitsARouteWithNoReportedTarget(t *testing.T) {
 			t.Fatalf("exec: %v", err)
 		}
 	}
-	// ListLiveRoutes returns nothing without a hostname, so give it one.
-	exec(`UPDATE environments SET hostname='omit.example.com'
-	      WHERE id=(SELECT environment_id FROM deployments WHERE id=$1)`, depID)
+	// ListLiveRoutes returns nothing without a hostname, so give it one. It has
+	// to be unique to this run: ListLiveRoutes is a global scan with no
+	// org-scoped variant, so a leftover route from a previous run under a fixed
+	// name would be indistinguishable from this test's own.
+	hostname := "omit-" + uuid.NewString()[:8] + ".example.com"
+	exec(`UPDATE environments SET hostname=$2
+	      WHERE id=(SELECT environment_id FROM deployments WHERE id=$1)`, depID, hostname)
 
 	rtr := &captureRouter{}
 	// routeStrand stays zero, which disables reachability withdrawal entirely —
 	// so the only thing that can drop a route here is the branch under test.
 	c := newControllerForOrg(st, discardLog(), rtr, orgID)
+	// syncRouter is deliberately NOT org-scoped — the router serves the whole
+	// fleet — so the assertions must look only at this test's own route. A
+	// count over everything passes on an empty database and fails the moment
+	// the dev stack has run a demo, which is the shared-database hazard the
+	// loop tests are org-scoped to avoid in the first place.
 	sync := func(why string) []router.Route {
 		t.Helper()
 		if err := c.syncRouter(ctx(t)); err != nil {
 			t.Fatalf("syncRouter (%s): %v", why, err)
 		}
-		return rtr.last
+		mine := []router.Route{}
+		for _, r := range rtr.last {
+			if r.Hostname == hostname {
+				mine = append(mine, r)
+			}
+		}
+		return mine
 	}
 
 	// The agent has not reported a published port yet: address known, port not.

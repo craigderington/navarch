@@ -40,7 +40,7 @@ func (s *Store) RegisterNode(ctx context.Context, p RegisterNodeParams) (*Node, 
 	if err != nil {
 		return nil, err
 	}
-	token, tokenHash, err := newNodeToken()
+	token, tokenHash, err := newBearerToken()
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +112,11 @@ func (s *Store) RegisterNode(ctx context.Context, p RegisterNodeParams) (*Node, 
 	return &n, nil
 }
 
-func newNodeToken() (plain, hash string, err error) {
+// newBearerToken mints the one token format this codebase uses: 32 bytes of
+// crypto/rand, hex-encoded, with only its SHA-256 stored. Shared by node
+// registration and operator token issuance so there is never a second scheme
+// to reason about.
+func newBearerToken() (plain, hash string, err error) {
 	var b [32]byte
 	if _, err = rand.Read(b[:]); err != nil {
 		return "", "", err
@@ -122,7 +126,7 @@ func newNodeToken() (plain, hash string, err error) {
 	return plain, hex.EncodeToString(sum[:]), nil
 }
 
-func hashNodeToken(plain string) string {
+func hashBearerToken(plain string) string {
 	sum := sha256.Sum256([]byte(plain))
 	return hex.EncodeToString(sum[:])
 }
@@ -137,7 +141,7 @@ func (s *Store) NodeTokenValid(ctx context.Context, nodeID uuid.UUID, plain stri
 	if hash == nil || *hash == "" || plain == "" {
 		return false, nil
 	}
-	got := hashNodeToken(plain)
+	got := hashBearerToken(plain)
 	if len(got) != len(*hash) {
 		return false, nil
 	}

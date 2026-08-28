@@ -76,6 +76,9 @@ func (s *Server) handleCreatePreview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeStack(w, r, stackID) {
+		return
+	}
 	var req createPreviewRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", nil)

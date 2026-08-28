@@ -479,3 +479,63 @@ func (c *Client) ReadLogs(ctx context.Context, requestID string, cursor int64) (
 func (c *Client) CloseLogs(ctx context.Context, requestID string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/logs/"+requestID, nil, nil)
 }
+
+// ---------------------------------------------------------- operator identity
+
+type Operator struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+	Name  string `json:"name"`
+}
+
+type OrgMember struct {
+	OrgID      string `json:"org_id"`
+	OperatorID string `json:"operator_id"`
+	Email      string `json:"email"`
+	Name       string `json:"name"`
+	Role       string `json:"role"`
+}
+
+type Whoami struct {
+	Operator *Operator      `json:"operator"`
+	Orgs     []Organization `json:"organizations"`
+}
+
+func (c *Client) Whoami(ctx context.Context) (*Whoami, error) {
+	var out Whoami
+	if err := c.do(ctx, http.MethodGet, "/v1/whoami", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) ListMembers(ctx context.Context, orgID string) ([]OrgMember, error) {
+	var out struct {
+		Members []OrgMember `json:"members"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/orgs/"+orgID+"/members", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Members, nil
+}
+
+// AddMemberResult carries the one-time token issued when this call created the
+// operator. It is empty for an operator who already existed — the server does
+// not mint a second credential for someone joining a second org.
+type AddMemberResult struct {
+	Member OrgMember `json:"member"`
+	Token  string    `json:"token,omitempty"`
+}
+
+func (c *Client) AddMember(ctx context.Context, orgID, email, name, role string) (*AddMemberResult, error) {
+	var out AddMemberResult
+	body := map[string]string{"email": email, "name": name, "role": role}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/orgs/"+orgID+"/members", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) RemoveMember(ctx context.Context, orgID, operatorID string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/orgs/"+orgID+"/members/"+operatorID, nil, nil)
+}

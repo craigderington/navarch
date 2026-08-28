@@ -36,6 +36,9 @@ func (s *Server) handleCreateLogRequest(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	if !s.authorizeEnv(w, r, envID) {
+		return
+	}
 	var req createLogRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", nil)
@@ -111,6 +114,9 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeLogRequest(w, r, id) {
+		return
+	}
 	lr, err := s.st.GetLogRequest(ctx, id)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -148,6 +154,9 @@ func (s *Server) handleCloseLogRequest(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	id, ok := pathUUID(w, r, "id")
 	if !ok {
+		return
+	}
+	if !s.authorizeLogRequest(w, r, id) {
 		return
 	}
 	if err := s.st.CloseLogRequest(ctx, id); err != nil {

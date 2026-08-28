@@ -49,9 +49,9 @@ new one cannot be added without every switch failing to compile:
 |---|---|---|
 | `operator` | operator token | operator routes, scoped to their orgs |
 | `node` | that node's token | only that node's agent endpoints (unchanged) |
-| `registrar` | `COMPOSECTL_AGENT_TOKEN` | **only** `POST /v1/nodes/register` |
+| `service` | `COMPOSECTL_AGENT_TOKEN` | `POST /v1/nodes/register` and `GET /metrics` |
 
-### The registrar is the wrinkle, and it must not be skipped
+### The service token is the wrinkle, and it must not be skipped
 
 Agents register with the *operator* token today (`internal/agent/agent.go:59`
 passes `cfg.AgentToken` into `POST /v1/nodes/register`, and only then swaps to
@@ -60,13 +60,23 @@ the shared token, **every agent in the fleet stops being able to register** —
 including on the restart that follows the upgrade, which is when it would be
 discovered.
 
-So `COMPOSECTL_AGENT_TOKEN` survives this slice, demoted: it authenticates
-exactly one route, `POST /v1/nodes/register`, and nothing else. That is
-strictly narrower than today (where it opens the whole operator surface) and
-it keeps the bootstrap story honest — a node has to be able to join before it
-has any identity of its own. Removing it entirely wants a node-enrolment flow
-(operator issues a one-time join token), which is a Sprint 8 conversation,
-not a prerequisite for closing S9.
+So `COMPOSECTL_AGENT_TOKEN` survives this slice, demoted to two
+machine-to-machine routes: `POST /v1/nodes/register` and `GET /metrics`.
+Registration because a node has to be able to join before it has any identity
+of its own; metrics because a scraper is not a person either, and the surface
+carries no tenant data — the audit checked specifically that its labels are
+route patterns and enums. Both are strictly narrower than today, where the
+same token opens the entire operator surface.
+
+**Implementation note (settled during the build):** the plan originally said
+"exactly one route". Metrics forced the second, and the honest options were a
+scraper operator nobody would rotate or an exemption stated out loud. The
+exemption is stated out loud, in `unscopedRoutes` with its reason, where the
+route-enumeration test reads it.
+
+Removing the shared token entirely wants a node-enrolment flow (operator issues
+a one-time join token), which is its own decision with its own failure modes
+and is not a prerequisite for closing S9's blast radius.
 
 ## Schema
 
@@ -94,7 +104,11 @@ CREATE UNIQUE INDEX operators_email_key ON operators (lower(email));
 CREATE TABLE operator_tokens (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     operator_id  UUID NOT NULL REFERENCES operators(id) ON DELETE CASCADE,
-    token_hash   BYTEA NOT NULL UNIQUE,   -- SHA-256, exactly as node tokens
+    -- SHA-256 hex, exactly as nodes.token_hash: same generation (32 bytes of
+    -- crypto/rand, hex), same hash-at-rest, same constant-time compare. TEXT
+    -- rather than BYTEA because that is what 0008 chose and one token format
+    -- in the codebase is worth more than a marginally tidier column.
+    token_hash   TEXT NOT NULL UNIQUE,
     name         TEXT NOT NULL,
     expires_at   TIMESTAMPTZ,
     last_used_at TIMESTAMPTZ,
@@ -228,8 +242,9 @@ The dev stack gets a fixed bootstrap email and the demos log in as it, so
 - `TestEveryOperatorRouteIsOrgScoped` passes with an explicit, justified
   allowlist.
 - Every event written from a handler names its actor.
-- `COMPOSECTL_AGENT_TOKEN` opens exactly one route; a test asserts it is
-  refused on an operator route.
+- `COMPOSECTL_AGENT_TOKEN` opens exactly the two machine paths;
+  `TestSharedTokenOpensOnlyTheMachinePaths` asserts it is refused on an
+  operator route, which is the behaviour change itself.
 - Full suite green with zero skips; `make demo` suite green from `make nuke`.
 
 ## Deliberately not in this slice

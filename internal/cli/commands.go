@@ -974,3 +974,112 @@ func nodeStatus(hostname, state string) string {
 		return hostname + " (" + state + ")"
 	}
 }
+
+// cmdWhoami answers who the configured token belongs to and which
+// organizations it can see.
+//
+// It earns its place because authorization refuses with 404 rather than 403 —
+// "no such environment" and "not yours" are deliberately indistinguishable, so
+// that a tenant cannot probe another tenant's ids. That is right for the API
+// and unhelpful for the person staring at the 404, and this is the command that
+// tells them which of the two they are looking at.
+func cmdWhoami(ctx context.Context, e env, args []string) error {
+	if len(args) > 0 {
+		return usage("usage: navarch whoami")
+	}
+	me, err := e.c.Whoami(ctx)
+	if err != nil {
+		return err
+	}
+	if e.cfg.Output == "json" {
+		return printJSON(e.out, me)
+	}
+	if me.Operator != nil {
+		fmt.Fprintf(e.out, "%s <%s>\n", me.Operator.Name, me.Operator.Email)
+	}
+	if len(me.Orgs) == 0 {
+		fmt.Fprintln(e.out, "\nno organizations — ask an owner to add you, or create one with `navarch org create`")
+		return nil
+	}
+	fmt.Fprintln(e.out)
+	rows := make([][]string, 0, len(me.Orgs))
+	for _, o := range me.Orgs {
+		rows = append(rows, []string{o.ID, o.Slug, o.Name})
+	}
+	printTable(e.out, []string{"ORG_ID", "SLUG", "NAME"}, rows)
+	return nil
+}
+
+func cmdMember(ctx context.Context, e env, args []string) error {
+	if len(args) == 0 {
+		return usage("usage: navarch member list|add|remove ...")
+	}
+	switch args[0] {
+	case "list":
+		if err := need(args, 2, "usage: navarch member list ORG"); err != nil {
+			return err
+		}
+		orgID, err := e.resolveOrg(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		members, err := e.c.ListMembers(ctx, orgID)
+		if err != nil {
+			return err
+		}
+		rows := make([][]string, 0, len(members))
+		for _, m := range members {
+			rows = append(rows, []string{m.OperatorID, m.Email, m.Name, m.Role})
+		}
+		return emit(e, members, []string{"OPERATOR_ID", "EMAIL", "NAME", "ROLE"}, rows)
+
+	case "add":
+		if err := need(args, 3, "usage: navarch member add ORG EMAIL [--name NAME] [--role ROLE]"); err != nil {
+			return err
+		}
+		orgID, err := e.resolveOrg(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		flags, pos, err := flagMap(args[2:])
+		if err != nil {
+			return err
+		}
+		if len(pos) < 1 {
+			return usage("usage: navarch member add ORG EMAIL [--name NAME] [--role ROLE]")
+		}
+		res, err := e.c.AddMember(ctx, orgID, pos[0], flags["name"], flags["role"])
+		if err != nil {
+			return err
+		}
+		if e.cfg.Output == "json" {
+			return printJSON(e.out, res)
+		}
+		printTable(e.out, []string{"OPERATOR_ID", "EMAIL", "ROLE"},
+			[][]string{{res.Member.OperatorID, res.Member.Email, res.Member.Role}})
+		if res.Token != "" {
+			// Shown once, on the response that created the operator, exactly as
+			// a node's token is. There is no second copy to print later.
+			fmt.Fprintf(e.out, "\ntoken (shown once — give it to %s and it cannot be recovered):\n%s\n",
+				res.Member.Email, res.Token)
+		}
+		return nil
+
+	case "remove":
+		if err := need(args, 3, "usage: navarch member remove ORG OPERATOR_ID"); err != nil {
+			return err
+		}
+		orgID, err := e.resolveOrg(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		if err := e.c.RemoveMember(ctx, orgID, args[2]); err != nil {
+			return err
+		}
+		fmt.Fprintf(e.out, "removed %s from %s\n", args[2], args[1])
+		return nil
+
+	default:
+		return usage(fmt.Sprintf("unknown member subcommand %q", args[0]))
+	}
+}

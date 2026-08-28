@@ -192,6 +192,10 @@ func dispatch(ctx context.Context, e env, cmd string, args []string) error {
 		return cmdLogs(ctx, e, args)
 	case "wait":
 		return cmdWait(ctx, e, args)
+	case "whoami":
+		return cmdWhoami(ctx, e, args)
+	case "member", "members":
+		return cmdMember(ctx, e, args)
 	case "tui":
 		return cmdTUI(ctx, e, args)
 	default:
@@ -289,14 +293,16 @@ Usage:
 
 Global flags:
   --url URL            Control plane URL (env NAVARCH_URL, default http://localhost:8417)
-  --token TOKEN        Bearer token (env NAVARCH_TOKEN or NAVARCH_AGENT_TOKEN)
+  --token TOKEN        Operator token (env NAVARCH_TOKEN or NAVARCH_AGENT_TOKEN)
   --token-file PATH    Read token from a file
   --output, -o FMT     table (default) or json
 
 Commands:
   health               Check control-plane + database
+  whoami               Show who this token belongs to and which orgs it sees
   validate FILE        Parse a compose file without deploying
   org                  Create and list organizations
+  member               List, add, and remove an organization's operators
   app                  Create and list applications
   stack                Create, list, get, push, and version stacks
   env                  Create, list, and get environments

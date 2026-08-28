@@ -15,7 +15,7 @@ set -euo pipefail
 . "$(dirname "$0")/lib/fleet.sh"
 
 API=${API:-http://localhost:8417}
-API_TOKEN=${API_TOKEN:-dev-token-change-me}
+API_TOKEN=${API_TOKEN:-dev-operator-token-change-me}
 NAV=${NAV:-./bin/navarch}
 export NAVARCH_URL=$API NAVARCH_TOKEN=$API_TOKEN
 SUFFIX=${SUFFIX:-$RANDOM}

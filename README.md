@@ -47,20 +47,32 @@ The platform loop is implemented end to end across a multi-node fleet:
 - Cross-node ingress: a stack is reachable regardless of which node runs it
 - On-demand container logs, fetched through the agent poll and never stored
 - A read-only terminal dashboard (`navarch tui`)
-- Shared bearer authentication for the development API
+- Operator identity with per-organization authorization, and an audit timeline
+  that names who did what
 
 Only `blue_green` is currently supported. Requests for `rolling` or `recreate`
-are rejected rather than silently receiving different behavior. The current
-security model is a single shared token and is suitable for trusted development
-deployments, not a public multi-tenant control plane. The compose file binds
-Postgres, the API, and Traefik to loopback so fleet containers cannot hairpin
-to the control plane. Traefik's insecure API is disabled.
+are rejected rather than silently receiving different behavior.
+
+Operator routes require an operator token and are scoped to the organizations
+that operator belongs to; a non-member is refused with 404 rather than 403, so
+one tenant cannot probe another's ids. Agents authenticate with a per-node
+token, and the shared `COMPOSECTL_AGENT_TOKEN` now opens only node registration
+and the metrics endpoint — a node has no identity of its own until it has
+registered. `navarch whoami` reports who a token belongs to and what it can see.
+
+**There is still no TLS.** Tokens and age ciphertext travel over plain HTTP, so
+the control plane belongs behind a reverse proxy that terminates TLS, or on a
+network you already trust. The compose file binds Postgres, the API, and Traefik
+to loopback so fleet containers cannot hairpin to the control plane. Traefik's
+insecure API is disabled.
 
 ## Quickstart
 
-The development token defaults to `dev-token-change-me` in `compose.yaml` and
-the Makefile. Override `API_TOKEN` when using a different
-`COMPOSECTL_AGENT_TOKEN`.
+The dev stack ships two credentials, deliberately distinct.
+`dev-operator-token-change-me` is the bootstrap **operator** and is what the
+Makefile's `API_TOKEN`, the demo scripts and `navarch` use.
+`dev-token-change-me` is the shared **service** token the agents use to
+register, and it opens nothing else but `GET /metrics`.
 
 ```bash
 make up            # Postgres, migrations, control plane, agent, and Traefik
@@ -77,14 +89,15 @@ make test          # race-enabled Go test suite
 
 ## CLI
 
-`navarch` is the operator client. It speaks the same bearer token as the
-API and prints tables by default (`--output json` for scripts).
+`navarch` is the operator client. It carries an operator token and prints
+tables by default (`--output json` for scripts).
 
 ```bash
 make build                 # writes bin/navarch
 export NAVARCH_URL=http://localhost:8417
-export NAVARCH_TOKEN=dev-token-change-me
+export NAVARCH_TOKEN=dev-operator-token-change-me   # the dev stack's operator
 
+navarch whoami             # who this token is, and which orgs it can see
 navarch health
 navarch validate examples/hello/compose.yaml
 navarch org list
@@ -123,12 +136,14 @@ unset token is a hard failure rather than a degraded mode — a rename that fail
 closed on someone's shell profile would be a poor trade for a cosmetic gain. See
 [Naming](#naming) for what else deliberately still reads `composectl`.
 
-Direct API requests require a bearer token:
+Direct API requests require an operator token:
 
 ```bash
-curl -H 'Authorization: Bearer dev-token-change-me' \
+curl -H 'Authorization: Bearer dev-operator-token-change-me' \
   http://localhost:8417/v1/orgs
 ```
+
+The response lists only the organizations that operator belongs to.
 
 `GET /healthz` is deliberately unauthenticated for container and load-balancer
 probes.
@@ -138,13 +153,14 @@ probes.
 Deployment creation, state transitions, promotion, supersession, preview
 expiry, and secret set/delete metadata are appended to the existing `events`
 table in the same transaction as the operation they describe. Audit entries
-survive deployment deletion; secret values and request bodies are never
-recorded.
+survive deployment deletion, and each names the operator who caused it; secret
+values and request bodies are never recorded. An entry with no actor is one a
+control-plane loop wrote — nobody asked, something noticed.
 
 The authenticated organization timeline is cursor-paginated:
 
 ```bash
-curl -H 'Authorization: Bearer dev-token-change-me' \
+curl -H 'Authorization: Bearer dev-operator-token-change-me' \
   'http://localhost:8417/v1/orgs/<org-uuid>/events?limit=50&before_id=1234'
 ```
 
@@ -256,7 +272,25 @@ control plane binary does not link the Docker SDK.
 
 ## Direction
 
-The next reliability work is an explicit stateful-service migration workflow
-and alerting/dashboard definitions over the metrics surface. Multi-node
-placement, node draining, per-node credentials, secret re-encryption on
-membership changes, and the WireGuard mesh belong to a later phase.
+Next: TLS posture (a documented reverse-proxy pattern, and a client guard that
+refuses a non-loopback plaintext URL without an explicit opt-in), then packaging
+— versioned binaries and a deployment story for the control plane itself.
+
+### What Navarch deliberately does not do
+
+Named here rather than discovered in production:
+
+- **No automatic failover.** Nothing re-homes an environment because its node
+  went quiet. An unreachable node usually comes back, and its agent still holds
+  desired state for its environments; re-homing automatically would run two
+  copies of an environment for an unbounded window. Draining or retiring a node
+  is an operator decision, and re-homing follows from it.
+- **No durable log storage.** Container output is fetched on demand and buffered
+  in memory, never written to Postgres. Application logs routinely contain
+  secrets, and persisting them would undo what age sealing buys.
+- **No cross-node overlay.** A deployment is placed whole onto one node. Ingress
+  reaches it by node address and published port instead.
+- **Node retirement is not automated.** `retired` is a state nothing sets: a
+  policy loop with no operational history behind it is a guess on a schedule.
+- **Roles are recorded but not enforced.** Every organization member has the
+  same authority; the column exists so finer grants are a data migration later.

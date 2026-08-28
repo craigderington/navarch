@@ -210,10 +210,10 @@ func TestRegisterNodeRecipientRotationIsAudited(t *testing.T) {
 		return n
 	}
 
-	reg("age1first")            // first registration: no event
-	reg("age1first")            // same recipient: no event
-	reg("age1rotated")          // rotation: one event
-	reg("age1rotated")          // unchanged again: no event
+	reg("age1first")   // first registration: no event
+	reg("age1first")   // same recipient: no event
+	reg("age1rotated") // rotation: one event
+	reg("age1rotated") // unchanged again: no event
 	if got := countRotations(); got != 1 {
 		t.Fatalf("expected exactly 1 rotation event, got %d", got)
 	}

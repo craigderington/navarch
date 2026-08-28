@@ -39,6 +39,15 @@ func (s *Server) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	// The creator becomes an owner in the same request, or they immediately
+	// cannot see what they just made — every other route in the org would
+	// answer 404 to the person who created it.
+	if id, ok := identityFrom(r.Context()); ok && id.isOperator() {
+		if err := s.st.AddOrgMember(ctx, org.ID, id.operator.ID, "owner"); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+	}
 	writeJSON(w, http.StatusCreated, org)
 }
 
@@ -46,7 +55,18 @@ func (s *Server) handleListOrgs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := contextWithTimeout(r, 5*time.Second)
 	defer cancel()
 
-	orgs, err := s.st.ListOrganizations(ctx)
+	// Scoped to membership. This is the one route where the old behaviour was
+	// visibly wrong rather than merely permissive: it listed every tenant's
+	// organizations to anyone holding the shared token, which is also how a
+	// caller found the ids that made every other route reachable.
+	var orgs []store.Organization
+	var err error
+	if id, ok := identityFrom(r.Context()); ok && id.isOperator() {
+		orgs, err = s.st.OrgsForOperator(ctx, id.operator.ID)
+	} else {
+		// Authentication disabled: an in-process test server. See authz.go.
+		orgs, err = s.st.ListOrganizations(ctx)
+	}
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -67,6 +87,9 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 
 	orgID, ok := pathUUID(w, r, "org")
 	if !ok {
+		return
+	}
+	if !s.authorizeOrg(w, r, orgID) {
 		return
 	}
 	var req createAppRequest
@@ -91,6 +114,9 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeOrg(w, r, orgID) {
+		return
+	}
 	apps, err := s.st.ListApplications(ctx, orgID)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -111,6 +137,9 @@ func (s *Server) handleCreateStack(w http.ResponseWriter, r *http.Request) {
 
 	appID, ok := pathUUID(w, r, "app")
 	if !ok {
+		return
+	}
+	if !s.authorizeApp(w, r, appID) {
 		return
 	}
 	var req createStackRequest
@@ -134,6 +163,9 @@ func (s *Server) handleListStacks(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeApp(w, r, appID) {
+		return
+	}
 	if _, err := s.st.GetApplication(ctx, appID); err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -153,6 +185,9 @@ func (s *Server) handleGetStack(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeStack(w, r, id) {
+		return
+	}
 	stack, err := s.st.GetStack(ctx, id)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -166,6 +201,9 @@ func (s *Server) handleGetEnv(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	id, ok := pathUUID(w, r, "env")
 	if !ok {
+		return
+	}
+	if !s.authorizeEnv(w, r, id) {
 		return
 	}
 	env, err := s.st.GetEnvironment(ctx, id)
@@ -188,6 +226,9 @@ func (s *Server) handleCreateStackVersion(w http.ResponseWriter, r *http.Request
 
 	stackID, ok := pathUUID(w, r, "stack")
 	if !ok {
+		return
+	}
+	if !s.authorizeStack(w, r, stackID) {
 		return
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
@@ -226,6 +267,9 @@ func (s *Server) handleListStackVersions(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	if !s.authorizeStack(w, r, stackID) {
+		return
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 
 	versions, err := s.st.ListStackVersions(ctx, stackID, limit)
@@ -251,6 +295,9 @@ func (s *Server) handleCreateEnv(w http.ResponseWriter, r *http.Request) {
 
 	stackID, ok := pathUUID(w, r, "stack")
 	if !ok {
+		return
+	}
+	if !s.authorizeStack(w, r, stackID) {
 		return
 	}
 	var req createEnvRequest
@@ -281,6 +328,9 @@ func (s *Server) handleListEnvs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeStack(w, r, stackID) {
+		return
+	}
 	envs, err := s.st.ListEnvironments(ctx, stackID)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -303,6 +353,9 @@ func (s *Server) handleListOrgEnvs(w http.ResponseWriter, r *http.Request) {
 
 	orgID, ok := pathUUID(w, r, "org")
 	if !ok {
+		return
+	}
+	if !s.authorizeOrg(w, r, orgID) {
 		return
 	}
 	envs, err := s.st.ListOrgEnvironments(ctx, orgID)

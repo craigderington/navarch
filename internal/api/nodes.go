@@ -44,6 +44,16 @@ func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	// An agent enrolling itself carries the shared service token and has no org
+	// membership to check — it has no identity at all until this call returns
+	// one. An operator calling the same route by hand is a different matter:
+	// nothing should let them plant a node, and its age recipient, in an org
+	// they are not in.
+	if id, ok := identityFrom(r.Context()); ok && id.isOperator() {
+		if !s.authorizeOrg(w, r, org.ID) {
+			return
+		}
+	}
 	// Reject a malformed recipient here rather than at the first secret
 	// write: that failure arrives as a 500 confined to environments homed to
 	// this node, which reads as a control-plane bug. A node without a key is
@@ -196,6 +206,9 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeNode(w, r, id) {
+		return
+	}
 	node, err := s.st.GetNode(ctx, id)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -209,6 +222,9 @@ func (s *Server) handleDrainNode(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	id, ok := pathUUID(w, r, "id")
 	if !ok {
+		return
+	}
+	if !s.authorizeNode(w, r, id) {
 		return
 	}
 	if err := s.st.DrainNode(ctx, id); err != nil {
@@ -268,6 +284,9 @@ func (s *Server) handleUncordonNode(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeNode(w, r, id) {
+		return
+	}
 	if err := s.st.UncordonNode(ctx, id); err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -286,6 +305,9 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	orgID, err := uuid.Parse(r.URL.Query().Get("org"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "org query parameter is required", nil)
+		return
+	}
+	if !s.authorizeOrg(w, r, orgID) {
 		return
 	}
 	nodes, err := s.st.ListNodes(ctx, orgID)
@@ -309,6 +331,9 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	envID, ok := pathUUID(w, r, "env")
 	if !ok {
+		return
+	}
+	if !s.authorizeEnv(w, r, envID) {
 		return
 	}
 	var req rollbackRequest

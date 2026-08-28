@@ -22,8 +22,14 @@ func ListenAddr() string {
 type Config struct {
 	DatabaseURL string
 	ListenAddr  string
-	// AgentToken is the shared bearer token protecting the HTTP API. Replace
-	// it with user identities plus per-node credentials before multi-tenant use.
+	// AgentToken is the shared bearer token. It no longer protects the whole
+	// API: operator routes need an operator token and agent endpoints need
+	// that node's own token, so this now opens exactly two machine-to-machine
+	// paths — POST /v1/nodes/register and GET /metrics.
+	//
+	// It stays required because a node has no identity of its own until it has
+	// registered, and a control plane that cannot enrol nodes is not a control
+	// plane. See internal/api/identity.go for the full reasoning.
 	AgentToken string
 	// TickInterval paces the scheduler and rollout controller loops.
 	TickInterval time.Duration
@@ -53,6 +59,20 @@ type Config struct {
 	// would rather have a hang than a 404. It is not the default because the
 	// default should be the one that is easier to diagnose.
 	RouteStrandSeconds int
+	// BootstrapOperatorEmail creates the first operator at startup, so a fresh
+	// install has somebody who can log in. Empty disables it, which is correct
+	// once the install has operators of its own.
+	//
+	// From the environment rather than a seeded migration for the reason
+	// POST /v1/orgs is self-serve: a UUID or token baked into a migration is
+	// permanent and identical on every install.
+	BootstrapOperatorEmail string
+	// BootstrapOperatorToken pins that operator's token instead of generating
+	// one. This is a dev-stack affordance — compose, the Makefile and the demo
+	// scripts share a constant rather than scraping a generated value out of a
+	// log line on every `make up`. Leave it empty anywhere real and the token
+	// is minted from crypto/rand and logged once.
+	BootstrapOperatorToken string
 }
 
 func Load() (*Config, error) {
@@ -64,6 +84,9 @@ func Load() (*Config, error) {
 		RouterDir:          os.Getenv("COMPOSECTL_ROUTER_DIR"),
 		PreviewDomain:      envOr("COMPOSECTL_PREVIEW_DOMAIN", "preview.localhost"),
 		RouteStrandSeconds: intEnv("COMPOSECTL_ROUTE_STRAND_SECONDS", 120),
+
+		BootstrapOperatorEmail: os.Getenv("COMPOSECTL_BOOTSTRAP_OPERATOR_EMAIL"),
+		BootstrapOperatorToken: os.Getenv("COMPOSECTL_BOOTSTRAP_OPERATOR_TOKEN"),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("COMPOSECTL_DATABASE_URL is required")

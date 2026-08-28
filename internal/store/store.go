@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -112,6 +113,21 @@ func isForeignKeyViolation(err error) bool {
 
 // GetOrganizationBySlug lets the agent register by org slug rather than a
 // UUID it has no way to know.
+// GetOrganization resolves an org by id. Authorization needs it so that a
+// caller naming a nonexistent org and a caller naming one they are not in get
+// the same 404 — without it, "org exists" leaks through the difference between
+// a membership refusal and a missing row.
+func (s *Store) GetOrganization(ctx context.Context, id uuid.UUID) (*Organization, error) {
+	var o Organization
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, slug, name, created_at FROM organizations WHERE id = $1
+	`, id).Scan(&o.ID, &o.Slug, &o.Name, &o.CreatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &o, nil
+}
+
 func (s *Store) GetOrganizationBySlug(ctx context.Context, slug string) (*Organization, error) {
 	var o Organization
 	err := s.pool.QueryRow(ctx, `

@@ -88,7 +88,17 @@ services:
     environment:
       COMPOSECTL_DATABASE_URL: postgres://composectl:composectl@postgres:5432/composectl?sslmode=disable
       COMPOSECTL_LISTEN_ADDR: 0.0.0.0:8417
+      # The shared token now opens exactly two machine-to-machine routes:
+      # node registration and metrics. The agents below use it to enrol and
+      # then switch to their own per-node token.
       COMPOSECTL_AGENT_TOKEN: dev-token-change-me
+      # The dev stack's operator. Everything a human or a demo script does goes
+      # through this identity, and its token is pinned so compose, the Makefile
+      # and scripts/*.sh can share a constant instead of scraping a generated
+      # value out of the log on every `make up`. Anywhere real, leave the token
+      # unset: the control plane mints one from crypto/rand and logs it once.
+      COMPOSECTL_BOOTSTRAP_OPERATOR_EMAIL: dev@navarch.local
+      COMPOSECTL_BOOTSTRAP_OPERATOR_TOKEN: dev-operator-token-change-me
       COMPOSECTL_ROUTER_DIR: /dynamic
       COMPOSECTL_ROUTE_STRAND_SECONDS: ${NAVARCH_ROUTE_STRAND_SECONDS:-120}
     volumes:

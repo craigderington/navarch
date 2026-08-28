@@ -13,6 +13,9 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeOrg(w, r, orgID) {
+		return
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	beforeID, _ := strconv.ParseInt(r.URL.Query().Get("before_id"), 10, 64)
 	events, err := s.st.ListEvents(ctx, orgID, beforeID, limit)

@@ -30,6 +30,9 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeEnv(w, r, envID) {
+		return
+	}
 	var req setSecretRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", nil)
@@ -73,6 +76,9 @@ func (s *Server) handleListSecrets(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeEnv(w, r, envID) {
+		return
+	}
 	metas, err := s.st.SecretKeysForEnv(ctx, envID)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -86,6 +92,9 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	envID, ok := pathUUID(w, r, "env")
 	if !ok {
+		return
+	}
+	if !s.authorizeEnv(w, r, envID) {
 		return
 	}
 	if err := s.st.DeleteSecret(ctx, envID, r.PathValue("key")); err != nil {
