@@ -1,0 +1,105 @@
+# A customer-owned node, for `make demo-byo`.
+#
+# Everything here belongs to the "customer": their Docker daemon, their agent,
+# and their router. The control plane runs in the base compose.yaml and never
+# connects to any of it — the agent dials out, which is the property that makes
+# bring-your-own-infrastructure work at all.
+#
+# The isolation is real rather than asserted. byo-dind is a separate daemon and
+# the platform's Traefik is not attached to its network, so the platform's
+# router genuinely cannot reach containers here. That is what the demo's final
+# assertion checks.
+
+services:
+  byo-dind:
+    image: docker:27-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    dns:
+      - ${NAVARCH_DIND_DNS:-1.1.1.1}
+    command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    # On the customer's network ONLY. The platform's Traefik is on `default`
+    # and is not attached here, so it genuinely cannot reach containers this
+    # daemon runs — which is what makes the demo's final assertion mean
+    # something rather than being a claim about configuration.
+    networks:
+      - byo
+    volumes:
+      - byo-dind-data:/var/lib/docker
+    ports:
+      # The customer's ingress port. Published here rather than on byo-router
+      # because the router shares this container's network namespace, and
+      # Docker refuses port publishing on a container that has none of its own.
+      # Both address families, for the same reason the platform gateway does:
+      # a .localhost name resolves to ::1 first, and curl's IPv4 fallback would
+      # hide a failure a browser would hit.
+      - "127.0.0.1:8096:80"
+      - "[::1]:8096:80"
+
+  # The customer's own ingress. It reads a config file the customer's *agent*
+  # writes — the control plane never touches it, and holds no credential for it.
+  byo-router:
+    image: traefik:v3.3
+    restart: unless-stopped
+    command:
+      - "--entryPoints.web.address=:80"
+      - "--providers.file.directory=/dynamic"
+      - "--providers.file.watch=true"
+      - "--providers.providersThrottleDuration=100ms"
+      - "--log.level=INFO"
+    volumes:
+      - byo-dynamic:/dynamic:ro
+    # Shares the daemon's namespace so it can reach containers that daemon
+    # publishes — which is exactly how a router on a customer's own box reaches
+    # their containers, and why the platform's router cannot.
+    network_mode: "service:byo-dind"
+
+  byo-agent:
+    build:
+      # Relative to the project directory (the base compose.yaml's), not to this
+      # override file — Compose resolves override paths against the project, and
+      # `../..` here silently pointed a level above the repository.
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: agent
+    restart: unless-stopped
+    depends_on:
+      byo-dind:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://byo-dind:2375
+      COMPOSECTL_CONTROLPLANE_URL: http://controlplane:8417
+      COMPOSECTL_NODE_HOSTNAME: byo-node-1
+      # Enrolment by join token. No org is named here on purpose: the token
+      # carries exactly one, which is the whole point of the credential.
+      COMPOSECTL_AGENT_TOKEN: ${NAVARCH_JOIN_TOKEN:-dev-join-token-change-me}
+      # Router mode. With this set the agent fetches its org's routes each tick
+      # and writes the config for the router beside it.
+      COMPOSECTL_ROUTER_DIR: /dynamic
+      # Containers publish inside byo-dind's network namespace, so that is the
+      # address their router connects to.
+      COMPOSECTL_ADVERTISE_ADDR: byo-dind
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-8192}
+    # The only container on both networks, and the reason BYO works: it reaches
+    # the control plane outbound over `default`, and its own daemon over `byo`.
+    # Nothing reaches back the other way.
+    networks:
+      - default
+      - byo
+    volumes:
+      - byo-dynamic:/dynamic
+      - byo-identity:/identity
+
+networks:
+  byo:
+
+volumes:
+  byo-dind-data:
+  byo-dynamic:
+  byo-identity:

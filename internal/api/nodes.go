@@ -39,20 +39,14 @@ func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body", nil)
 		return
 	}
-	org, err := s.st.GetOrganizationBySlug(ctx, req.Org)
-	if err != nil {
-		s.writeStoreError(w, err)
+	// Which organization this node joins is decided by the credential, never by
+	// the body — see the three branches below. Before join tokens existed the
+	// org came from `req.Org` and was checked only for operators, so anyone
+	// holding the shared service token could enrol a node into any org by
+	// naming its slug. That is the hole this closes.
+	org, ok := s.enrolmentOrg(w, r, req.Org)
+	if !ok {
 		return
-	}
-	// An agent enrolling itself carries the shared service token and has no org
-	// membership to check — it has no identity at all until this call returns
-	// one. An operator calling the same route by hand is a different matter:
-	// nothing should let them plant a node, and its age recipient, in an org
-	// they are not in.
-	if id, ok := identityFrom(r.Context()); ok && id.isOperator() {
-		if !s.authorizeOrg(w, r, org.ID) {
-			return
-		}
 	}
 	// Reject a malformed recipient here rather than at the first secret
 	// write: that failure arrives as a 500 confined to environments homed to
@@ -372,4 +366,203 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, dep)
+}
+
+// enrolmentOrg decides which organization a registering node joins.
+//
+// Three credentials can reach this route and they are not interchangeable:
+//
+//   - A **join token** names exactly one org, so that is the org. If the body
+//     also names one it must agree: a node that believes it joined `acme` and
+//     actually joined `dev` is a worse outcome than a node that refused to
+//     start, and silently overriding the caller is how that happens.
+//   - An **operator** may enrol a node by hand, into an org they belong to.
+//     The membership check is the same one every other org route makes.
+//   - The **shared service token** is the compatibility path for a
+//     single-tenant install whose agents predate join tokens. It is exactly as
+//     wide as it always was, which is why it is refused outright once
+//     COMPOSECTL_REQUIRE_JOIN_TOKEN is set — the switch an install flips once
+//     its agents are migrated, and the switch a multi-tenant control plane
+//     never has off.
+func (s *Server) enrolmentOrg(w http.ResponseWriter, r *http.Request, bodyOrg string) (*store.Organization, bool) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	id, authenticated := identityFrom(r.Context())
+
+	// A join token was already redeemed during authentication, and it carries
+	// the only org it can admit to.
+	if authenticated && id.kind == identityJoin {
+		org, err := s.st.GetOrganization(ctx, id.orgID)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return nil, false
+		}
+		if bodyOrg != "" && bodyOrg != org.Slug {
+			writeError(w, http.StatusBadRequest, "this join token admits nodes to organization "+
+				org.Slug+", not "+bodyOrg, nil)
+			return nil, false
+		}
+		return org, true
+	}
+
+	if authenticated && id.kind == identityService && s.requireJoinToken {
+		writeError(w, http.StatusForbidden,
+			"this control plane requires a node join token; create one with `navarch node join-token create ORG`", nil)
+		return nil, false
+	}
+	if bodyOrg == "" {
+		writeError(w, http.StatusBadRequest, "org is required", nil)
+		return nil, false
+	}
+	org, err := s.st.GetOrganizationBySlug(ctx, bodyOrg)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return nil, false
+	}
+	if authenticated && id.isOperator() {
+		if !s.authorizeOrg(w, r, org.ID) {
+			return nil, false
+		}
+	}
+	return org, true
+}
+
+// ------------------------------------------------------ node join tokens
+
+type createJoinTokenRequest struct {
+	Name          string `json:"name,omitempty"`
+	ExpiresInDays int    `json:"expires_in_days,omitempty"`
+	MaxUses       int    `json:"max_uses,omitempty"`
+}
+
+func (s *Server) handleCreateJoinToken(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	orgID, ok := pathUUID(w, r, "org")
+	if !ok {
+		return
+	}
+	if !s.authorizeOrg(w, r, orgID) {
+		return
+	}
+	var req createJoinTokenRequest
+	if r.ContentLength > 0 {
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body", nil)
+			return
+		}
+	}
+	p := store.CreateJoinTokenParams{OrgID: orgID, Name: req.Name}
+	if req.ExpiresInDays > 0 {
+		t := time.Now().Add(time.Duration(req.ExpiresInDays) * 24 * time.Hour)
+		p.ExpiresAt = &t
+	}
+	if req.MaxUses > 0 {
+		p.MaxUses = &req.MaxUses
+	}
+	if id, authed := identityFrom(r.Context()); authed && id.isOperator() {
+		p.CreatedBy = &id.operator.ID
+	}
+	tok, err := s.st.CreateJoinToken(ctx, p)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, tok)
+}
+
+func (s *Server) handleListJoinTokens(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	orgID, ok := pathUUID(w, r, "org")
+	if !ok {
+		return
+	}
+	if !s.authorizeOrg(w, r, orgID) {
+		return
+	}
+	tokens, err := s.st.ListJoinTokens(ctx, orgID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"join_tokens": tokens})
+}
+
+func (s *Server) handleRevokeJoinToken(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+	orgID, ok := pathUUID(w, r, "org")
+	if !ok {
+		return
+	}
+	if !s.authorizeOrg(w, r, orgID) {
+		return
+	}
+	tokenID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	// Revoking a join token does not unregister the nodes it admitted. They
+	// hold their own per-node tokens now, which is the point of issuing those
+	// at registration — enrolment is a moment, not a standing permission.
+	if err := s.st.RevokeJoinToken(ctx, orgID, tokenID); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ------------------------------------------------------------ node routes
+
+type nodeRoute struct {
+	Key      string `json:"key"`
+	Hostname string `json:"hostname"`
+	Target   string `json:"target"`
+	Port     int    `json:"port"`
+}
+
+// handleNodeRoutes returns the live routes for the node's own organization, so
+// a customer running their own router can configure it.
+//
+// This is a node-token route, alongside /desired-state, because it is the agent
+// that asks — and because it means a customer's router needs no operator
+// credential sitting in a config file next to it.
+//
+// The shape is the control plane's vocabulary, not Traefik's. That is
+// deliberate: internal/router stays the only thing in the tree that knows what
+// Traefik's config looks like, so a Caddy or nginx backend is a change in one
+// package rather than a change to a published API contract.
+//
+// Routes with no address or no reported port are omitted here for the same
+// reason the control-plane router omits them: a target that is not known yet is
+// not a target, and inventing one sends a hostname's traffic somewhere.
+func (s *Server) handleNodeRoutes(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 10*time.Second)
+	defer cancel()
+	nodeID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	node, err := s.st.GetNode(ctx, nodeID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	live, err := s.st.ListLiveRoutesForOrg(ctx, node.OrgID, s.routeStrand)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	out := make([]nodeRoute, 0, len(live))
+	for _, lr := range live {
+		if lr.NodeAddr == "" || lr.PublishedPort == 0 {
+			continue
+		}
+		out = append(out, nodeRoute{
+			Key: lr.Env8, Hostname: lr.Hostname, Target: lr.NodeAddr, Port: lr.PublishedPort,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"routes": out})
 }

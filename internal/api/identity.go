@@ -53,6 +53,12 @@ const (
 	// real design with its own failure modes, and it is not a prerequisite for
 	// closing the shared token's blast radius, which is what this is.
 	identityService
+
+	// identityJoin is a node enrolment credential: a join token, which names
+	// exactly one organization. It reaches exactly one route,
+	// POST /v1/nodes/register, and the org it carries is the org the node
+	// joins — never the one the request body asks for.
+	identityJoin
 )
 
 type identity struct {
@@ -61,6 +67,9 @@ type identity struct {
 	operator *store.Operator
 	// nodeID is set for identityNode.
 	nodeID uuid.UUID
+	// orgID is set for identityJoin: the organization the presented join token
+	// admits nodes to.
+	orgID uuid.UUID
 }
 
 func (i identity) isOperator() bool { return i.kind == identityOperator && i.operator != nil }

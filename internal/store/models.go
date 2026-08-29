@@ -9,10 +9,14 @@ import (
 )
 
 type Organization struct {
-	ID        uuid.UUID `json:"id"`
-	Slug      string    `json:"slug"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at"`
+	ID   uuid.UUID `json:"id"`
+	Slug string    `json:"slug"`
+	Name string    `json:"name"`
+	// PreviewDomain is the wildcard domain this org's preview hostnames are
+	// generated under. Empty falls back to the control plane's default, which
+	// is every install that does not run its own ingress.
+	PreviewDomain string    `json:"preview_domain,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type Application struct {

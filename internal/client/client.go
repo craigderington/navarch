@@ -586,3 +586,39 @@ func (c *Client) CreateToken(ctx context.Context, name string, expiresInDays int
 func (c *Client) RevokeToken(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/operators/me/tokens/"+id, nil, nil)
 }
+
+// JoinToken admits nodes to exactly one organization. The org is a property of
+// the token, which is what stops a credential enrolling a node anywhere.
+type JoinToken struct {
+	ID        string `json:"id"`
+	OrgID     string `json:"org_id"`
+	Name      string `json:"name"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+	MaxUses   *int   `json:"max_uses,omitempty"`
+	Uses      int    `json:"uses"`
+	CreatedAt string `json:"created_at"`
+	Plaintext string `json:"token,omitempty"`
+}
+
+func (c *Client) ListJoinTokens(ctx context.Context, orgID string) ([]JoinToken, error) {
+	var out struct {
+		Tokens []JoinToken `json:"join_tokens"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/orgs/"+orgID+"/join-tokens", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Tokens, nil
+}
+
+func (c *Client) CreateJoinToken(ctx context.Context, orgID, name string, expiresInDays, maxUses int) (*JoinToken, error) {
+	var out JoinToken
+	body := map[string]any{"name": name, "expires_in_days": expiresInDays, "max_uses": maxUses}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/orgs/"+orgID+"/join-tokens", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) RevokeJoinToken(ctx context.Context, orgID, tokenID string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/orgs/"+orgID+"/join-tokens/"+tokenID, nil, nil)
+}

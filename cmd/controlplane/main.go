@@ -109,6 +109,8 @@ func run(log *slog.Logger) error {
 	srvHandler := api.NewServer(st, log,
 		api.WithPreviewDomain(cfg.PreviewDomain),
 		api.WithBearerToken(cfg.AgentToken),
+		api.WithRequireJoinToken(cfg.RequireJoinToken),
+		api.WithRouteStrand(time.Duration(cfg.RouteStrandSeconds)*time.Second),
 		api.WithMetrics(metricsRegistry),
 		api.WithLogBuffer(logBuffer),
 	)
@@ -119,6 +121,7 @@ func run(log *slog.Logger) error {
 	bootCtx, bootCancel := context.WithTimeout(ctx, 5*time.Second)
 	srvHandler.BootstrapDevOrg(bootCtx)
 	srvHandler.BootstrapOperator(bootCtx, cfg.BootstrapOperatorEmail, cfg.BootstrapOperatorToken)
+	srvHandler.BootstrapJoinToken(bootCtx, "dev", cfg.BootstrapJoinToken)
 	bootCancel()
 
 	// Scheduler + rollout controller + reaper: three loops over the deployment

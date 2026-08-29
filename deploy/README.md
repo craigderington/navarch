@@ -171,6 +171,64 @@ Two things to know before you do this:
   revision anywhere else rather than rebuild the stack over empty volumes. Moving
   one is an explicit `navarch node drain`.
 
+### Bring your own infrastructure
+
+A node does not have to be yours. Someone else can run the machine, the
+containers, the durable volumes and the ingress, while this control plane does
+catalog, scheduling and secret sealing — and never connects to them.
+
+That works because **the agent runs no server**. Every interaction is outbound:
+desired state, reports, heartbeats, log delivery. The one inbound path in the
+system is a router reaching a tenant container, so if the router runs on their
+machine too, nothing reaches in at all. A box behind NAT joins the fleet with no
+firewall change.
+
+Issue them a join token scoped to their organization:
+
+```bash
+navarch node join-token create acme --name "acme fleet" --expires-in-days 30
+```
+
+They run an agent with it, plus a router beside it:
+
+```yaml
+services:
+  agent:
+    image: ghcr.io/craigderington/navarch/agent:1.0.0
+    environment:
+      COMPOSECTL_CONTROLPLANE_URL: https://navarch.example.com
+      COMPOSECTL_AGENT_TOKEN: <the join token>   # no org: the token names it
+      COMPOSECTL_NODE_HOSTNAME: acme-1
+      COMPOSECTL_ADVERTISE_ADDR: 10.0.1.12       # reachable from THEIR router
+      COMPOSECTL_ROUTER_DIR: /dynamic            # router mode
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - dynamic:/dynamic
+      - age-identity:/identity
+  router:
+    image: traefik:v3.3
+    command: ["--entryPoints.web.address=:80",
+              "--providers.file.directory=/dynamic",
+              "--providers.file.watch=true",
+              "--providers.providersThrottleDuration=100ms"]
+    ports: ["80:80"]
+    volumes: [ "dynamic:/dynamic:ro" ]
+```
+
+`make demo-byo` runs exactly this shape and asserts the part that matters: the
+platform's own router **cannot** reach that node.
+
+Three things to know:
+
+- **The org comes from the token, not the request.** A body naming a different
+  org is refused. Set `COMPOSECTL_REQUIRE_JOIN_TOKEN=1` to stop the shared
+  service token enrolling anything, which any multi-tenant control plane should.
+- **Set their preview domain**, or previews are generated under yours and point
+  at infrastructure they do not have. It is a per-org column.
+- **Route withdrawal does not apply to their router.** It only updates while
+  their agent is polling, so a node that is down keeps its routes until it comes
+  back. That is their failure domain, not yours.
+
 The agent's registration announces an age public key. If a node ever comes back
 with a *different* key — a rebuilt host, a lost `age-identity` volume — the
 control plane records it as pending and keeps sealing to the old one until you

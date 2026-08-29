@@ -118,6 +118,9 @@ demo-logs: build ## Read a container's output through the fleet, and prove none 
 demo-tls: build ## Put TLS in front of the control plane and prove it, both directions
 	./scripts/demo-tls.sh
 
+demo-byo: build ## A customer-owned node with its own router, unreachable from ours
+	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-byo.sh
+
 demo-site: build site-image ## Deploy Navarch's own marketing site onto Navarch
 	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-site.sh
 

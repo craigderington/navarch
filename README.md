@@ -53,6 +53,9 @@ The platform loop is implemented end to end across a multi-node fleet:
   credentials over plaintext they cannot contain
 - Versioned, reproducible release binaries and a single-host deployment whose
   upgrade path is tested rather than described
+- Bring your own infrastructure: enrol a node with a join token scoped to one
+  organization, run your own router, and keep ingress entirely on your side —
+  the control plane never connects to you
 
 Only `blue_green` is currently supported. Requests for `rolling` or `recreate`
 are rejected rather than silently receiving different behavior.
@@ -126,6 +129,7 @@ make demo-secrets  # encrypted storage and agent-side secret injection
 make demo-preview  # preview creation, routing, expiry, and full teardown
 make demo-tls      # TLS terminated at a real proxy, and refused where absent
 make demo-site     # Navarch's own marketing site, deployed on Navarch
+make demo-byo      # a customer-owned node our router cannot reach, serving a stack
 make test          # race-enabled Go test suite
 ```
 

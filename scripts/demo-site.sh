@@ -106,7 +106,7 @@ BODY=$(fetch)
 # from a misconfigured nginx is also a 200, and the whole point of this demo is
 # that the site is really being served.
 case "$BODY" in
-*"Deploy the"*"whole stack"*) : ;;
+*"Command the"*"whole stack"*) : ;;
 *) fail "the response did not contain the site's headline" ;;
 esac
 BYTES=$(printf '%s' "$BODY" | wc -c | tr -d ' ')

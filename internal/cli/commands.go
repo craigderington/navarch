@@ -556,7 +556,7 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 
 func cmdNode(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch node list|get|drain|uncordon|rotate-recipient ...")
+		return usage("usage: navarch node list|get|drain|uncordon|rotate-recipient|join-token ...")
 	}
 	switch args[0] {
 	case "list":
@@ -661,6 +661,83 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		}
 		fmt.Fprintf(e.out, "%s\t%s\n", state, nodeID)
 		return nil
+	case "join-token", "join-tokens":
+		if len(args) < 2 {
+			return usage("usage: navarch node join-token list|create|revoke ORG ...")
+		}
+		sub := args[1]
+		if err := need(args, 3, "usage: navarch node join-token "+sub+" ORG ..."); err != nil {
+			return err
+		}
+		orgID, err := e.resolveOrg(ctx, args[2])
+		if err != nil {
+			return err
+		}
+		switch sub {
+		case "list":
+			tokens, err := e.c.ListJoinTokens(ctx, orgID)
+			if err != nil {
+				return err
+			}
+			rows := make([][]string, 0, len(tokens))
+			for _, t := range tokens {
+				uses := strconv.Itoa(t.Uses)
+				if t.MaxUses != nil {
+					uses += "/" + strconv.Itoa(*t.MaxUses)
+				}
+				rows = append(rows, []string{t.ID, t.Name, uses, orDash(t.ExpiresAt), t.CreatedAt})
+			}
+			return emit(e, tokens, []string{"ID", "NAME", "USES", "EXPIRES", "CREATED"}, rows)
+		case "create":
+			flags, pos, err := flagMap(args[3:])
+			if err != nil {
+				return err
+			}
+			name := flags["name"]
+			if name == "" && len(pos) > 0 {
+				name = pos[0]
+			}
+			days, uses := 0, 0
+			if v := flags["expires-in-days"]; v != "" {
+				if days, err = strconv.Atoi(v); err != nil || days < 0 {
+					return usage("--expires-in-days must be a non-negative whole number of days")
+				}
+			}
+			if v := flags["max-uses"]; v != "" {
+				if uses, err = strconv.Atoi(v); err != nil || uses < 1 {
+					return usage("--max-uses must be at least 1")
+				}
+			}
+			t, err := e.c.CreateJoinToken(ctx, orgID, name, days, uses)
+			if err != nil {
+				return err
+			}
+			if e.cfg.Output == "json" {
+				return printJSON(e.out, t)
+			}
+			// Alone on its line so it can be piped straight into an agent's
+			// environment without dragging table furniture along.
+			fmt.Fprintf(e.out, "%s\n", t.Plaintext)
+			fmt.Fprintf(e.err, "join token %s created for %s; shown once\n", t.ID, args[2])
+			return nil
+		case "revoke":
+			if err := need(args, 4, "usage: navarch node join-token revoke ORG TOKEN_ID"); err != nil {
+				return err
+			}
+			if err := e.c.RevokeJoinToken(ctx, orgID, args[3]); err != nil {
+				return err
+			}
+			// Said out loud because the intuition is wrong: revoking the
+			// credential that admitted a node does not evict the node. It holds
+			// its own per-node token now, which is the point of issuing one at
+			// registration.
+			fmt.Fprintf(e.out, "revoked\t%s\n", args[3])
+			fmt.Fprintln(e.out, "nodes already enrolled with it keep their own tokens and stay in the fleet")
+			return nil
+		default:
+			return usage(fmt.Sprintf("unknown join-token subcommand %q", sub))
+		}
+
 	case "rotate-recipient":
 		if err := need(args, 2, "usage: navarch node rotate-recipient ORG/HOSTNAME"); err != nil {
 			return err
@@ -683,7 +760,7 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		fmt.Fprintf(e.out, "rotated\t%s\t%s\n", n.Hostname, n.AgeRecipient)
 		return nil
 	default:
-		return usage("usage: navarch node list|get|drain|uncordon|rotate-recipient ...")
+		return usage("usage: navarch node list|get|drain|uncordon|rotate-recipient|join-token ...")
 	}
 }
 

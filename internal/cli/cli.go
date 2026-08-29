@@ -375,7 +375,7 @@ Commands:
   promote ID           Manually promote a healthy deployment
   rollback             Re-deploy an earlier revision
   secret               Set, list, and delete environment secrets
-  node                 List, get, drain, uncordon, and rotate a node's age key
+  node                 List, get, drain, uncordon, rotate keys, issue join tokens
   events               Organization audit timeline
   logs ENV             Container output for one service (--service, --follow)
   wait ID              Block until a deployment reaches a state

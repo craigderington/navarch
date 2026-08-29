@@ -120,8 +120,8 @@ func isForeignKeyViolation(err error) bool {
 func (s *Store) GetOrganization(ctx context.Context, id uuid.UUID) (*Organization, error) {
 	var o Organization
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, slug, name, created_at FROM organizations WHERE id = $1
-	`, id).Scan(&o.ID, &o.Slug, &o.Name, &o.CreatedAt)
+		SELECT id, slug, name, COALESCE(preview_domain,''), created_at FROM organizations WHERE id = $1
+	`, id).Scan(&o.ID, &o.Slug, &o.Name, &o.PreviewDomain, &o.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -131,8 +131,8 @@ func (s *Store) GetOrganization(ctx context.Context, id uuid.UUID) (*Organizatio
 func (s *Store) GetOrganizationBySlug(ctx context.Context, slug string) (*Organization, error) {
 	var o Organization
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, slug, name, created_at FROM organizations WHERE slug=$1
-	`, slug).Scan(&o.ID, &o.Slug, &o.Name, &o.CreatedAt)
+		SELECT id, slug, name, COALESCE(preview_domain,''), created_at FROM organizations WHERE slug=$1
+	`, slug).Scan(&o.ID, &o.Slug, &o.Name, &o.PreviewDomain, &o.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}

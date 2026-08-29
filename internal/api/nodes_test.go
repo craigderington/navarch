@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -531,5 +532,103 @@ func TestRotateRecipientIsAnOperatorAction(t *testing.T) {
 	}
 	if got.AgeRecipient != "age1rotated" || got.PendingAgeRecipient != "" {
 		t.Fatalf("approval should have promoted the pending key: %+v", got)
+	}
+}
+
+// The hole bring-your-own-infrastructure could not ship with: a credential that
+// enrols a node into an organization it was not issued for.
+//
+// Registration used to take the org from the request body and check it only
+// when the caller was an operator, so the shared service token could name any
+// org's slug and be admitted. A join token names exactly one org, and that is
+// where its nodes go — a body claiming otherwise is refused rather than
+// silently overridden, because a node that believes it joined one org and
+// actually joined another is worse than one that failed to start.
+func TestAJoinTokenAdmitsNodesToItsOwnOrgOnly(t *testing.T) {
+	srv := testServer(t, WithBearerToken("shared-service-token"))
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	mine := newScopedFixture(t, srv.st)
+	theirs := newScopedFixture(t, srv.st)
+	myOrg, err := srv.st.GetOrganization(ctx, mine.orgID)
+	if err != nil {
+		t.Fatalf("GetOrganization: %v", err)
+	}
+	theirOrg, err := srv.st.GetOrganization(ctx, theirs.orgID)
+	if err != nil {
+		t.Fatalf("GetOrganization: %v", err)
+	}
+	jt, err := srv.st.CreateJoinToken(ctx, store.CreateJoinTokenParams{OrgID: mine.orgID, Name: "fleet"})
+	if err != nil {
+		t.Fatalf("CreateJoinToken: %v", err)
+	}
+
+	register := func(token, orgSlug, hostname string) *httptest.ResponseRecorder {
+		body := `{"org":"` + orgSlug + `","hostname":"` + hostname +
+			`","advertise_addr":"10.9.9.20","cpu_millis":1000,"memory_bytes":1073741824}`
+		return doAs(t, srv, http.MethodPost, "/v1/nodes/register", token, body)
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		srv.st.Pool().Exec(c, `DELETE FROM nodes WHERE hostname LIKE 'join-%'`)
+	})
+
+	// Its own org: admitted.
+	if rec := register(jt.Plaintext, myOrg.Slug, "join-ok-"+uuid.NewString()[:8]); rec.Code != http.StatusCreated &&
+		rec.Code != http.StatusOK {
+		t.Fatalf("a join token must admit a node to its own org, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Another org, named in the body: refused. This is the assertion the whole
+	// feature exists for.
+	rec := register(jt.Plaintext, theirOrg.Slug, "join-bad-"+uuid.NewString()[:8])
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("a join token must not enrol into another org, got %d: %s", rec.Code, rec.Body.String())
+	}
+	nodes, err := srv.st.ListNodes(ctx, theirs.orgID)
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	for _, n := range nodes {
+		if strings.HasPrefix(n.Hostname, "join-bad-") {
+			t.Fatal("the refused registration created a node in the other org anyway")
+		}
+	}
+
+	// With no body org at all the token still decides, which is what an agent
+	// configured only with a join token relies on.
+	if rec := register(jt.Plaintext, "", "join-implicit-"+uuid.NewString()[:8]); rec.Code >= 300 {
+		t.Fatalf("a join token alone must be enough to enrol, got %d: %s", rec.Code, rec.Body.String())
+	}
+	mineNodes, _ := srv.st.ListNodes(ctx, mine.orgID)
+	var implicit bool
+	for _, n := range mineNodes {
+		if strings.HasPrefix(n.Hostname, "join-implicit-") {
+			implicit = true
+		}
+	}
+	if !implicit {
+		t.Fatal("the token's own org should have received the node")
+	}
+}
+
+// With join tokens required, the shared service token stops being able to enrol
+// at all — the state a multi-tenant control plane runs in permanently.
+func TestRequireJoinTokenRefusesTheSharedToken(t *testing.T) {
+	srv := testServer(t, WithBearerToken("shared-service-token"), WithRequireJoinToken(true))
+	f := newScopedFixture(t, srv.st)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	org, err := srv.st.GetOrganization(ctx, f.orgID)
+	if err != nil {
+		t.Fatalf("GetOrganization: %v", err)
+	}
+	body := `{"org":"` + org.Slug + `","hostname":"join-refused-` + uuid.NewString()[:8] +
+		`","advertise_addr":"10.9.9.21","cpu_millis":1000,"memory_bytes":1073741824}`
+	rec := doAs(t, srv, http.MethodPost, "/v1/nodes/register", "shared-service-token", body)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for the shared token, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

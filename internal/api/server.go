@@ -33,6 +33,16 @@ type Server struct {
 	// hand-written list, which would drift the moment someone adds a route and
 	// would then pass by omitting exactly the route nobody checked.
 	patterns []string
+	// requireJoinToken refuses node registration on the shared service token.
+	// Off by default so an existing single-tenant install upgrades without its
+	// agents failing to re-register; on for anything multi-tenant, where a
+	// credential that can enrol into any org must not exist.
+	requireJoinToken bool
+	// routeStrand is how long a node may go unheard from before its routes are
+	// withdrawn. The server needs it for the same reason the controller does:
+	// GET /v1/nodes/{id}/routes answers the same question the control-plane
+	// router asks, and two different answers would be worse than either.
+	routeStrand time.Duration
 }
 
 // ServerOption keeps NewServer's existing two-argument form working; only the
@@ -52,6 +62,18 @@ func WithPreviewDomain(domain string) ServerOption {
 // the control-plane config rejects an empty token at startup.
 func WithBearerToken(token string) ServerOption {
 	return func(s *Server) { s.bearerToken = token }
+}
+
+// WithRequireJoinToken refuses node registration on the shared service token,
+// so every node enrols with a credential that names exactly one organization.
+// WithRouteStrand sets the staleness window used when answering a node's route
+// request, matching the controller's.
+func WithRouteStrand(d time.Duration) ServerOption {
+	return func(s *Server) { s.routeStrand = d }
+}
+
+func WithRequireJoinToken(v bool) ServerOption {
+	return func(s *Server) { s.requireJoinToken = v }
 }
 
 func WithMetrics(reg *metrics.Registry) ServerOption {
@@ -145,6 +167,21 @@ func (s *Server) authenticate(r *http.Request) (identity, bool) {
 		return identity{kind: identityService}, true
 	}
 
+	// A join token, on the one route it opens. Redeeming here rather than in
+	// the handler is deliberate: the redeem is a single atomic statement, so
+	// max_uses holds when two agents start at once — whereas a check here and
+	// an increment later would let both through a single-use token. The cost is
+	// that a registration which then fails for some other reason has still
+	// spent a use, which is the safe direction for a credential whose whole
+	// point may be that it works once.
+	if isNodeRegistration(r) && s.st != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if orgID, err := s.st.RedeemJoinToken(ctx, bearerToken(r)); err == nil {
+			return identity{kind: identityJoin, orgID: orgID}, true
+		}
+	}
+
 	if s.st == nil {
 		// Only reachable from an in-package test that builds a Server without
 		// a store. There is no credential to check against, so the answer is
@@ -165,9 +202,14 @@ func (s *Server) authenticate(r *http.Request) (identity, bool) {
 // isServicePath reports whether r targets one of the two machine-to-machine
 // routes the shared token still opens. Exact matches only: a prefix test would
 // hand the shared token every route that happens to start the same way.
+// isNodeRegistration is the one route a join token opens.
+func isNodeRegistration(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Path == "/v1/nodes/register"
+}
+
 func isServicePath(r *http.Request) bool {
 	switch {
-	case r.Method == http.MethodPost && r.URL.Path == "/v1/nodes/register":
+	case isNodeRegistration(r):
 		return true
 	case r.Method == http.MethodGet && r.URL.Path == "/metrics":
 		return true
@@ -194,6 +236,12 @@ func nodeAgentPathID(r *http.Request) (uuid.UUID, bool) {
 		want = "heartbeat"
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/desired-state"):
 		want = "desired-state"
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/routes") &&
+		strings.HasPrefix(r.URL.Path, "/v1/nodes/"):
+		// A node asking for its org's routes, so it can configure a router
+		// running beside it. Node token only: an operator token reaching here
+		// would be a way to read another org's hostnames.
+		want = "routes"
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/report"):
 		want = "report"
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/logs") &&
@@ -346,6 +394,24 @@ func (s *Server) handle(pattern string, h http.HandlerFunc) {
 // package's own test binary; nothing in the running server reads it.
 func (s *Server) Patterns() []string { return append([]string(nil), s.patterns...) }
 
+// BootstrapJoinToken pins a join token for an org, so the dev stack's agents
+// can enrol with a credential that names exactly one organization instead of
+// the shared service token. Idempotent on the token value, like the bootstrap
+// operator's — a restart does not mint a second one.
+func (s *Server) BootstrapJoinToken(ctx context.Context, orgSlug, token string) {
+	if token == "" {
+		return
+	}
+	org, err := s.st.GetOrganizationBySlug(ctx, orgSlug)
+	if err != nil {
+		s.log.Warn("could not bootstrap join token", "org", orgSlug, "err", err)
+		return
+	}
+	if err := s.st.EnsureJoinToken(ctx, org.ID, "bootstrap", token); err != nil {
+		s.log.Warn("could not pin the bootstrap join token", "err", err)
+	}
+}
+
 // routes uses Go 1.22+ method-and-wildcard patterns, so no router
 // dependency is needed.
 func (s *Server) routes() {
@@ -401,6 +467,7 @@ func (s *Server) routes() {
 	s.handle("POST /v1/nodes/register", s.handleRegisterNode)
 	s.handle("POST /v1/nodes/{id}/heartbeat", s.handleHeartbeat)
 	s.handle("GET /v1/nodes/{id}/desired-state", s.handleDesiredState)
+	s.handle("GET /v1/nodes/{id}/routes", s.handleNodeRoutes)
 	s.handle("POST /v1/nodes/{id}/report", s.handleInstanceReport)
 	s.handle("GET /v1/nodes", s.handleListNodes)
 	s.handle("GET /v1/nodes/{id}", s.handleGetNode)
@@ -408,6 +475,9 @@ func (s *Server) routes() {
 	s.handle("POST /v1/nodes/{id}/drain", s.handleDrainNode)
 	s.handle("POST /v1/nodes/{id}/uncordon", s.handleUncordonNode)
 	s.handle("POST /v1/nodes/{id}/rotate-recipient", s.handleRotateNodeRecipient)
+	s.handle("GET /v1/orgs/{org}/join-tokens", s.handleListJoinTokens)
+	s.handle("POST /v1/orgs/{org}/join-tokens", s.handleCreateJoinToken)
+	s.handle("DELETE /v1/orgs/{org}/join-tokens/{id}", s.handleRevokeJoinToken)
 
 	// Secrets — encrypted at rest, plaintext never stored. The list response
 	// never includes values; see internal/secrets for the encrypt boundary.

@@ -175,7 +175,18 @@ func (s *Server) handleCreatePreview(w http.ResponseWriter, r *http.Request) {
 	// boundary, unlike the slug rules, which are business rules and live in
 	// the store.
 	envID := uuid.New()
-	hostname := previewHostname(req.Slug, stack.Slug, envID.String()[:env8Len], s.previewDomain)
+	// The org's own domain when it has one: an organization running its own
+	// nodes and its own router owns its DNS, and generating previews under the
+	// control plane's domain would point them at infrastructure it does not
+	// have. Empty falls back to the server default, which is every install that
+	// does not run its own ingress.
+	domain := s.previewDomain
+	if org, orgErr := s.st.OrgForStack(ctx, stack.ID); orgErr == nil {
+		if o, oErr := s.st.GetOrganization(ctx, org); oErr == nil && o.PreviewDomain != "" {
+			domain = o.PreviewDomain
+		}
+	}
+	hostname := previewHostname(req.Slug, stack.Slug, envID.String()[:env8Len], domain)
 	env, dep, err := s.st.CreatePreview(ctx, store.CreatePreviewParams{
 		EnvironmentID: envID,
 		StackID:       stackID, Slug: req.Slug, Hostname: hostname,

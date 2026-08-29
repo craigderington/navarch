@@ -790,6 +790,53 @@ The dev stack needs no opt-in and that is load-bearing, not luck: agents reach
 `http://localhost:8417`. A guard that made the ordinary case worse would be
 turned off, and then it would be protecting nothing.
 
+**A node's organization comes from the credential that enrolled it, never from
+the request.** `handleRegisterNode` used to resolve the org from `req.Org` and
+check membership only when the caller was an operator — so a holder of the
+shared service token could enrol a node into *any* org by naming its slug.
+Correct for one trusted fleet, fatal for bring-your-own-infrastructure. A join
+token (`node_join_tokens`, 0015) names exactly one org, and that is the org the
+node joins; a body naming a different one is a **400, not a silent override**,
+because a node that believes it joined `acme` and actually joined `dev` is worse
+than a node that failed to start. `COMPOSECTL_REQUIRE_JOIN_TOKEN=1` refuses the
+shared token for enrolment entirely — off by default so an existing install's
+agents keep re-registering through an upgrade, and on for anything serving more
+than one tenant.
+
+**The join token is redeemed during authentication, not in the handler.**
+`RedeemJoinToken` is a single `UPDATE … RETURNING` that checks validity and
+counts the use atomically, which is what makes `max_uses` hold when two agents
+start at once — a check in `authenticate` and an increment in the handler would
+let both through a single-use token. The cost is that a registration which then
+fails for some other reason has still spent a use. That is the safe direction
+for a credential whose whole point may be that it works exactly once.
+
+**The agent can configure a router beside it, and that is what BYO is.** With
+`COMPOSECTL_ROUTER_DIR` set, the agent fetches `GET /v1/nodes/{id}/routes` each
+tick and writes the config for a router on its own machine. The endpoint answers
+in the control plane's vocabulary — hostname, target, port — **not Traefik's**,
+so `internal/router` stays the only package that knows that shape and a
+different router is a change in one package rather than to a published contract.
+It is a node-token route: an operator token reaching it would read another org's
+hostnames.
+
+Why this matters more than it looks: **`advertise_addr` has exactly one consumer
+in the whole tree** (`internal/rollout/controller.go`, where routes are built),
+and the agent runs no server at all. So the only inbound path anywhere is the
+router reaching a tenant container — and moving the router to the customer's
+side removes it. A machine with no open ports can run deployed stacks.
+`make demo-byo` asserts exactly that, and its load-bearing assertion is the last
+one: the platform's own router **cannot** reach the BYO node. A demo where both
+routers worked would prove nothing.
+
+**Route withdrawal does not apply to a customer-side router**, and that is
+accepted rather than overlooked. `COMPOSECTL_ROUTE_STRAND_SECONDS` works because
+the control plane's router sees every node's heartbeat; a customer's router only
+updates while its own agent is polling, so if that machine is down its routes go
+stale and keep serving. Correct for BYO — their router serving their node is
+their failure domain, and withdrawing routes for a fleet we cannot see would
+assert something we do not know.
+
 **A node is a trust boundary, not a resource pool.** `nodes.org_id` is not an
 accounting detail and shared multi-org pools were considered in Sprint 7 Slice B
 and refused. Two things make a shared node a cross-tenant exposure, and neither

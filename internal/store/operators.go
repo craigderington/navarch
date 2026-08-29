@@ -312,7 +312,7 @@ func (s *Store) OperatorInOrg(ctx context.Context, orgID, operatorID uuid.UUID) 
 
 func (s *Store) OrgsForOperator(ctx context.Context, operatorID uuid.UUID) ([]Organization, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT o.id, o.slug, o.name, o.created_at
+		SELECT o.id, o.slug, o.name, COALESCE(o.preview_domain,''), o.created_at
 		FROM organizations o
 		JOIN organization_members m ON m.org_id = o.id
 		WHERE m.operator_id = $1
@@ -325,7 +325,7 @@ func (s *Store) OrgsForOperator(ctx context.Context, operatorID uuid.UUID) ([]Or
 	out := []Organization{}
 	for rows.Next() {
 		var o Organization
-		if err := rows.Scan(&o.ID, &o.Slug, &o.Name, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.Slug, &o.Name, &o.PreviewDomain, &o.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, o)

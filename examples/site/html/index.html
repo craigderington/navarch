@@ -3,486 +3,550 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Navarch — deploy the whole stack, not one container</title>
-<meta name="description" content="Navarch is a container platform for Docker Compose stacks. Versioned revisions, zero-downtime blue/green rollouts across an entire stack, and secrets the control plane cannot read.">
+<title>Navarch</title>
+<meta name="description" content="A deployment platform for Docker Compose stacks. Versioned revisions, blue/green rollouts across a whole stack, and secrets the control plane cannot read.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap">
 <style>
+  /* ------------------------------------------------------------------ tokens
+     Palette taken from admiralty chart printing: cool grey-green paper stock,
+     blue-black engraving ink, chart blue for linework, and the magenta that
+     charts reserve for lights, buoys and cautionary notes — which is why it is
+     the only accent here and is spent on the one idea that matters. */
   :root {
-    --bg: #080b11;
-    --bg-2: #0d1219;
-    --surface: #111825;
-    --border: #1d2635;
-    --border-lit: #2b3a4f;
-    --text: #e8eef6;
-    --muted: #8695ab;
-    --dim: #5d6b80;
-    --accent: #4d9fff;
-    --accent-soft: #16304f;
-    --teal: #4fd6c0;
-    --amber: #f0b866;
-    --rose: #f2708c;
-    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
-    --max: 1120px;
+    --paper:      #e7eae3;
+    --paper-deep: #dbe0d7;
+    --paper-edge: #cfd6ca;
+    --ink:        #0d1a21;
+    --ink-soft:   #43555d;
+    --ink-faint:  #7c8b91;
+    --sea:        #1d5567;
+    --sea-tint:   #c3d2d3;
+    --magenta:    #a8256a;
+    --magenta-tint: #ecd2df;
+    --rule:       #a9b4ac;
+    --rule-fine:  #c2cabf;
+
+    --display: "Instrument Serif", "Times New Yorker", Georgia, serif;
+    --body: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+    --measure: 66ch;
+    --sheet: 1180px;
   }
 
-  * { box-sizing: border-box; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      /* Night navigation: the same chart read under a red-free instrument
+         light. Ink and paper trade places; the accent lifts to stay legible
+         on a dark ground rather than being naively inverted. */
+      --paper:      #0b1418;
+      --paper-deep: #101c21;
+      --paper-edge: #16242a;
+      --ink:        #dde5e1;
+      --ink-soft:   #9aaaad;
+      --ink-faint:  #66787d;
+      --sea:        #63a8ba;
+      --sea-tint:   #1c333b;
+      --magenta:    #e274aa;
+      --magenta-tint: #34172a;
+      --rule:       #2a3a41;
+      --rule-fine:  #1d2c32;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:      #0b1418;
+    --paper-deep: #101c21;
+    --paper-edge: #16242a;
+    --ink:        #dde5e1;
+    --ink-soft:   #9aaaad;
+    --ink-faint:  #66787d;
+    --sea:        #63a8ba;
+    --sea-tint:   #1c333b;
+    --magenta:    #e274aa;
+    --magenta-tint: #34172a;
+    --rule:       #2a3a41;
+    --rule-fine:  #1d2c32;
+  }
 
-  html { scroll-behavior: smooth; }
+  /* ------------------------------------------------------------------- base */
+
+  *, *::before, *::after { box-sizing: border-box; }
 
   body {
     margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--sans);
-    font-size: 16px;
-    line-height: 1.65;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16.5px;
+    line-height: 1.62;
     -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
   }
 
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
+  a { color: var(--sea); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  a:hover { color: var(--magenta); }
+  :focus-visible { outline: 2px solid var(--magenta); outline-offset: 3px; }
 
-  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
+  h1, h2, h3 { font-family: var(--display); font-weight: 400; text-wrap: balance; margin: 0; }
 
-  /* ---------------------------------------------------------------- header */
-
-  header {
-    position: sticky; top: 0; z-index: 20;
-    background: rgba(8, 11, 17, 0.82);
-    backdrop-filter: blur(12px);
-    border-bottom: 1px solid var(--border);
+  /* The neatline: a chart's ruled border. Real charts carry one, with the
+     graticule ticking along its inside edge. Here it frames the sheet and the
+     ticks are drawn by a repeating gradient rather than 60 elements. */
+  .sheet {
+    max-width: var(--sheet);
+    margin: 0 auto;
+    border-left: 1px solid var(--rule);
+    border-right: 1px solid var(--rule);
+    position: relative;
   }
-  .nav { display: flex; align-items: center; gap: 32px; height: 64px; }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -0.02em; font-size: 17px; }
-  .brand svg { display: block; }
-  .nav-links { display: flex; gap: 26px; margin-left: auto; font-size: 14.5px; color: var(--muted); }
-  .nav-links a { color: var(--muted); }
-  .nav-links a:hover { color: var(--text); text-decoration: none; }
-
-  /* ------------------------------------------------------------------ hero */
-
-  .hero { position: relative; padding: 96px 0 80px; overflow: hidden; }
-  .hero::before {
-    content: ""; position: absolute; inset: -40% 20% auto -10%; height: 620px;
-    background: radial-gradient(closest-side, rgba(77,159,255,0.13), transparent 70%);
+  .sheet::before, .sheet::after {
+    content: "";
+    position: absolute; top: 0; bottom: 0; width: 9px;
+    background-image: repeating-linear-gradient(
+      to bottom, var(--rule) 0 1px, transparent 1px 34px);
     pointer-events: none;
   }
-  .hero::after {
-    content: ""; position: absolute; inset: 0;
-    background-image:
-      linear-gradient(var(--border) 1px, transparent 1px),
-      linear-gradient(90deg, var(--border) 1px, transparent 1px);
-    background-size: 56px 56px;
-    opacity: 0.28;
-    mask-image: radial-gradient(closest-side at 30% 20%, #000 40%, transparent 100%);
-    -webkit-mask-image: radial-gradient(closest-side at 30% 20%, #000 40%, transparent 100%);
-    pointer-events: none;
+  .sheet::before { left: 0; }
+  .sheet::after  { right: 0; }
+
+  .band { padding: 0 clamp(26px, 5vw, 68px); }
+  .rule-top { border-top: 1px solid var(--rule); }
+
+  /* --------------------------------------------------------------- masthead */
+
+  .masthead {
+    display: flex; align-items: baseline; gap: 18px;
+    padding-top: 22px; padding-bottom: 22px;
+    border-bottom: 1px solid var(--rule);
   }
-  .hero .wrap { position: relative; z-index: 1; }
+  .wordmark {
+    font-family: var(--display);
+    font-size: 27px; letter-spacing: 0.01em; line-height: 1;
+  }
+  .wordmark span { font-style: italic; color: var(--sea); }
+  .masthead nav {
+    margin-left: auto; display: flex; gap: 26px;
+    font-family: var(--mono); font-size: 11.5px;
+    letter-spacing: 0.14em; text-transform: uppercase;
+  }
+  .masthead nav a { color: var(--ink-soft); text-decoration: none; }
+  .masthead nav a:hover { color: var(--magenta); }
+
+  /* ------------------------------------------------------------------- hero
+     The title block of a chart: name, then the statement of what the sheet
+     covers, set against a wide margin the way a chart's legend sits. */
+
+  .hero { padding-top: clamp(56px, 8vw, 104px); padding-bottom: clamp(48px, 7vw, 86px); }
+  .hero-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: clamp(28px, 5vw, 72px); align-items: end; }
 
   .eyebrow {
-    display: inline-flex; align-items: center; gap: 8px;
-    font-family: var(--mono); font-size: 12.5px; letter-spacing: 0.06em;
-    text-transform: uppercase; color: var(--teal);
-    border: 1px solid var(--border-lit); border-radius: 999px;
-    padding: 5px 13px; margin-bottom: 26px;
-    background: rgba(79, 214, 192, 0.06);
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.19em;
+    text-transform: uppercase; color: var(--sea); margin: 0 0 22px;
+    display: flex; align-items: center; gap: 11px;
   }
-  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--teal); }
+  .eyebrow::after { content: ""; height: 1px; flex: 1; background: var(--rule); }
 
   h1 {
-    font-size: clamp(2.4rem, 5.6vw, 4rem);
-    line-height: 1.06; letter-spacing: -0.035em; font-weight: 680;
-    margin: 0 0 22px; max-width: 16ch;
+    font-size: clamp(3rem, 8.2vw, 6.1rem);
+    line-height: 0.94; letter-spacing: -0.015em;
+    margin-bottom: 26px;
   }
-  h1 .grad {
-    background: linear-gradient(100deg, var(--accent) 10%, var(--teal) 90%);
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-  }
-  .lede { font-size: clamp(1.05rem, 1.9vw, 1.28rem); color: var(--muted); max-width: 56ch; margin: 0 0 34px; }
+  h1 em { font-style: italic; color: var(--sea); }
 
-  .cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .lede { font-size: clamp(1.04rem, 1.6vw, 1.18rem); color: var(--ink-soft); max-width: 46ch; margin: 0; }
+
+  .hero-note {
+    border-left: 2px solid var(--magenta);
+    padding-left: 18px;
+    font-size: 0.925rem; color: var(--ink-soft);
+  }
+  .hero-note b { color: var(--ink); font-weight: 600; }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 34px; }
   .btn {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 11px 20px; border-radius: 9px; font-size: 15px; font-weight: 560;
-    border: 1px solid transparent; transition: transform .12s ease, background .12s ease, border-color .12s ease;
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em;
+    text-transform: uppercase; padding: 12px 20px; text-decoration: none;
+    border: 1px solid var(--ink); color: var(--ink); background: transparent;
+    transition: background .14s ease, color .14s ease, border-color .14s ease;
   }
-  .btn:hover { text-decoration: none; transform: translateY(-1px); }
-  .btn-primary { background: var(--accent); color: #04101f; }
-  .btn-primary:hover { background: #6aafff; }
-  .btn-ghost { border-color: var(--border-lit); color: var(--text); background: var(--surface); }
-  .btn-ghost:hover { border-color: #3d5674; }
+  .btn:hover { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .btn-key { border-color: var(--magenta); color: var(--magenta); }
+  .btn-key:hover { background: var(--magenta); color: var(--paper); border-color: var(--magenta); }
 
-  /* ------------------------------------------------------------- terminal */
+  /* ------------------------------------------------------------------ plate
+     A chart plate: a bordered figure with a caption below it, numbered
+     because the page refers to them. */
 
-  .term {
-    margin-top: 52px; border: 1px solid var(--border-lit); border-radius: 13px;
-    background: linear-gradient(180deg, #0f1621, #0b1017);
-    box-shadow: 0 22px 60px -28px rgba(0,0,0,0.9), 0 0 0 1px rgba(255,255,255,0.02) inset;
-    overflow: hidden;
+  .plate { border: 1px solid var(--rule); background: var(--paper-deep); }
+  .plate-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 9px 14px; border-bottom: 1px solid var(--rule);
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.13em;
+    text-transform: uppercase; color: var(--ink-faint);
   }
-  .term-bar { display: flex; align-items: center; gap: 7px; padding: 11px 15px; border-bottom: 1px solid var(--border); }
-  .term-bar i { width: 10px; height: 10px; border-radius: 50%; background: #33415a; display: block; }
-  .term-bar span { margin-left: 10px; font-family: var(--mono); font-size: 12px; color: var(--dim); }
-  .term pre {
-    margin: 0; padding: 20px 22px 24px; overflow-x: auto;
-    font-family: var(--mono); font-size: 13.2px; line-height: 1.85; color: #c6d4e6;
+  .plate-head .dot { width: 6px; height: 6px; background: var(--magenta); }
+  .plate pre {
+    margin: 0; padding: 20px 22px; overflow-x: auto;
+    font-family: var(--mono); font-size: 12.9px; line-height: 1.82; color: var(--ink);
   }
-  .c-prompt { color: var(--accent); }
-  .c-flag  { color: var(--amber); }
-  .c-ok    { color: var(--teal); }
-  .c-dim   { color: var(--dim); }
-  .c-warn  { color: var(--rose); }
+  .c-cmd  { color: var(--sea); }
+  .c-key  { color: var(--magenta); }
+  .c-note { color: var(--ink-faint); }
+  .c-str  { color: var(--ink-soft); }
 
-  /* --------------------------------------------------------------- section */
-
-  section { padding: 88px 0; border-top: 1px solid var(--border); }
-  .kicker {
-    font-family: var(--mono); font-size: 12.5px; letter-spacing: 0.08em;
-    text-transform: uppercase; color: var(--accent); margin: 0 0 14px;
+  figcaption {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--ink-faint);
+    padding-top: 9px;
   }
-  h2 { font-size: clamp(1.7rem, 3.2vw, 2.35rem); line-height: 1.18; letter-spacing: -0.028em; margin: 0 0 18px; font-weight: 660; max-width: 22ch; }
-  .sub { color: var(--muted); max-width: 64ch; margin: 0 0 44px; font-size: 1.03rem; }
 
-  /* ------------------------------------------------------------- the split */
+  /* ---------------------------------------------------------------- section */
 
-  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-  .card {
-    border: 1px solid var(--border); border-radius: 13px; padding: 26px 26px 28px;
-    background: var(--surface); position: relative; overflow: hidden;
+  section { padding-top: clamp(58px, 7vw, 92px); padding-bottom: clamp(58px, 7vw, 92px); }
+  .sec-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); gap: clamp(24px, 5vw, 64px); align-items: start; margin-bottom: clamp(34px, 4vw, 54px); }
+  .sec-label {
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.19em;
+    text-transform: uppercase; color: var(--sea);
+    padding-top: 10px; border-top: 2px solid var(--sea);
   }
-  .card h3 { margin: 0 0 6px; font-size: 1.06rem; letter-spacing: -0.01em; display: flex; align-items: center; gap: 9px; }
-  .card p { margin: 0; color: var(--muted); font-size: 0.955rem; }
-  .tag {
-    font-family: var(--mono); font-size: 11.5px; padding: 2.5px 8px; border-radius: 6px;
-    border: 1px solid var(--border-lit); color: var(--dim); font-weight: 500;
+  h2 { font-size: clamp(1.9rem, 3.6vw, 2.9rem); line-height: 1.06; letter-spacing: -0.012em; margin-bottom: 16px; }
+  .sec-head p { margin: 0; color: var(--ink-soft); max-width: var(--measure); }
+
+  /* --------------------------------------------------- soundings: swap / pin
+     Two columns, because the whole point is that these are two states and a
+     service is one or the other. The magenta belongs to `pin` — it is the
+     cautionary mark, and pinning is the caution. */
+
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid var(--rule); }
+  .pair > div { padding: 26px 26px 30px; }
+  .pair > div + div { border-left: 1px solid var(--rule); }
+  .state {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em;
+    text-transform: uppercase; display: inline-block; padding: 3px 9px;
+    border: 1px solid currentColor; margin-bottom: 16px;
   }
-  .tag-swap { color: var(--accent); border-color: rgba(77,159,255,0.35); background: rgba(77,159,255,0.08); }
-  .tag-pin  { color: var(--amber); border-color: rgba(240,184,102,0.32); background: rgba(240,184,102,0.07); }
+  .state-swap { color: var(--sea); }
+  .state-pin  { color: var(--magenta); background: var(--magenta-tint); }
+  .pair h3 { font-size: 1.5rem; margin-bottom: 8px; }
+  .pair p { margin: 0 0 20px; color: var(--ink-soft); font-size: 0.94rem; }
 
-  .diagram { margin-top: 22px; display: grid; gap: 10px; }
-  .lane { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 12.4px; }
-  .lane b { width: 52px; color: var(--dim); font-weight: 500; }
-  .box {
-    flex: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-lit);
-    background: #0d1420; color: var(--muted);
+  .lanes { display: grid; gap: 7px; font-family: var(--mono); font-size: 11.5px; }
+  .lane { display: flex; align-items: center; gap: 10px; }
+  .lane b { width: 46px; color: var(--ink-faint); font-weight: 400; letter-spacing: 0.06em; }
+  .lane span {
+    flex: 1; padding: 7px 11px; border: 1px solid var(--rule-fine);
+    background: var(--paper); color: var(--ink-soft);
   }
-  .box.blue { border-color: rgba(77,159,255,0.45); color: #a9cdff; background: rgba(77,159,255,0.09); }
-  .box.green { border-color: rgba(79,214,192,0.45); color: #a2ecdf; background: rgba(79,214,192,0.09); }
-  .box.pinned { border-color: rgba(240,184,102,0.4); color: #f3d3a1; background: rgba(240,184,102,0.07); }
+  .lane.on span { border-color: var(--sea); color: var(--sea); background: var(--sea-tint); }
+  .lane.key span { border-color: var(--magenta); color: var(--magenta); background: var(--magenta-tint); }
 
-  /* -------------------------------------------------------------- features */
+  /* --------------------------------------------------------------- register
+     A ship's register: rows of fact, ruled, not cards. */
 
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
-  .feat { border: 1px solid var(--border); border-radius: 12px; padding: 24px; background: var(--bg-2); }
-  .feat .ic {
-    width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center;
-    background: var(--accent-soft); border: 1px solid rgba(77,159,255,0.28); margin-bottom: 14px;
+  .register { border-top: 1px solid var(--rule); }
+  .entry {
+    display: grid; grid-template-columns: 3.2rem minmax(0, 15rem) minmax(0, 1fr);
+    gap: clamp(14px, 3vw, 34px); align-items: baseline;
+    padding: 19px 0; border-bottom: 1px solid var(--rule-fine);
   }
-  .feat h3 { margin: 0 0 7px; font-size: 1rem; letter-spacing: -0.01em; }
-  .feat p { margin: 0; color: var(--muted); font-size: 0.925rem; line-height: 1.62; }
+  .entry-n { font-family: var(--mono); font-size: 11.5px; color: var(--magenta); letter-spacing: 0.06em; }
+  .entry h3 { font-size: 1.16rem; }
+  .entry p { margin: 0; color: var(--ink-soft); font-size: 0.94rem; }
 
-  /* ------------------------------------------------------------------ flow */
+  /* ------------------------------------------------------------------ notes
+     Chart notes: two ruled columns of short cautionary statements. */
 
-  .flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; counter-reset: step; }
-  .step { border: 1px solid var(--border); border-radius: 11px; padding: 20px 18px; background: var(--bg-2); position: relative; }
-  .step::before {
-    counter-increment: step; content: counter(step);
-    font-family: var(--mono); font-size: 11.5px; color: var(--accent);
-    border: 1px solid rgba(77,159,255,0.3); background: var(--accent-soft);
-    width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; margin-bottom: 12px;
+  .notes { columns: 2; column-gap: clamp(28px, 5vw, 60px); }
+  .note { break-inside: avoid; padding-bottom: 17px; margin-bottom: 17px; border-bottom: 1px solid var(--rule-fine); }
+  .note b { display: block; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.09em; color: var(--ink); margin-bottom: 4px; }
+  .note span { color: var(--ink-soft); font-size: 0.9rem; }
+
+  /* ---------------------------------------------------------------- closing */
+
+  .closing { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: clamp(28px, 5vw, 64px); align-items: start; }
+  .closing h2 { max-width: 14ch; }
+  .omission { display: grid; gap: 13px; }
+  .omission div { display: grid; grid-template-columns: 1.2rem 1fr; gap: 12px; font-size: 0.93rem; color: var(--ink-soft); }
+  .omission i { font-style: normal; color: var(--magenta); font-family: var(--mono); font-size: 12px; }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 22px; padding-bottom: 34px;
+    display: flex; flex-wrap: wrap; gap: 14px; justify-content: space-between;
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.11em;
+    text-transform: uppercase; color: var(--ink-faint);
   }
-  .step h4 { margin: 0 0 6px; font-size: 0.95rem; letter-spacing: -0.005em; }
-  .step p { margin: 0; font-size: 0.875rem; color: var(--muted); line-height: 1.58; }
 
-  /* ----------------------------------------------------------------- rules */
-
-  .rules { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 40px; }
-  .rule { display: flex; gap: 13px; align-items: flex-start; }
-  .rule svg { flex: none; margin-top: 3px; }
-  .rule b { display: block; font-weight: 580; font-size: 0.97rem; margin-bottom: 2px; }
-  .rule span { color: var(--muted); font-size: 0.915rem; }
-
-  /* ------------------------------------------------------------------- cta */
-
-  .band {
-    border: 1px solid var(--border-lit); border-radius: 16px; padding: 52px 44px;
-    background:
-      radial-gradient(120% 140% at 8% 0%, rgba(77,159,255,0.13), transparent 55%),
-      radial-gradient(100% 130% at 95% 100%, rgba(79,214,192,0.10), transparent 55%),
-      var(--surface);
-    text-align: center;
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
   }
-  .band h2 { margin: 0 auto 14px; max-width: 24ch; }
-  .band .sub { margin: 0 auto 30px; }
-  .band .cta { justify-content: center; }
-
-  footer { border-top: 1px solid var(--border); padding: 40px 0 56px; color: var(--dim); font-size: 0.88rem; }
-  .foot { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between; }
-  .foot-note { font-family: var(--mono); font-size: 12px; }
 
   @media (max-width: 900px) {
-    .grid { grid-template-columns: repeat(2, 1fr); }
-    .flow { grid-template-columns: repeat(2, 1fr); }
-    .split, .rules { grid-template-columns: 1fr; }
-    .nav-links { display: none; }
-  }
-  @media (max-width: 560px) {
-    .grid { grid-template-columns: 1fr; }
-    .flow { grid-template-columns: 1fr; }
-    .band { padding: 38px 22px; }
-    section { padding: 64px 0; }
+    .hero-grid, .sec-head, .closing { grid-template-columns: 1fr; }
+    .hero-grid { align-items: start; }
+    .pair { grid-template-columns: 1fr; }
+    .pair > div + div { border-left: 0; border-top: 1px solid var(--rule); }
+    .notes { columns: 1; }
+    .masthead nav { display: none; }
+    .entry { grid-template-columns: 2.4rem 1fr; }
+    .entry p { grid-column: 2; }
+    .sheet::before, .sheet::after { display: none; }
   }
 </style>
 </head>
 <body>
+<div class="sheet">
 
-<header>
-  <div class="wrap nav">
-    <div class="brand">
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <path d="M12 2.5 21 7v10l-9 4.5L3 17V7l9-4.5Z" stroke="#4d9fff" stroke-width="1.4" stroke-linejoin="round"/>
-        <path d="M12 7.5 16.5 10v4.5L12 16.8 7.5 14.5V10L12 7.5Z" fill="#4fd6c0" fill-opacity="0.22" stroke="#4fd6c0" stroke-width="1.2" stroke-linejoin="round"/>
-      </svg>
-      Navarch
-    </div>
-    <nav class="nav-links">
-      <a href="#concept">Concept</a>
-      <a href="#features">Features</a>
-      <a href="#how">How it works</a>
-      <a href="#contract">Contract</a>
+  <header class="band masthead">
+    <div class="wordmark">Navarch<span>.</span></div>
+    <nav>
+      <a href="#cardinality">Cardinality</a>
+      <a href="#register">Register</a>
+      <a href="#passage">Passage</a>
+      <a href="#notes">Notes</a>
     </nav>
-  </div>
-</header>
+  </header>
 
-<div class="hero">
-  <div class="wrap">
-    <div class="eyebrow"><span class="dot"></span> Compose-native deployment</div>
-    <h1>Deploy the <span class="grad">whole stack</span>, not one container.</h1>
-    <p class="lede">
-      Most platforms hand you a single image per deployment. Real applications are
-      stacks — an API, a worker, a broker, a database. Navarch treats the entire
-      Compose stack as the deployable unit, with versioned revisions and
-      zero-downtime blue/green rollouts across all of it.
-    </p>
-    <div class="cta">
-      <a class="btn btn-primary" href="#how">See how it works
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M3 8h9m0 0L8.5 4.5M12 8l-3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </a>
-      <a class="btn btn-ghost" href="#concept">The core idea</a>
-    </div>
-
-    <div class="term">
-      <div class="term-bar"><i></i><i></i><i></i><span>navarch</span></div>
-<pre><span class="c-prompt">$</span> navarch stack push dev/shop/main ./compose.yaml
-  <span class="c-dim">version 7   digest 98d75411a605…   swappable: api, worker   pinned: cache, db</span>
-
-<span class="c-prompt">$</span> navarch deploy <span class="c-flag">--env</span> dev/shop/main/production
-  <span class="c-dim">revision 12 · slot green · placed on dev-node-2</span>
-
-<span class="c-prompt">$</span> navarch wait 4f2c8e1a <span class="c-flag">--for</span> live
-  scheduling  <span class="c-dim">→</span> starting  <span class="c-dim">→</span> healthy  <span class="c-dim">→</span> <span class="c-ok">live</span>
-  <span class="c-ok">✓</span> traffic moved to revision 12 <span class="c-dim">· revision 11 superseded · zero downtime</span></pre>
-    </div>
-  </div>
-</div>
-
-<section id="concept">
-  <div class="wrap">
-    <p class="kicker">The core idea</p>
-    <h2>Blue/green changes how many copies run. Some services must not be duplicated.</h2>
-    <p class="sub">
-      Running two copies of a stack is fine for an API. It is catastrophic for a
-      database, and quietly wrong for a scheduler, a cron runner, or a broker
-      holding your locks. So every service declares which it is — Navarch never
-      guesses, because the author who does not realise blue/green changes
-      cardinality is exactly the one an optional field fails to protect.
-    </p>
-
-    <div class="split">
-      <div class="card">
-        <h3>Swappable <span class="tag tag-swap">rollout: swap</span></h3>
-        <p>Duplicated blue/green. The new revision comes up alongside the old, passes its health check, takes traffic, and only then does the old one go away.</p>
-        <div class="diagram">
-          <div class="lane"><b>blue</b><div class="box blue">api · worker &nbsp;<span style="opacity:.6">rev 11</span></div></div>
-          <div class="lane"><b>green</b><div class="box green">api · worker &nbsp;<span style="opacity:.6">rev 12</span></div></div>
+  <div class="band hero">
+    <div class="hero-grid">
+      <div>
+        <p class="eyebrow">Compose-native deployment</p>
+        <h1>Command the <em>whole stack</em>, not one container.</h1>
+        <div class="actions">
+          <a class="btn btn-key" href="#cardinality">The cardinality problem</a>
+          <a class="btn" href="#passage">How a rollout runs</a>
         </div>
       </div>
-      <div class="card">
-        <h3>Pinned <span class="tag tag-pin">rollout: pin</span></h3>
+      <div>
+        <p class="lede">
+          Most platforms deploy one image at a time. Real systems are stacks — an
+          API, a worker, a broker, a database. Navarch takes the whole Compose
+          file as the unit of deployment, with versioned revisions and
+          zero-downtime blue/green across all of it.
+        </p>
+        <p class="hero-note" style="margin-top:26px">
+          <b>Secrets it cannot read.</b> Values are sealed to each node's public
+          key. Plaintext never reaches the control plane or its database.
+        </p>
+      </div>
+    </div>
+
+    <figure style="margin:clamp(40px,5vw,64px) 0 0">
+      <div class="plate">
+        <div class="plate-head"><span class="dot"></span> navarch — rollout</div>
+<pre><span class="c-cmd">$</span> navarch stack push dev/shop/main ./compose.yaml
+  <span class="c-note">version 7 · digest 98d75411a605 · swappable: api, worker · pinned: cache, db</span>
+
+<span class="c-cmd">$</span> navarch deploy <span class="c-key">--env</span> dev/shop/main/production
+  <span class="c-note">revision 12 · slot green · placed on dev-node-2</span>
+
+<span class="c-cmd">$</span> navarch wait 4f2c8e1a <span class="c-key">--for</span> live
+  scheduling → starting → healthy → <span class="c-cmd">live</span>
+  <span class="c-note">traffic moved to revision 12 · revision 11 superseded · no request dropped</span></pre>
+      </div>
+      <figcaption>Plate I — a rollout, start to promotion</figcaption>
+    </figure>
+  </div>
+
+  <section id="cardinality" class="band rule-top">
+    <div class="sec-head">
+      <div class="sec-label">The cardinality problem</div>
+      <div>
+        <h2>Blue/green changes how many copies run. Some services must not be doubled.</h2>
+        <p>
+          Two copies of an API is the mechanism. Two copies of a database is data
+          loss, and two copies of a scheduler is every periodic job firing twice.
+          So each service declares which it is. Navarch never infers it — the
+          author who has not noticed that blue/green changes cardinality is
+          exactly the one an optional field fails to protect.
+        </p>
+      </div>
+    </div>
+
+    <div class="pair">
+      <div>
+        <span class="state state-swap">rollout: swap</span>
+        <h3>Swappable</h3>
+        <p>Duplicated during a rollout. The new revision comes up beside the old, passes its health check, takes traffic — and only then does the old one go away.</p>
+        <div class="lanes">
+          <div class="lane on"><b>blue</b><span>api · worker — rev 11</span></div>
+          <div class="lane on"><b>green</b><span>api · worker — rev 12</span></div>
+        </div>
+      </div>
+      <div>
+        <span class="state state-pin">rollout: pin</span>
+        <h3>Pinned</h3>
         <p>Runs once, shared across revisions. Databases, brokers, schedulers — anything whose correctness assumes a single instance, whether or not it writes to disk.</p>
-        <div class="diagram">
-          <div class="lane"><b>shared</b><div class="box pinned">db &nbsp;<span style="opacity:.6">one instance, both revisions</span></div></div>
-          <div class="lane"><b>shared</b><div class="box pinned">cache &nbsp;<span style="opacity:.6">one keyspace, one lock</span></div></div>
+        <div class="lanes">
+          <div class="lane key"><b>shared</b><span>db — one instance, both revisions</span></div>
+          <div class="lane key"><b>shared</b><span>cache — one keyspace, one lock</span></div>
         </div>
       </div>
     </div>
 
-    <div class="term" style="margin-top:20px">
-      <div class="term-bar"><i></i><i></i><i></i><span>compose.yaml</span></div>
-<pre><span class="c-dim">services:</span>
+    <figure style="margin:26px 0 0">
+      <div class="plate">
+        <div class="plate-head"><span class="dot"></span> compose.yaml</div>
+<pre><span class="c-note">services:</span>
   api:
     image: ghcr.io/acme/api:1.4.0
-    <span class="c-flag">x-composectl:</span>
-      <span class="c-flag">rollout:</span> swap        <span class="c-dim"># duplicated during a rollout</span>
-      <span class="c-flag">ingress:</span> { port: 8080 }
+    <span class="c-key">x-composectl:</span>
+      <span class="c-key">rollout:</span> swap        <span class="c-note"># duplicated during a rollout</span>
+      <span class="c-key">ingress:</span> { port: 8080 }
 
   cache:
     image: redis:7-alpine
-    command: [<span class="c-ok">"redis-server"</span>, <span class="c-ok">"--save"</span>, <span class="c-ok">""</span>, <span class="c-ok">"--appendonly"</span>, <span class="c-ok">"no"</span>]
-    <span class="c-flag">x-composectl:</span>
-      <span class="c-flag">rollout:</span> pin         <span class="c-dim"># mounts nothing — and still must not be duplicated</span>
+    command: [<span class="c-str">"redis-server"</span>, <span class="c-str">"--save"</span>, <span class="c-str">""</span>, <span class="c-str">"--appendonly"</span>, <span class="c-str">"no"</span>]
+    <span class="c-key">x-composectl:</span>
+      <span class="c-key">rollout:</span> pin         <span class="c-note"># mounts nothing, and still must not be doubled</span>
 
-<span class="c-warn">#</span> <span class="c-dim">Omitting rollout: is a parse error. There is no default, on purpose.</span></pre>
+<span class="c-note">#</span> <span class="c-note">Omitting rollout: is a parse error. There is no default, deliberately.</span></pre>
+      </div>
+      <figcaption>Plate II — the declaration, and the case that makes it necessary</figcaption>
+    </figure>
+  </section>
+
+  <section id="register" class="band rule-top">
+    <div class="sec-head">
+      <div class="sec-label">Register</div>
+      <div>
+        <h2>Every rollout is a new revision. Nothing is edited in place.</h2>
+        <p>
+          The deployment table is append-only, so the record of what ran, when,
+          and why it stopped is still there at three in the morning when you need
+          it.
+        </p>
+      </div>
     </div>
-  </div>
-</section>
 
-<section id="features">
-  <div class="wrap">
-    <p class="kicker">What you get</p>
-    <h2>A platform that tells you the truth about what it did.</h2>
-    <p class="sub">
-      Every rollout is a new immutable revision. Nothing is mutated in place, so
-      the history of what ran, when, and why it stopped is still there when you
-      need it at three in the morning.
-    </p>
-
-    <div class="grid">
-      <div class="feat">
-        <div class="ic"><svg width="17" height="17" viewBox="0 0 16 16" fill="none"><path d="M2 4.5 8 1.5l6 3v7l-6 3-6-3v-7Z" stroke="#4d9fff" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
-        <h3>Append-only revisions</h3>
-        <p>Rollback promotes an older revision as a new one. Deployment history is never rewritten, so it can always be read back.</p>
+    <div class="register">
+      <div class="entry">
+        <div class="entry-n">i</div>
+        <div><h3>Append-only revisions</h3></div>
+        <p>Rollback promotes an older revision as a new one. History is never rewritten, so it can always be read back.</p>
       </div>
-      <div class="feat">
-        <div class="ic"><svg width="17" height="17" viewBox="0 0 16 16" fill="none"><path d="M2 8.5 6 12l8-8.5" stroke="#4d9fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-        <h3>Health-gated promotion</h3>
-        <p>Traffic moves only after the new revision reports healthy. A bad image fails the rollout and leaves the live one untouched.</p>
+      <div class="entry">
+        <div class="entry-n">ii</div>
+        <div><h3>Health-gated promotion</h3></div>
+        <p>Traffic moves only once the new revision reports healthy. A bad image fails the rollout and leaves the live one untouched.</p>
       </div>
-      <div class="feat">
-        <div class="ic"><svg width="17" height="17" viewBox="0 0 16 16" fill="none"><rect x="3" y="7" width="10" height="7" rx="1.6" stroke="#4d9fff" stroke-width="1.3"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" stroke="#4d9fff" stroke-width="1.3" stroke-linecap="round"/></svg></div>
-        <h3>Secrets it cannot read</h3>
-        <p>Values are sealed to each node's public key. Plaintext never reaches the control plane or its database — the agent decrypts at container start.</p>
+      <div class="entry">
+        <div class="entry-n">iii</div>
+        <div><h3>Sealed secrets</h3></div>
+        <p>Encrypted to each node's public key. The control plane stores ciphertext it has no key for; the agent decrypts at container start.</p>
       </div>
-      <div class="feat">
-        <div class="ic"><svg width="17" height="17" viewBox="0 0 16 16" fill="none"><path d="M8 2v12M2.5 5.5 8 2l5.5 3.5v5L8 14l-5.5-3.5v-5Z" stroke="#4d9fff" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
-        <h3>Preview environments</h3>
+      <div class="entry">
+        <div class="entry-n">iv</div>
+        <div><h3>Preview environments</h3></div>
         <p>One call creates an ephemeral environment with a generated hostname and inherited secrets. A TTL reaps it — containers, volumes and all.</p>
       </div>
-      <div class="feat">
-        <div class="ic"><svg width="17" height="17" viewBox="0 0 16 16" fill="none"><circle cx="4" cy="4" r="2" stroke="#4d9fff" stroke-width="1.3"/><circle cx="12" cy="12" r="2" stroke="#4d9fff" stroke-width="1.3"/><path d="M4 6v4a2 2 0 0 0 2 2h4" stroke="#4d9fff" stroke-width="1.3" stroke-linecap="round"/></svg></div>
-        <h3>Multi-node fleet</h3>
-        <p>Scored placement across real nodes. An environment is bound to the node holding its durable state and never silently moves off it.</p>
+      <div class="entry">
+        <div class="entry-n">v</div>
+        <div><h3>A real fleet</h3></div>
+        <p>Scored placement across nodes, with each environment bound to the node holding its durable state so a later revision cannot drift off it.</p>
       </div>
-      <div class="feat">
-        <div class="ic"><svg width="17" height="17" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1.6" stroke="#4d9fff" stroke-width="1.3"/><path d="M4.5 6.5 6.5 8l-2 1.5M8.5 9.5h3" stroke="#4d9fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-        <h3>Logs that are never stored</h3>
-        <p>Container output is fetched on demand and buffered in memory. Application logs carry secrets, so none of it is written to disk.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id="how">
-  <div class="wrap">
-    <p class="kicker">How it works</p>
-    <h2>Push a compose file. Watch it become a revision.</h2>
-    <p class="sub">
-      The control plane owns placement and writes desired state. Each node runs a
-      dumb reconciler that converges to it — no cross-node overlay, no shared
-      network, no orchestration cleverness to debug at midnight.
-    </p>
-    <div class="flow">
-      <div class="step">
-        <h4>Push</h4>
-        <p>Your compose file is parsed once and normalised into a versioned spec with a stable digest.</p>
-      </div>
-      <div class="step">
-        <h4>Validate</h4>
-        <p>Every unsupported directive is rejected loudly, all in one pass, so you fix everything at once.</p>
-      </div>
-      <div class="step">
-        <h4>Place</h4>
-        <p>The scheduler scores the fleet and writes the desired containers for one node.</p>
-      </div>
-      <div class="step">
-        <h4>Reconcile</h4>
-        <p>That node's agent brings the revision up against its own Docker daemon and reports health.</p>
-      </div>
-      <div class="step">
-        <h4>Promote</h4>
-        <p>Healthy revisions go live in one transaction; the router flips and the old revision is torn down.</p>
+      <div class="entry">
+        <div class="entry-n">vi</div>
+        <div><h3>Logs that are never stored</h3></div>
+        <p>Container output is fetched on demand and buffered in memory. Application logs carry secrets, so none of it is written down.</p>
       </div>
     </div>
-  </div>
-</section>
+  </section>
 
-<section id="contract">
-  <div class="wrap">
-    <p class="kicker">The contract</p>
-    <h2>Rejected loudly, never silently dropped.</h2>
-    <p class="sub">
-      A stack must never run differently than its author expects. If Navarch
-      cannot honour something in your compose file, it says so at push time
-      instead of quietly changing the meaning of your deployment.
-    </p>
-    <div class="rules">
-      <div class="rule">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.4" stroke="#f2708c" stroke-width="1.3"/><path d="M5.6 5.6l4.8 4.8" stroke="#f2708c" stroke-width="1.3" stroke-linecap="round"/></svg>
-        <div><b>Host port bindings</b><span>They collide between revisions. Declare an ingress instead and the platform routes to it.</span></div>
-      </div>
-      <div class="rule">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.4" stroke="#f2708c" stroke-width="1.3"/><path d="M5.6 5.6l4.8 4.8" stroke="#f2708c" stroke-width="1.3" stroke-linecap="round"/></svg>
-        <div><b>Bind mounts</b><span>A host path is not portable across nodes. Named volumes are created and tracked explicitly.</span></div>
-      </div>
-      <div class="rule">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.4" stroke="#f2708c" stroke-width="1.3"/><path d="M5.6 5.6l4.8 4.8" stroke="#f2708c" stroke-width="1.3" stroke-linecap="round"/></svg>
-        <div><b>privileged, cap_add, devices</b><span>They break isolation between tenants on the same machine.</span></div>
-      </div>
-      <div class="rule">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.4" stroke="#f2708c" stroke-width="1.3"/><path d="M5.6 5.6l4.8 4.8" stroke="#f2708c" stroke-width="1.3" stroke-linecap="round"/></svg>
-        <div><b>build:</b><span>The platform does not build. Pre-build and push an image, so what ran is what you can reproduce.</span></div>
-      </div>
-      <div class="rule">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.8 14.4 13H1.6L8 1.8Z" stroke="#f0b866" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.4v2.8" stroke="#f0b866" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="11" r=".8" fill="#f0b866"/></svg>
-        <div><b>swap on a writable volume</b><span>Two revisions writing one filesystem is the failure classification exists to prevent. Refused outright.</span></div>
-      </div>
-      <div class="rule">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.8 14.4 13H1.6L8 1.8Z" stroke="#f0b866" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.4v2.8" stroke="#f0b866" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="11" r=".8" fill="#f0b866"/></svg>
-        <div><b>A volume nobody mounts</b><span>Almost always a typo, and a typo in storage is expensive to discover later.</span></div>
+  <section id="passage" class="band rule-top">
+    <div class="sec-head">
+      <div class="sec-label">Passage</div>
+      <div>
+        <h2>Push a Compose file. Watch it become a revision.</h2>
+        <p>
+          The control plane owns placement and writes the desired state. Each node
+          runs a reconciler that converges on it — no cross-node overlay, no
+          shared network, no orchestration cleverness to debug at midnight.
+        </p>
       </div>
     </div>
-  </div>
-</section>
 
-<section>
-  <div class="wrap">
-    <div class="band">
-      <h2>Terminal-first, and honest about what it doesn't do.</h2>
-      <p class="sub">
-        No automatic failover. No durable log storage. No cross-node overlay.
-        Each of those is a deliberate position with a reason behind it, written
-        down — not a gap you find in production.
-      </p>
-      <div class="cta">
-        <a class="btn btn-primary" href="#concept">Read the concept</a>
-        <a class="btn btn-ghost" href="#contract">See the contract</a>
+    <div class="register">
+      <div class="entry">
+        <div class="entry-n">01</div>
+        <div><h3>Push</h3></div>
+        <p>The Compose file is parsed once into a normalized spec with a stable digest. An unchanged stack does not manufacture a new version.</p>
+      </div>
+      <div class="entry">
+        <div class="entry-n">02</div>
+        <div><h3>Validate</h3></div>
+        <p>Every unsupported directive is rejected loudly, all of them in one pass, so you fix the whole file at once rather than one error per attempt.</p>
+      </div>
+      <div class="entry">
+        <div class="entry-n">03</div>
+        <div><h3>Place</h3></div>
+        <p>The scheduler scores the fleet and writes the containers one node should be running.</p>
+      </div>
+      <div class="entry">
+        <div class="entry-n">04</div>
+        <div><h3>Reconcile</h3></div>
+        <p>That node's agent brings the revision up against its own Docker daemon and reports what happened.</p>
+      </div>
+      <div class="entry">
+        <div class="entry-n">05</div>
+        <div><h3>Promote</h3></div>
+        <p>A healthy revision goes live in one transaction. The router repoints, and only then is the old revision torn down.</p>
       </div>
     </div>
-  </div>
-</section>
+  </section>
 
-<footer>
-  <div class="wrap foot">
-    <div class="brand">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <path d="M12 2.5 21 7v10l-9 4.5L3 17V7l9-4.5Z" stroke="#4d9fff" stroke-width="1.4" stroke-linejoin="round"/>
-      </svg>
-      Navarch
+  <section id="notes" class="band rule-top">
+    <div class="sec-head">
+      <div class="sec-label">Cautionary notes</div>
+      <div>
+        <h2>Rejected loudly, never quietly dropped.</h2>
+        <p>
+          A stack must never run differently than its author expects. Where
+          Navarch cannot honour something, it says so when you push — not by
+          silently changing what your deployment means.
+        </p>
+      </div>
     </div>
-    <div class="foot-note">served by Navarch, on Navarch</div>
-  </div>
-</footer>
 
+    <div class="notes">
+      <div class="note"><b>ports: "8080:80"</b><span>A host port collides between revisions. Declare an ingress and the platform routes to it.</span></div>
+      <div class="note"><b>bind mounts</b><span>A host path is not portable across nodes. Named volumes are created and tracked explicitly.</span></div>
+      <div class="note"><b>privileged, cap_add, devices</b><span>Host escape if applied. Isolation between tenants is not negotiable.</span></div>
+      <div class="note"><b>build:</b><span>The platform does not build. Pre-build and push, so what ran is what you can reproduce.</span></div>
+      <div class="note"><b>swap on a writable volume</b><span>Two revisions writing one filesystem is the exact failure the declaration exists to prevent. Refused outright.</span></div>
+      <div class="note"><b>a volume nobody mounts</b><span>Almost always a typo — and a typo in storage is expensive to find later.</span></div>
+    </div>
+  </section>
+
+  <section class="band rule-top">
+    <div class="closing">
+      <div>
+        <div class="sec-label" style="margin-bottom:20px">Stated plainly</div>
+        <h2>What it deliberately does not do.</h2>
+        <p style="color:var(--ink-soft); max-width:38ch">
+          Each of these is a position with a reason behind it, written down —
+          not a gap for you to find in production.
+        </p>
+        <div class="actions">
+          <a class="btn btn-key" href="#cardinality">Read the concept</a>
+        </div>
+      </div>
+      <div class="omission">
+        <div><i>—</i><span><b>No automatic failover.</b> Nothing re-homes an environment because its node went quiet. An unreachable node usually comes back, and its agent still holds that environment's desired state.</span></div>
+        <div><i>—</i><span><b>No durable log storage.</b> Application logs routinely contain secrets. Persisting them would undo what sealing buys.</span></div>
+        <div><i>—</i><span><b>No cross-node overlay.</b> A deployment is placed whole onto one node. Ingress reaches it by address and published port.</span></div>
+        <div><i>—</i><span><b>Nodes are not shared between organizations.</b> A node is a trust boundary: one agent holds one decryption identity for everything it hosts.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="band">
+    <div>Navarch — a fleet commander</div>
+    <div>served by Navarch, on Navarch</div>
+  </footer>
+
+</div>
 </body>
 </html>

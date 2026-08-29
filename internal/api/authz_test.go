@@ -41,7 +41,10 @@ var unscopedRoutes = map[string]string{
 	"GET /v1/nodes/{id}/desired-state": "node token only; confined by nodeAgentPathID",
 	"POST /v1/nodes/{id}/report":       "node token only; confined by nodeAgentPathID",
 	"POST /v1/nodes/{id}/logs":         "node token only; confined by nodeAgentPathID",
-	"GET /v1/nodes":                    "org comes from a query parameter, checked in the handler",
+	"GET /v1/nodes/{id}/routes": "node token only; confined by nodeAgentPathID. A node asks " +
+		"for its own org's routes so it can configure a router beside it; an operator " +
+		"token reaching here would read another org's hostnames",
+	"GET /v1/nodes": "org comes from a query parameter, checked in the handler",
 }
 
 // Every operator route must refuse an operator who is not in the owning org,
@@ -156,7 +159,7 @@ func newScopedOperator(t *testing.T, st *store.Store) *scopedOperator {
 type scopedFixture struct {
 	op                                             *scopedOperator
 	orgID, appID, stackID, envID, deployID, nodeID uuid.UUID
-	logID                                          uuid.UUID
+	logID, joinTokenID                             uuid.UUID
 }
 
 func newScopedFixture(t *testing.T, st *store.Store) *scopedFixture {
@@ -227,9 +230,16 @@ func newScopedFixture(t *testing.T, st *store.Store) *scopedFixture {
 		t.Fatalf("RegisterNode: %v", err)
 	}
 
+	// A real join token, so the intruder's request names an object that exists
+	// and the only reason it can fail is membership.
+	jt, err := st.CreateJoinToken(ctx, store.CreateJoinTokenParams{OrgID: org.ID, Name: "fixture"})
+	if err != nil {
+		t.Fatalf("CreateJoinToken: %v", err)
+	}
+
 	return &scopedFixture{
 		op: op, orgID: org.ID, appID: app.ID, stackID: stack.ID,
-		envID: env.ID, deployID: dep.ID, nodeID: node.ID,
+		envID: env.ID, deployID: dep.ID, nodeID: node.ID, joinTokenID: jt.ID,
 		// No log request is created: GET/DELETE /v1/logs/{id} resolve through
 		// OrgForLogRequest, which returns ErrNotFound for an unknown id — the
 		// same 404 a non-member gets, which is exactly the property under test.
@@ -260,6 +270,8 @@ func (f *scopedFixture) fill(t *testing.T, path string) string {
 			id = f.nodeID
 		case strings.HasPrefix(out, "/v1/logs/"):
 			id = f.logID
+		case strings.Contains(out, "/join-tokens/"):
+			id = f.joinTokenID
 		default:
 			t.Fatalf("no fixture object for {id} in %q — add one rather than exempting the route", path)
 		}

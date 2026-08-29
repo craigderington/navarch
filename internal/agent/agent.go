@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/craigderington/navarch/internal/agent/dockerd"
+	"github.com/craigderington/navarch/internal/router"
 	"github.com/craigderington/navarch/internal/secrets"
 	"github.com/craigderington/navarch/internal/store"
 )
@@ -36,6 +37,10 @@ type Config struct {
 	// them. `ingress=true` marks a node running the platform's router: until the
 	// mesh lands, a stack with an ingress service is only servable there.
 	Labels map[string]string
+	// RouterDir, when set, makes this agent write router config for a router
+	// running beside it — the bring-your-own-infrastructure shape, where the
+	// customer owns ingress and the control plane never connects to them.
+	RouterDir string
 	// InsecureTransport records that the control-plane URL is plaintext to
 	// somewhere it could be read, and that COMPOSECTL_INSECURE allowed it
 	// anyway. Kept as a field rather than re-derived so Run warns about exactly
@@ -77,11 +82,30 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	}
 	log.Info("agent registered", "node", nodeID, "org", cfg.Org)
 
+	// Router mode: with a directory configured, this agent also writes the
+	// config for a router running beside it. That is what makes
+	// bring-your-own-infrastructure possible — the control plane's own router
+	// cannot reach a node behind NAT, but a router on the same machine can, and
+	// the agent is already polling with a credential.
+	var rtr *router.Router
+	if cfg.RouterDir != "" {
+		rtr = router.New(cfg.RouterDir)
+		log.Info("router mode enabled", "dir", cfg.RouterDir)
+	}
+
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 	for {
 		if err := c.reconcileTick(ctx, nodeID, rec, log); err != nil {
 			log.Warn("reconcile tick failed", "err", err)
+		}
+		if rtr != nil {
+			// Failing to write routes must not stop reconciliation: containers
+			// coming up matters more than the router catching up, and the next
+			// tick retries a second later.
+			if err := c.syncRoutes(ctx, nodeID, rtr); err != nil {
+				log.Warn("route sync failed", "err", err)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -281,4 +305,32 @@ func (c *cpClient) do(ctx context.Context, method, path string, body, out any) e
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
 	return nil
+}
+
+// syncRoutes fetches this node's organization's routes and writes the router
+// config for a router running beside this agent.
+//
+// The control plane answers in its own vocabulary — hostname, target, port —
+// and internal/router turns that into Traefik's shape. Keeping the translation
+// here rather than in the API is what lets a different router be a change in
+// one package instead of a change to a published contract.
+func (c *cpClient) syncRoutes(ctx context.Context, nodeID uuid.UUID, rtr *router.Router) error {
+	var out struct {
+		Routes []struct {
+			Key      string `json:"key"`
+			Hostname string `json:"hostname"`
+			Target   string `json:"target"`
+			Port     int    `json:"port"`
+		} `json:"routes"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/nodes/"+nodeID.String()+"/routes", nil, &out); err != nil {
+		return err
+	}
+	rr := make([]router.Route, 0, len(out.Routes))
+	for _, r := range out.Routes {
+		rr = append(rr, router.Route{
+			Key: r.Key, Hostname: r.Hostname, Target: r.Target, Port: r.Port,
+		})
+	}
+	return rtr.Sync(rr)
 }

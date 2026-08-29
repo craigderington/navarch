@@ -99,6 +99,10 @@ services:
       # unset: the control plane mints one from crypto/rand and logs it once.
       COMPOSECTL_BOOTSTRAP_OPERATOR_EMAIL: dev@navarch.local
       COMPOSECTL_BOOTSTRAP_OPERATOR_TOKEN: dev-operator-token-change-me
+      # A pinned join token for the dev org, the same affordance as the operator
+      # token above: `make demo-byo` enrols a node with a credential that names
+      # exactly one organization, without scraping a generated value out of a log.
+      COMPOSECTL_BOOTSTRAP_JOIN_TOKEN: dev-join-token-change-me
       COMPOSECTL_ROUTER_DIR: /dynamic
       COMPOSECTL_ROUTE_STRAND_SECONDS: ${NAVARCH_ROUTE_STRAND_SECONDS:-120}
     volumes:

@@ -73,6 +73,17 @@ type Config struct {
 	// log line on every `make up`. Leave it empty anywhere real and the token
 	// is minted from crypto/rand and logged once.
 	BootstrapOperatorToken string
+	// RequireJoinToken refuses node registration on the shared service token,
+	// so a node's organization always comes from a credential that names one.
+	// Off by default: an existing install's agents still present the shared
+	// token, and an upgrade that stops the fleet re-registering is not an
+	// upgrade. Anything serving more than one tenant sets it.
+	RequireJoinToken bool
+	// BootstrapJoinToken pins a join token for the bootstrap org, the way
+	// BootstrapOperatorToken pins the first operator's. Dev-stack affordance,
+	// same reasoning: compose and the demos share a constant rather than
+	// scraping a generated one out of a log.
+	BootstrapJoinToken string
 }
 
 func Load() (*Config, error) {
@@ -87,6 +98,8 @@ func Load() (*Config, error) {
 
 		BootstrapOperatorEmail: os.Getenv("COMPOSECTL_BOOTSTRAP_OPERATOR_EMAIL"),
 		BootstrapOperatorToken: os.Getenv("COMPOSECTL_BOOTSTRAP_OPERATOR_TOKEN"),
+		RequireJoinToken:       os.Getenv("COMPOSECTL_REQUIRE_JOIN_TOKEN") == "1",
+		BootstrapJoinToken:     os.Getenv("COMPOSECTL_BOOTSTRAP_JOIN_TOKEN"),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("COMPOSECTL_DATABASE_URL is required")

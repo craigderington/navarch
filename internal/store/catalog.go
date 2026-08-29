@@ -22,8 +22,8 @@ func (s *Store) CreateOrganization(ctx context.Context, slug, name string) (*Org
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO organizations (slug, name)
 		VALUES ($1, $2)
-		RETURNING id, slug, name, created_at
-	`, slug, name).Scan(&o.ID, &o.Slug, &o.Name, &o.CreatedAt)
+		RETURNING id, slug, name, COALESCE(preview_domain,''), created_at
+	`, slug, name).Scan(&o.ID, &o.Slug, &o.Name, &o.PreviewDomain, &o.CreatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -32,7 +32,7 @@ func (s *Store) CreateOrganization(ctx context.Context, slug, name string) (*Org
 
 func (s *Store) ListOrganizations(ctx context.Context) ([]Organization, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, slug, name, created_at FROM organizations ORDER BY slug
+		SELECT id, slug, name, COALESCE(preview_domain,''), created_at FROM organizations ORDER BY slug
 	`)
 	if err != nil {
 		return nil, mapErr(err)
@@ -42,7 +42,7 @@ func (s *Store) ListOrganizations(ctx context.Context) ([]Organization, error) {
 	out := []Organization{}
 	for rows.Next() {
 		var o Organization
-		if err := rows.Scan(&o.ID, &o.Slug, &o.Name, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.Slug, &o.Name, &o.PreviewDomain, &o.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, o)

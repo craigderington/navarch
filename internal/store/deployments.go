@@ -424,7 +424,21 @@ type LiveRoute struct {
 // and a route that could not come back would make a 30-second blip permanent. The router turns these
 // into Traefik config. resolved_spec is parsed here (not in the router) so the
 // router stays free of the spec type and pgx.
+// ListLiveRoutesForOrg is ListLiveRoutes narrowed to one organization.
+//
+// It exists for bring-your-own-infrastructure: a customer runs their own router
+// beside their own nodes, and it must be given their routes and nobody else's.
+// The global form stays for a control plane that also runs the router, which is
+// every single-tenant install.
+func (s *Store) ListLiveRoutesForOrg(ctx context.Context, orgID uuid.UUID, strand time.Duration) ([]LiveRoute, error) {
+	return s.liveRoutes(ctx, &orgID, strand)
+}
+
 func (s *Store) ListLiveRoutes(ctx context.Context, strand time.Duration) ([]LiveRoute, error) {
+	return s.liveRoutes(ctx, nil, strand)
+}
+
+func (s *Store) liveRoutes(ctx context.Context, orgID *uuid.UUID, strand time.Duration) ([]LiveRoute, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT d.environment_id, d.project_name, COALESCE(e.hostname,''), d.resolved_spec,
 		       COALESCE(host(n.advertise_addr), ''), COALESCE(si.ingress_port, 0)
@@ -454,7 +468,14 @@ func (s *Store) ListLiveRoutes(ctx context.Context, strand time.Duration) ([]Liv
 		    AND n.last_heartbeat IS NOT NULL
 		    AND n.last_heartbeat > now() - make_interval(secs => $1)
 		  ))
-	`, strand.Seconds())
+		  -- NULL means every org, which is what a control-plane-hosted router
+		  -- serves. The join walks the same catalog path every other org
+		  -- resolver here does.
+		  AND ($2::uuid IS NULL OR $2 = (
+		        SELECT a.org_id FROM stacks st
+		        JOIN applications a ON a.id = st.app_id
+		        WHERE st.id = e.stack_id))
+	`, strand.Seconds(), orgID)
 	if err != nil {
 		return nil, mapErr(err)
 	}
