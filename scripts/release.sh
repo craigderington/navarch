@@ -49,9 +49,9 @@ case "$VERSION" in
 esac
 
 LDFLAGS="-s -w
-  -X $MODULE/internal/cli.version=$VERSION
-  -X $MODULE/internal/cli.commit=$COMMIT
-  -X $MODULE/internal/cli.date=$DATE"
+  -X $MODULE/internal/version.Version=$VERSION
+  -X $MODULE/internal/version.Commit=$COMMIT
+  -X $MODULE/internal/version.Date=$DATE"
 
 # The platforms an operator plausibly drives this from. Linux arm64 is not
 # padding: it is what a Graviton or Ampere box runs, which is exactly the sort

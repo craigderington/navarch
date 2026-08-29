@@ -13,16 +13,7 @@ import (
 	"time"
 
 	"github.com/craigderington/navarch/internal/client"
-)
-
-// Build metadata, stamped by the linker at release time
-// (scripts/release.sh). Vars, not consts, because -X can only set vars — and
-// the defaults are deliberately not a version number: a binary someone built
-// from a working tree should say so rather than claim to be a release.
-var (
-	version = "dev"
-	commit  = "unknown"
-	date    = "unknown"
+	"github.com/craigderington/navarch/internal/version"
 )
 
 // Run executes composectl with the given argv (no program name) and returns
@@ -58,12 +49,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		// misbehaving deployment is "which build is this", and a bare semver
 		// cannot answer it for anything built between tags.
 		if flags.cfg.Output == "json" {
-			return printExit(printJSON(stdout, map[string]string{
-				"version": version, "commit": commit, "built": date, "go": runtime.Version(),
-			}), stderr)
+			return printExit(printJSON(stdout, version.Info()), stderr)
 		}
 		fmt.Fprintf(stdout, "navarch %s\ncommit  %s\nbuilt   %s\ngo      %s\n",
-			version, commit, date, runtime.Version())
+			version.Version, version.Commit, version.Date, runtime.Version())
 		return 0
 	}
 

@@ -2,16 +2,31 @@
 # OpenTelemetry/grpc stack that requires go >= 1.25. Bumped deliberately and in
 # step with the go.mod directive — a real runtime dependency, unlike the earlier
 # test-only go-internal pin.
-FROM golang:1.25-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 WORKDIR /src
+
+# Stamped into internal/version so a deployed control plane can answer "which
+# build is this" on /healthz, and an agent reports something true at
+# registration. Unset, they default to "dev" — a binary built from a checkout
+# should say so rather than claim to be a release.
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+# Provided by buildx when cross-building; defaulted so a plain `docker build`
+# still works.
+ARG TARGETOS=linux
+ARG TARGETARCH
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" \
+ENV MOD=github.com/craigderington/navarch
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+    -ldflags="-s -w -X $MOD/internal/version.Version=$VERSION -X $MOD/internal/version.Commit=$COMMIT -X $MOD/internal/version.Date=$BUILD_DATE" \
     -o /out/composectl-controlplane ./cmd/controlplane
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+    -ldflags="-s -w -X $MOD/internal/version.Version=$VERSION -X $MOD/internal/version.Commit=$COMMIT -X $MOD/internal/version.Date=$BUILD_DATE" \
     -o /out/composectl-agent ./cmd/agent
 
 # --- control plane: HTTP API, runs unprivileged --------------------------

@@ -19,6 +19,7 @@ import (
 	"github.com/craigderington/navarch/internal/router"
 	"github.com/craigderington/navarch/internal/secrets"
 	"github.com/craigderington/navarch/internal/store"
+	"github.com/craigderington/navarch/internal/version"
 )
 
 type Config struct {
@@ -129,7 +130,7 @@ func (c *cpClient) register(ctx context.Context, cfg Config) (uuid.UUID, error) 
 	}
 	err := c.do(ctx, http.MethodPost, "/v1/nodes/register", map[string]any{
 		"org": cfg.Org, "hostname": cfg.Hostname, "advertise_addr": cfg.AdvertiseAddr,
-		"cpu_millis": cfg.CPUMillis, "memory_bytes": cfg.MemoryBytes, "agent_version": "sprint2-a",
+		"cpu_millis": cfg.CPUMillis, "memory_bytes": cfg.MemoryBytes, "agent_version": version.Version,
 		"age_recipient": c.id.Recipient(), "labels": cfg.Labels,
 	}, &out)
 	if err != nil {

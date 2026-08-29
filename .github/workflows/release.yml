@@ -1,0 +1,94 @@
+name: release
+
+# Publishes on a tag. The deploy guide tells operators to pull
+# ghcr.io/OWNER/navarch/{controlplane,agent}; until this existed nothing pushed
+# them, so the documented install failed at the first `docker compose up`.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # linux/arm64 as well as amd64: a Graviton or Ampere box is exactly the
+      # cheap VM this platform is meant to sit on, and an image that only runs
+      # on amd64 makes that a surprise at deploy time rather than a choice.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Version from the tag
+        id: v
+        run: |
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "date=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
+
+      # Both server binaries ship as images because that is how they are run.
+      # The CLI ships as a binary because that is how it is run. Neither is
+      # offered in the other shape — a tarball of a control plane with no
+      # Postgres and no migrations is not a deployment.
+      - name: Control plane image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: controlplane
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.v.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.v.outputs.date }}
+          tags: |
+            ghcr.io/${{ github.repository }}/controlplane:${{ steps.v.outputs.version }}
+            ghcr.io/${{ github.repository }}/controlplane:latest
+
+      - name: Agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: agent
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.v.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.v.outputs.date }}
+          tags: |
+            ghcr.io/${{ github.repository }}/agent:${{ steps.v.outputs.version }}
+            ghcr.io/${{ github.repository }}/agent:latest
+
+  binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # release.sh derives the version from `git describe`
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: make release
+
+      # Attached to the GitHub release so `sha256sum -c SHA256SUMS` works for
+      # whoever downloads them, which is the point of shipping the file.
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS

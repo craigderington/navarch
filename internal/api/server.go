@@ -15,6 +15,7 @@ import (
 	"github.com/craigderington/navarch/internal/logbuf"
 	"github.com/craigderington/navarch/internal/metrics"
 	"github.com/craigderington/navarch/internal/store"
+	"github.com/craigderington/navarch/internal/version"
 	"github.com/google/uuid"
 )
 
@@ -513,7 +514,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "database unreachable", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// The version is on /healthz because that is the one endpoint an operator
+	// can always reach, and "which build is this" is the first question of any
+	// upgrade or incident. It is unauthenticated, which is fine: a version
+	// string tells an attacker what a `docker inspect` already would.
+	body := version.Info()
+	body["status"] = "ok"
+	writeJSON(w, http.StatusOK, body)
 }
 
 // ------------------------------------------------------------- responses
