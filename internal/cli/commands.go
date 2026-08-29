@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -1128,4 +1130,173 @@ func cmdMember(ctx context.Context, e env, args []string) error {
 	default:
 		return usage(fmt.Sprintf("unknown member subcommand %q", args[0]))
 	}
+}
+
+// cmdLogin verifies a token against the control plane and stores it.
+//
+// The token is never an argument. That is S6's lesson applied to the one
+// command whose entire subject is a credential: argv lands in shell history,
+// in `ps`, and in every exec audit log on the box. It is read from a terminal
+// without echo, or from stdin for scripts.
+//
+// It is verified before it is written. A config file containing a token that
+// does not work is worse than no config file: every later command fails with
+// 401 and the operator has no reason to suspect the thing they just "succeeded"
+// at doing.
+// explicitToken is the value of a --token flag actually typed on this command
+// line, not the resolved one. They differ, and the difference matters: the
+// resolved token also comes from NAVARCH_TOKEN and the config file, so using it
+// here would make `navarch login` silently re-save whatever was already in the
+// environment instead of asking — turning the one command whose job is to
+// establish a credential into one that quietly confirms an old one.
+func cmdLogin(ctx context.Context, e env, args []string, explicitToken string) error {
+	flags, _, err := flagMap(args)
+	if err != nil {
+		return err
+	}
+	// --url is a global flag, so it is already resolved into the config.
+	url := e.cfg.URL
+
+	token := explicitToken
+	switch {
+	case token != "":
+		// Documented but not advertised: convenient in a container, and the
+		// same exposure as any other argv. --stdin is the one to reach for.
+	case flags["stdin"] != "" || !isTerminal(os.Stdin):
+		b, err := io.ReadAll(io.LimitReader(os.Stdin, 8<<10))
+		if err != nil {
+			return fmt.Errorf("read token from stdin: %w", err)
+		}
+		token = strings.TrimSpace(string(b))
+	default:
+		token, err = promptSecret(e.out, "Operator token: ")
+		if err != nil {
+			return err
+		}
+	}
+	if token == "" {
+		return usage("no token provided")
+	}
+
+	// The URL is guarded before the token crosses it, exactly as it is for
+	// every other command.
+	if err := guardTransport(url, e.err); err != nil {
+		return err
+	}
+	c, err := client.New(url, token)
+	if err != nil {
+		return err
+	}
+	me, err := c.Whoami(ctx)
+	if err != nil {
+		return fmt.Errorf("that token was not accepted by %s: %w", url, err)
+	}
+
+	path, err := saveConfig(url, token)
+	if err != nil {
+		return err
+	}
+	who := "operator"
+	if me.Operator != nil {
+		who = me.Operator.Email
+	}
+	fmt.Fprintf(e.out, "logged in to %s as %s\n", url, who)
+	switch len(me.Orgs) {
+	case 0:
+		fmt.Fprintln(e.out, "no organizations yet — create one with `navarch org create`")
+	case 1:
+		fmt.Fprintf(e.out, "organization: %s\n", me.Orgs[0].Slug)
+	default:
+		names := make([]string, 0, len(me.Orgs))
+		for _, o := range me.Orgs {
+			names = append(names, o.Slug)
+		}
+		fmt.Fprintf(e.out, "organizations: %s\n", strings.Join(names, ", "))
+	}
+	fmt.Fprintf(e.out, "saved to %s\n", path)
+	return nil
+}
+
+// cmdLogout forgets the stored credential. It does not revoke it — the token
+// stays valid, which is the honest behaviour: this machine forgetting a
+// credential says nothing about the credential. `navarch token revoke` is how
+// you make one stop working everywhere.
+func cmdLogout(_ context.Context, e env, args []string) error {
+	if len(args) > 0 {
+		return usage("usage: navarch logout")
+	}
+	path, err := clearToken()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(e.out, "cleared the stored token in %s\n", path)
+	fmt.Fprintln(e.out, "it is still valid — `navarch token revoke ID` to stop it working elsewhere")
+	return nil
+}
+
+func cmdToken(ctx context.Context, e env, args []string) error {
+	if len(args) == 0 {
+		return usage("usage: navarch token list|create|revoke ...")
+	}
+	switch args[0] {
+	case "list":
+		tokens, err := e.c.ListTokens(ctx)
+		if err != nil {
+			return err
+		}
+		rows := make([][]string, 0, len(tokens))
+		for _, t := range tokens {
+			rows = append(rows, []string{t.ID, t.Name, orDash(t.ExpiresAt), orDash(t.LastUsedAt), t.CreatedAt})
+		}
+		return emit(e, tokens, []string{"ID", "NAME", "EXPIRES", "LAST_USED", "CREATED"}, rows)
+
+	case "create":
+		flags, pos, err := flagMap(args[1:])
+		if err != nil {
+			return err
+		}
+		name := flags["name"]
+		if name == "" && len(pos) > 0 {
+			name = pos[0]
+		}
+		days := 0
+		if v := flags["expires-in-days"]; v != "" {
+			days, err = strconv.Atoi(v)
+			if err != nil || days < 0 {
+				return usage("--expires-in-days must be a non-negative whole number of days")
+			}
+		}
+		t, err := e.c.CreateToken(ctx, name, days)
+		if err != nil {
+			return err
+		}
+		if e.cfg.Output == "json" {
+			return printJSON(e.out, t)
+		}
+		// Printed alone on its own line so it can be piped or copied without
+		// dragging table furniture along with it.
+		fmt.Fprintf(e.out, "%s\n", t.Plaintext)
+		fmt.Fprintf(e.err, "token %s created; this is the only time it is shown\n", t.ID)
+		return nil
+
+	case "revoke":
+		if err := need(args, 2, "usage: navarch token revoke TOKEN_ID"); err != nil {
+			return err
+		}
+		if err := e.c.RevokeToken(ctx, args[1]); err != nil {
+			return err
+		}
+		fmt.Fprintf(e.out, "revoked\t%s\n", args[1])
+		return nil
+
+	default:
+		return usage(fmt.Sprintf("unknown token subcommand %q", args[0]))
+	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }

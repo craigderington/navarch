@@ -192,3 +192,100 @@ func guardTransport(rawURL string, stderr io.Writer) error {
 		insecure.Host, envInsecure)
 	return nil
 }
+
+// configPath is where `navarch login` writes. Always the new-name path: the
+// composectl location is still *read* so an existing setup keeps working, but
+// nothing should be creating one in 2026.
+func configPath() (string, error) {
+	if p := firstEnv(envConfigPath, envConfigPathLegacy); p != "" {
+		return p, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot locate a home directory to save config in: %w", err)
+	}
+	return filepath.Join(home, ".config", "navarch", "config.yaml"), nil
+}
+
+// saveConfig writes url and token to the config file, preserving whatever else
+// is already in it.
+//
+// 0600 on the file and 0700 on the directory because this is a bearer
+// credential at rest. It merges rather than overwrites so that logging in does
+// not silently discard an `output: json` somebody set months ago — a config
+// file that loses unrelated settings when you touch it is one people stop
+// trusting.
+func saveConfig(url, token string) (string, error) {
+	path, err := configPath()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("create config directory: %w", err)
+	}
+
+	cfg := Config{}
+	if b, err := os.ReadFile(path); err == nil {
+		if err := yaml.Unmarshal(b, &cfg); err != nil {
+			// Refuse rather than overwrite. The file is probably hand-edited,
+			// and replacing something unparseable destroys the only copy of
+			// whatever the author meant.
+			return "", fmt.Errorf("%s is not valid YAML; fix or remove it before logging in: %w", path, err)
+		}
+	}
+	cfg.URL = url
+	cfg.Token = token
+	// A token that has just been written inline would otherwise be shadowed on
+	// the next run by a stale token_file pointing somewhere else.
+	cfg.TokenFile = ""
+
+	body, err := yaml.Marshal(cfg)
+	if err != nil {
+		return "", err
+	}
+	// Written via a temp file in the same directory and renamed, so an
+	// interrupted write cannot leave a half-file where the credential was.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		return "", fmt.Errorf("write config: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return "", fmt.Errorf("save config: %w", err)
+	}
+	return path, nil
+}
+
+// clearToken removes the stored credential, leaving the rest of the file alone.
+func clearToken() (string, error) {
+	path, err := configPath()
+	if err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return path, nil // nothing stored; logging out is already true
+		}
+		return "", err
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		return "", fmt.Errorf("%s is not valid YAML: %w", path, err)
+	}
+	cfg.Token = ""
+	cfg.TokenFile = ""
+	body, err := yaml.Marshal(cfg)
+	if err != nil {
+		return "", err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	return path, nil
+}

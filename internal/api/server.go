@@ -358,6 +358,9 @@ func (s *Server) routes() {
 	// would be permanent).
 	// Operator identity: who am I, and who else may see this org.
 	s.handle("GET /v1/whoami", s.handleWhoami)
+	s.handle("GET /v1/operators/me/tokens", s.handleListTokens)
+	s.handle("POST /v1/operators/me/tokens", s.handleCreateToken)
+	s.handle("DELETE /v1/operators/me/tokens/{id}", s.handleRevokeToken)
 	s.handle("GET /v1/orgs/{org}/members", s.handleListMembers)
 	s.handle("POST /v1/orgs/{org}/members", s.handleAddMember)
 	s.handle("DELETE /v1/orgs/{org}/members/{operator}", s.handleRemoveMember)

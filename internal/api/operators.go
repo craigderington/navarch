@@ -170,3 +170,107 @@ func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// ------------------------------------------------------- the caller's tokens
+
+type createTokenRequest struct {
+	Name string `json:"name,omitempty"`
+	// ExpiresInDays bounds a token's life. Zero means no expiry, which is the
+	// right default for the credential a person types into `navarch login` and
+	// wrong for one pasted into CI — so it is offered rather than imposed.
+	ExpiresInDays int `json:"expires_in_days,omitempty"`
+}
+
+// handleCreateToken mints a token for the calling operator.
+//
+// Self-scoped: an operator manages their own credentials and nobody else's,
+// which is why these routes address `me` rather than an id. There is
+// deliberately no route to mint a token *for* another operator — that would be
+// a way to acquire someone else's identity, and the audit log would faithfully
+// record the wrong person.
+func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	id, ok := identityFrom(r.Context())
+	if !ok || !id.isOperator() {
+		writeError(w, http.StatusNotFound, "not an operator identity", nil)
+		return
+	}
+	var req createTokenRequest
+	if r.ContentLength > 0 {
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body", nil)
+			return
+		}
+	}
+	var expires *time.Time
+	if req.ExpiresInDays > 0 {
+		t := time.Now().Add(time.Duration(req.ExpiresInDays) * 24 * time.Hour)
+		expires = &t
+	}
+	tok, err := s.st.IssueOperatorToken(ctx, id.operator.ID, req.Name, expires)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	// The one response that carries the plaintext. Nothing stores it and no
+	// later read can produce it.
+	writeJSON(w, http.StatusCreated, tok)
+}
+
+func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	id, ok := identityFrom(r.Context())
+	if !ok || !id.isOperator() {
+		writeError(w, http.StatusNotFound, "not an operator identity", nil)
+		return
+	}
+	tokens, err := s.st.ListOperatorTokens(ctx, id.operator.ID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens})
+}
+
+// handleRevokeToken deletes one of the caller's tokens, and refuses to delete
+// the last one.
+//
+// Nothing else can issue a token to an existing operator — `member add` mints
+// one only when it creates the operator — so revoking your last credential is
+// unrecoverable without database access. That is the same one-way door drain
+// was before uncordon existed, and the fix is the same: refuse, and say what to
+// do instead. Rotating a compromised token is still possible, in the order that
+// was always correct anyway: create the new one, then revoke the old.
+func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	id, ok := identityFrom(r.Context())
+	if !ok || !id.isOperator() {
+		writeError(w, http.StatusNotFound, "not an operator identity", nil)
+		return
+	}
+	tokenID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	tokens, err := s.st.ListOperatorTokens(ctx, id.operator.ID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if len(tokens) <= 1 {
+		writeError(w, http.StatusConflict,
+			"this is your only token; create another before revoking it or you will lock yourself out", nil)
+		return
+	}
+	if err := s.st.RevokeOperatorToken(ctx, id.operator.ID, tokenID); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

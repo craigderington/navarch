@@ -550,3 +550,39 @@ func (c *Client) AddMember(ctx context.Context, orgID, email, name, role string)
 func (c *Client) RemoveMember(ctx context.Context, orgID, operatorID string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/orgs/"+orgID+"/members/"+operatorID, nil, nil)
 }
+
+// OperatorToken is one of the caller's credentials. Plaintext is set only on
+// the response that created it.
+type OperatorToken struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	ExpiresAt  string `json:"expires_at,omitempty"`
+	LastUsedAt string `json:"last_used_at,omitempty"`
+	CreatedAt  string `json:"created_at"`
+	Plaintext  string `json:"token,omitempty"`
+}
+
+func (c *Client) ListTokens(ctx context.Context) ([]OperatorToken, error) {
+	var out struct {
+		Tokens []OperatorToken `json:"tokens"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/operators/me/tokens", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Tokens, nil
+}
+
+// CreateToken mints a token for the calling operator. The plaintext comes back
+// exactly once, on this response.
+func (c *Client) CreateToken(ctx context.Context, name string, expiresInDays int) (*OperatorToken, error) {
+	var out OperatorToken
+	body := map[string]any{"name": name, "expires_in_days": expiresInDays}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/operators/me/tokens", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) RevokeToken(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/operators/me/tokens/"+id, nil, nil)
+}

@@ -27,13 +27,35 @@ again — the database stores only its SHA-256.
 docker compose -f deploy/production/compose.yaml logs controlplane | grep bootstrap
 ```
 
-Then point the CLI at it:
+Then log in. The token is never taken as an argument — it is prompted for
+without echo, or read from stdin — because argv lands in shell history, `ps`,
+and every exec audit log on the box:
 
 ```bash
-export NAVARCH_URL=https://navarch.example.com
-export NAVARCH_TOKEN=<the token from the log>
-navarch whoami
+navarch login --url https://navarch.example.com
+Operator token:
+logged in to https://navarch.example.com as you@example.com
 ```
+
+It is verified against the control plane before it is written, so a config file
+never holds a credential that does not work. The token is stored 0600 in
+`~/.config/navarch/config.yaml`; `NAVARCH_TOKEN` still overrides it, which is
+what CI should use.
+
+Once in, mint a separate credential for anything that is not you, and give it
+an expiry:
+
+```bash
+navarch token create ci --expires-in-days 90
+navarch token list
+navarch token revoke <id>
+```
+
+Revoking your only token is refused — nothing can issue a replacement to an
+existing operator, so it would lock you out permanently. Create the new one
+first, then revoke the old, which is the right order for a rotation anyway.
+`navarch logout` only forgets the token on this machine; it stays valid until
+it is revoked.
 
 `navarch whoami` is the first thing to run and the first thing to run when
 anything is confusing later. Authorization refuses with 404 rather than 403 so

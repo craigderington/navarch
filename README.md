@@ -136,10 +136,11 @@ tables by default (`--output json` for scripts).
 
 ```bash
 make build                 # writes bin/navarch
-export NAVARCH_URL=http://localhost:8417
-export NAVARCH_TOKEN=dev-operator-token-change-me   # the dev stack's operator
+navarch login --url http://localhost:8417   # prompts; the dev operator token
+                                           # is dev-operator-token-change-me
 
 navarch whoami             # who this token is, and which orgs it can see
+navarch token list         # your own credentials
 navarch health
 navarch validate examples/hello/compose.yaml
 navarch org list

@@ -67,6 +67,28 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	// login and logout run before the shared client exists: login supplies the
+	// token rather than consuming one, and logout must work even when the
+	// stored URL is unusable — otherwise the command for getting out of a bad
+	// configuration would need that configuration to be good.
+	if cmd == "login" || cmd == "logout" {
+		e := env{cfg: cfg, out: stdout, err: stderr}
+		var err error
+		if cmd == "login" {
+			err = cmdLogin(context.Background(), e, rest, flags.cfg.Token)
+		} else {
+			err = cmdLogout(context.Background(), e, rest)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			if isUsage(err) {
+				return 2
+			}
+			return 1
+		}
+		return 0
+	}
+
 	// Before any credential is put on the wire, not after a request has already
 	// carried it.
 	if err := guardTransport(cfg.URL, stderr); err != nil {
@@ -218,6 +240,8 @@ func dispatch(ctx context.Context, e env, cmd string, args []string) error {
 		return cmdWait(ctx, e, args)
 	case "whoami":
 		return cmdWhoami(ctx, e, args)
+	case "token", "tokens":
+		return cmdToken(ctx, e, args)
 	case "member", "members":
 		return cmdMember(ctx, e, args)
 	case "tui":
@@ -334,8 +358,11 @@ Global flags:
   --output, -o FMT     table (default) or json
 
 Commands:
+  login                Store an operator token for this machine
+  logout               Forget the stored token (it stays valid: see token revoke)
   health               Check control-plane + database
   whoami               Show who this token belongs to and which orgs it sees
+  token                List, create, and revoke your own operator tokens
   validate FILE        Parse a compose file without deploying
   org                  Create and list organizations
   member               List, add, and remove an organization's operators
@@ -371,6 +398,7 @@ The previous COMPOSECTL_* variables and ~/.config/composectl/config.yaml are
 still read, at lower precedence, so an existing setup keeps working.
 
 Examples:
+  navarch login --url https://navarch.example.com   # prompts, never takes a token on argv
   navarch health
   navarch validate examples/hello/compose.yaml
   navarch stack push dev/preview/main examples/hello/compose.yaml

@@ -24,6 +24,12 @@ var unscopedRoutes = map[string]string{
 		"authenticated by the shared service token so a scraper needs no identity",
 	"POST /v1/orgs": "self-serve; the creator is enrolled as owner in the same request",
 	"GET /v1/orgs":  "scoped by construction — it lists only the caller's own orgs",
+	"GET /v1/operators/me/tokens": "addresses the caller's own credentials; " +
+		"there is deliberately no route to an operator other than `me`",
+	"POST /v1/operators/me/tokens": "same — mints a token for the caller alone, " +
+		"because minting one for somebody else is a way to become them",
+	"DELETE /v1/operators/me/tokens/{id}": "same — the store scopes the delete to " +
+		"the owner, so naming another operator's token id changes nothing",
 	"GET /v1/whoami": "the answer is the caller themselves; it addresses no object, " +
 		"and it is how an operator tells \"wrong org\" from \"wrong id\" given that " +
 		"the two are deliberately indistinguishable everywhere else",

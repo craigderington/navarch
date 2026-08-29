@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -318,5 +319,95 @@ func TestGuardTransportRefusesPlaintextThatCanLeave(t *testing.T) {
 	errb.Reset()
 	if err := guardTransport("ftp://localhost:8417", &errb); err == nil {
 		t.Fatal("the opt-in must not rescue an unsupported scheme")
+	}
+}
+
+// login must verify before it writes. A config file holding a token that does
+// not work is worse than none: every later command fails with 401 and nothing
+// points back at the step that "succeeded".
+func TestLoginVerifiesBeforeItSaves(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("NAVARCH_CONFIG", cfgPath)
+
+	var accept bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/whoami" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if !accept || r.Header.Get("Authorization") != "Bearer good-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"operator":{"id":"1","email":"op@example.com","name":"Op"},`+
+			`"organizations":[{"id":"o1","slug":"dev","name":"Dev"}]}`)
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	// httptest binds 127.0.0.1, so the transport guard is satisfied without an
+	// insecure opt-in — which is itself worth knowing: loopback stays usable.
+	code := Run([]string{"login", "--url", srv.URL, "--token", "bad-token"}, &out, &errb)
+	if code == 0 {
+		t.Fatal("login accepted a token the control plane rejected")
+	}
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Fatal("a rejected token must not be written to disk")
+	}
+
+	accept = true
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"login", "--url", srv.URL, "--token", "good-token"}, &out, &errb); code != 0 {
+		t.Fatalf("login failed: %s %s", out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "op@example.com") {
+		t.Fatalf("login should name who it logged in as, got %q", out.String())
+	}
+
+	// Stored, and stored privately — this is a bearer credential at rest.
+	info, err := os.Stat(cfgPath)
+	if err != nil {
+		t.Fatalf("config not written: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("config mode is %o, want 600", perm)
+	}
+	body, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(body), "good-token") {
+		t.Fatalf("token was not saved: %s", body)
+	}
+
+	// logout forgets it without touching the rest of the file.
+	out.Reset()
+	if code := Run([]string{"logout"}, &out, &errb); code != 0 {
+		t.Fatalf("logout failed: %s", errb.String())
+	}
+	body, _ = os.ReadFile(cfgPath)
+	if strings.Contains(string(body), "good-token") {
+		t.Fatalf("logout left the token behind: %s", body)
+	}
+	if !strings.Contains(string(body), srv.URL) {
+		t.Fatalf("logout discarded the url too: %s", body)
+	}
+}
+
+// Logging in must not quietly drop unrelated settings, or people stop trusting
+// the file and go back to exporting variables.
+func TestLoginPreservesOtherConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("NAVARCH_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("output: json\nurl: http://localhost:1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := saveConfig("http://localhost:8417", "tok"); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	body, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(body), "output: json") {
+		t.Fatalf("saveConfig discarded an unrelated setting: %s", body)
 	}
 }
