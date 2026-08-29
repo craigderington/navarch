@@ -1,0 +1,27 @@
+{{define "environments.html"}}{{template "layout" .}}{{end}}
+{{define "content"}}
+  <h1>Environments</h1>
+  <p class="sub"><a href="/">Fleet</a> · <a href="/orgs/{{.Org}}/events">Events</a></p>
+  <div class="panel scroll">
+    <table>
+      <thead><tr>
+        <th>App</th><th>Stack</th><th>Environment</th><th>Hostname</th>
+        <th>Home node</th><th>Live revision</th>
+      </tr></thead>
+      <tbody>
+      {{range .Envs}}
+        <tr>
+          <td class="mono">{{.AppSlug}}</td>
+          <td class="mono">{{.StackSlug}}</td>
+          <td class="mono"><a href="/envs/{{.ID}}">{{.Slug}}</a></td>
+          <td class="mono dim">{{dash .Hostname}}</td>
+          <td class="mono dim">{{dash .HomeNode}}</td>
+          <td class="mono">{{if .LiveDeploymentID}}<a href="/deployments/{{.LiveDeploymentID}}">{{short .LiveDeploymentID}}</a>{{else}}<span class="dim">—</span>{{end}}</td>
+        </tr>
+      {{else}}
+        <tr><td colspan="6" class="empty">No environments in this organization yet.</td></tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+{{end}}

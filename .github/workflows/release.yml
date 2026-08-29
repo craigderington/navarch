@@ -71,6 +71,22 @@ jobs:
             ghcr.io/${{ github.repository }}/agent:${{ steps.v.outputs.version }}
             ghcr.io/${{ github.repository }}/agent:latest
 
+      - name: Console image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: web
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.v.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.v.outputs.date }}
+          tags: |
+            ghcr.io/${{ github.repository }}/web:${{ steps.v.outputs.version }}
+            ghcr.io/${{ github.repository }}/web:latest
+
   binaries:
     runs-on: ubuntu-latest
     steps:

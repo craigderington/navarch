@@ -1,0 +1,27 @@
+{{define "deployment.html"}}{{template "layout" .}}{{end}}
+{{define "content"}}
+  <h1>Revision {{.D.Revision}}</h1>
+  <p class="sub"><a href="/">Fleet</a> · <a href="/envs/{{.D.EnvironmentID}}">environment</a></p>
+  <div class="panel">
+    <dl class="kv">
+      <dt>State</dt><dd>
+        {{if eq .D.State "live"}}<span class="pill s-ok">● live</span>
+        {{else if eq .D.State "failed"}}<span class="pill s-bad">▲ failed</span>
+        {{else if eq .D.State "superseded"}}<span class="pill s-idle">■ superseded</span>
+        {{else}}<span class="pill s-warn">◐ {{.D.State}}</span>{{end}}
+      </dd>
+      <dt>Deployment</dt><dd>{{.D.ID}}</dd>
+      <dt>Slot</dt><dd>{{dash .D.Slot}}</dd>
+      <dt>Project</dt><dd>{{dash .D.ProjectName}}</dd>
+      <dt>Home node</dt><dd>
+        {{dash .D.HomeNode}}
+        {{if and .D.HomeNodeState (ne .D.HomeNodeState "ready")}}
+          <span class="pill s-bad">▲ {{.D.HomeNodeState}}</span>
+        {{end}}
+      </dd>
+      <dt>Created by</dt><dd>{{dash .D.CreatedBy}}</dd>
+      <dt>Created</dt><dd>{{ago .D.CreatedAt}}</dd>
+      {{if .D.FailureReason}}<dt>Failure</dt><dd>{{.D.FailureReason}}</dd>{{end}}
+    </dl>
+  </div>
+{{end}}

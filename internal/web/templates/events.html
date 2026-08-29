@@ -1,0 +1,22 @@
+{{define "events.html"}}{{template "layout" .}}{{end}}
+{{define "content"}}
+  <h1>Events</h1>
+  <p class="sub"><a href="/">Fleet</a> · <a href="/orgs/{{.Org}}">Environments</a> · newest first</p>
+  <div class="panel scroll">
+    <table>
+      <thead><tr><th>When</th><th>Kind</th><th>Actor</th><th class="wrap">Message</th></tr></thead>
+      <tbody>
+      {{range .Events}}
+        <tr>
+          <td class="mono dim">{{ago .CreatedAt}}</td>
+          <td class="mono">{{.Kind}}</td>
+          <td class="mono dim">{{if .ActorEmail}}{{.ActorEmail}}{{else}}<span title="written by a control-plane loop, not a person">system</span>{{end}}</td>
+          <td class="wrap">{{.Message}}</td>
+        </tr>
+      {{else}}
+        <tr><td colspan="4" class="empty">No events yet.</td></tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+{{end}}

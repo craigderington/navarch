@@ -790,6 +790,38 @@ The dev stack needs no opt-in and that is load-bearing, not luck: agents reach
 `http://localhost:8417`. A guard that made the ordinary case worse would be
 turned off, and then it would be protecting nothing.
 
+**The web console is a server, not a bundle of JavaScript, and that is a
+security decision.** `cmd/navarch-web` holds the operator's token itself and
+gives the browser only a session cookie (`HttpOnly`, `SameSite=Lax`, `Secure`
+behind TLS). A single-page app talking to `/v1` would have to keep a bearer
+token where JavaScript can read it, and the API's credential model — bearer
+tokens, hashed at rest, constant-time compared — is deliberately machine-facing
+and should not grow cookie auth for a front end. `TestTheBrowserNeverReceivesThe
+Token` and `make demo-web` both assert the token never reaches the browser.
+
+It is a **second consumer of `internal/client`**, exactly as the TUI is: no URL
+of the API's, no knowledge of its JSON, and a CI guard that fails if
+`cmd/navarch-web` ever links pgx, the Docker SDK or compose-go. Sessions are in
+memory because a console restart logging everybody out is correct and cheap,
+where persisting bearer tokens to disk to avoid it is not.
+
+**Each console page is its own template set.** Every page defines `content` and
+`title`, and Go templates share one namespace — so parsing them together makes
+the last file parsed win and *every page render the same body*. It fails
+quietly: the layout renders, the tables are simply empty. `parsePages` builds
+one set per page from the layout plus that page alone, and both
+`TestEachPageRendersItsOwnBody` and `make demo-web` are verified to fail against
+the shared-set version. Note what the guard must key on: the page **heading**,
+not a node hostname — the environments page legitimately shows hostnames in its
+home-node column, and keying on one made the assertion fail on correct output.
+
+**`navarch tui` stays read-only; the console is where acting will live.** These
+are not contradictory. `TestNoKeyPerformsAnAction` is about a full-screen
+terminal app where a keystroke is one character from an accident; a web form
+with an explicit confirmation is a different interaction. Slice A ships no
+mutating form at all, which is why it needs no CSRF — the moment one exists it
+needs a per-session token in the form and checked on submit.
+
 **A node's organization comes from the credential that enrolled it, never from
 the request.** `handleRegisterNode` used to resolve the org from `req.Org` and
 check membership only when the caller was an operator — so a holder of the

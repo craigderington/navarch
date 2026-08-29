@@ -121,6 +121,11 @@ type Event struct {
 	Message      string         `json:"message"`
 	Payload      map[string]any `json:"payload"`
 	CreatedAt    time.Time      `json:"created_at"`
+	// The operator who caused this, added when operator identity landed. Empty
+	// means a control-plane loop wrote it — the scheduler, controller or reaper
+	// — which is the honest record: nobody asked, something noticed.
+	ActorOperatorID *string `json:"actor_operator_id,omitempty"`
+	ActorEmail      *string `json:"actor_email,omitempty"`
 }
 
 type ValidateResult struct {

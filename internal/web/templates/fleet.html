@@ -1,0 +1,58 @@
+{{define "fleet.html"}}{{template "layout" .}}{{end}}
+{{define "title"}}Fleet — Navarch{{end}}
+{{define "content"}}
+  <h1>Fleet</h1>
+  <p class="sub">{{len .Fleets}} organization{{if ne (len .Fleets) 1}}s{{end}}</p>
+
+  {{range .Fleets}}
+  <section>
+    <h2>{{.Org.Slug}} <span class="dim" style="text-transform:none;letter-spacing:0">· {{.Org.Name}}</span></h2>
+    {{if .Err}}<div class="err">{{.Err}}</div>{{end}}
+    <div class="panel scroll">
+      <table>
+        <thead><tr>
+          <th>Node</th><th>State</th><th>Address</th><th>CPU</th><th>Memory</th>
+          <th>Heartbeat</th><th>Key</th><th>Agent</th>
+        </tr></thead>
+        <tbody>
+        {{range .Nodes}}
+          <tr>
+            <td class="mono">{{.Hostname}}</td>
+            <td>
+              {{if eq .State "ready"}}<span class="pill s-ok">● ready</span>
+              {{else if eq .State "draining"}}<span class="pill s-warn">◐ draining</span>
+              {{else if eq .State "unreachable"}}<span class="pill s-bad">▲ unreachable</span>
+              {{else}}<span class="pill s-idle">■ {{.State}}</span>{{end}}
+            </td>
+            <td class="mono dim">{{.AdvertiseAddr}}</td>
+            <td class="mono">
+              {{$p := pctI .AllocCPUMillis .CPUMillis}}
+              <span class="meter"><i class="{{if ge $p 90}}full{{else if ge $p 70}}hot{{end}}" style="width:{{$p}}%"></i></span>{{$p}}%
+            </td>
+            <td class="mono">
+              {{$m := pct .AllocMemoryBytes .MemoryBytes}}
+              <span class="meter"><i class="{{if ge $m 90}}full{{else if ge $m 70}}hot{{end}}" style="width:{{$m}}%"></i></span>{{gib .MemoryBytes}}
+            </td>
+            <td class="mono dim">{{ago .LastHeartbeat}}</td>
+            <td>
+              {{if .PendingAgeRecipient}}<span class="pill s-warn">▲ rotation pending</span>
+              {{else if .AgeRecipient}}<span class="pill s-ok">● ok</span>
+              {{else}}<span class="pill s-idle">— none</span>{{end}}
+            </td>
+            <td class="mono dim">{{dash .AgentVersion}}</td>
+          </tr>
+        {{else}}
+          <tr><td colspan="8" class="empty">No nodes registered. Enrol one with <span class="mono">navarch node join-token create {{.Org.Slug}}</span>.</td></tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    <p class="sub" style="margin-top:8px">
+      <a href="/orgs/{{.Org.ID}}">Environments</a> ·
+      <a href="/orgs/{{.Org.ID}}/events">Events</a>
+    </p>
+  </section>
+  {{else}}
+    <div class="panel"><div class="empty">You are not a member of any organization yet.</div></div>
+  {{end}}
+{{end}}

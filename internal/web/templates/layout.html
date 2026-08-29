@@ -1,0 +1,124 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{block "title" .}}Navarch Console{{end}}</title>
+<style>
+  /* An instrument panel, not the marketing page. No web fonts: a console
+     should paint instantly and work on a box with no internet. No display
+     face: nothing here is read for pleasure. Semantic colour carries state and
+     is separate from the one interactive accent. */
+  :root {
+    --bg:#f6f7f8; --panel:#ffffff; --line:#dfe3e6; --line-soft:#eceff1;
+    --fg:#12181d; --fg-2:#54626d; --fg-3:#8a97a1;
+    --link:#12558a;
+    --ok:#186a3b; --ok-bg:#e4f2ea;
+    --warn:#8a5a00; --warn-bg:#fbf0da;
+    --bad:#95231c; --bad-bg:#fbe6e4;
+    --idle:#4a5560; --idle-bg:#eceff1;
+    --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --ui: system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#0f1317; --panel:#161b21; --line:#252d35; --line-soft:#1c232a;
+      --fg:#e6ebef; --fg-2:#9aa7b2; --fg-3:#6b7885;
+      --link:#6cb6ff;
+      --ok:#63c088; --ok-bg:#122a1c;
+      --warn:#e0b063; --warn-bg:#2c2213;
+      --bad:#f08a80; --bad-bg:#2e1815;
+      --idle:#8a97a1; --idle-bg:#1c232a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#0f1317; --panel:#161b21; --line:#252d35; --line-soft:#1c232a;
+    --fg:#e6ebef; --fg-2:#9aa7b2; --fg-3:#6b7885;
+    --link:#6cb6ff;
+    --ok:#63c088; --ok-bg:#122a1c;
+    --warn:#e0b063; --warn-bg:#2c2213;
+    --bad:#f08a80; --bad-bg:#2e1815;
+    --idle:#8a97a1; --idle-bg:#1c232a;
+  }
+  *,*::before,*::after{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--ui);font-size:14px;line-height:1.5;
+       font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+  a{color:var(--link);text-decoration:none}
+  a:hover{text-decoration:underline}
+  :focus-visible{outline:2px solid var(--link);outline-offset:2px}
+
+  header{background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+  .bar{display:flex;align-items:center;gap:18px;padding:0 18px;height:48px;max-width:1500px;margin:0 auto}
+  .brand{font-weight:650;letter-spacing:-.01em;display:flex;align-items:center;gap:8px}
+  .brand svg{display:block}
+  .bar nav{display:flex;gap:16px;font-size:13px}
+  .bar nav a{color:var(--fg-2)}
+  .bar nav a:hover,.bar nav a[aria-current]{color:var(--fg)}
+  .who{margin-left:auto;display:flex;align-items:center;gap:12px;font-size:12.5px;color:var(--fg-3)}
+  .who form{margin:0}
+  .who button{font:inherit;background:none;border:1px solid var(--line);color:var(--fg-2);
+              padding:4px 10px;border-radius:4px;cursor:pointer}
+  .who button:hover{color:var(--fg);border-color:var(--fg-3)}
+
+  main{max-width:1500px;margin:0 auto;padding:22px 18px 60px}
+  h1{font-size:19px;letter-spacing:-.01em;margin:0 0 2px}
+  .sub{color:var(--fg-3);font-size:12.5px;margin:0 0 18px}
+  section{margin-bottom:26px}
+  h2{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--fg-3);
+     margin:0 0 8px;font-weight:600}
+
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .scroll{overflow-x:auto}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th{text-align:left;font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--fg-3);
+     font-weight:600;padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:9px 12px;border-bottom:1px solid var(--line-soft);vertical-align:middle;white-space:nowrap}
+  tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:var(--line-soft)}
+  .mono{font-family:var(--mono);font-size:12px}
+  .dim{color:var(--fg-3)}
+  .num{text-align:right}
+  .wrap{white-space:normal;min-width:22ch}
+
+  /* State reads as colour AND glyph, so it survives colour-blindness, a
+     greyscale print, and a projector that eats saturation. */
+  .pill{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:11px;
+        padding:2px 7px;border-radius:3px;border:1px solid transparent;white-space:nowrap}
+  .s-ok{color:var(--ok);background:var(--ok-bg);border-color:var(--ok)}
+  .s-warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn)}
+  .s-bad{color:var(--bad);background:var(--bad-bg);border-color:var(--bad)}
+  .s-idle{color:var(--idle);background:var(--idle-bg);border-color:var(--idle)}
+
+  .meter{width:74px;height:6px;background:var(--line-soft);border-radius:3px;overflow:hidden;display:inline-block;
+         vertical-align:middle;margin-right:7px}
+  .meter i{display:block;height:100%;background:var(--fg-2)}
+  .meter i.hot{background:var(--warn)}
+  .meter i.full{background:var(--bad)}
+
+  .empty{padding:26px 14px;text-align:center;color:var(--fg-3);font-size:13px}
+  .err{border-left:3px solid var(--bad);background:var(--bad-bg);color:var(--bad);
+       padding:10px 14px;border-radius:4px;margin-bottom:16px;font-size:13px}
+  .kv{display:grid;grid-template-columns:max-content 1fr;gap:7px 20px;padding:14px}
+  .kv dt{color:var(--fg-3);font-size:12px}
+  .kv dd{margin:0;font-family:var(--mono);font-size:12.5px}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <span class="brand">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 2.5 21 7v10l-9 4.5L3 17V7l9-4.5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      </svg>
+      Navarch
+    </span>
+    <nav><a href="/">Fleet</a></nav>
+    <div class="who">
+      <span>{{.Email}}</span>
+      <form method="post" action="/logout"><button type="submit">Sign out</button></form>
+    </div>
+  </div>
+</header>
+<main>{{block "content" .}}{{end}}</main>
+</body>
+</html>{{end}}

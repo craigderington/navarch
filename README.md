@@ -46,7 +46,8 @@ The platform loop is implemented end to end across a multi-node fleet:
   holding its durable state
 - Cross-node ingress: a stack is reachable regardless of which node runs it
 - On-demand container logs, fetched through the agent poll and never stored
-- A read-only terminal dashboard (`navarch tui`)
+- A read-only terminal dashboard (`navarch tui`) and a browser console
+  (`navarch-web`) that keeps your token on the server
 - Operator identity with per-organization authorization, and an audit timeline
   that names who did what
 - TLS terminated at a reverse proxy, with both binaries refusing to send
@@ -130,6 +131,8 @@ make demo-preview  # preview creation, routing, expiry, and full teardown
 make demo-tls      # TLS terminated at a real proxy, and refused where absent
 make demo-site     # Navarch's own marketing site, deployed on Navarch
 make demo-byo      # a customer-owned node our router cannot reach, serving a stack
+make demo-web      # every console page, loaded against the real fleet
+make console       # run the console on :8418
 make test          # race-enabled Go test suite
 ```
 

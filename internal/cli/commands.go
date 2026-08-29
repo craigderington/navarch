@@ -857,9 +857,16 @@ func cmdEvents(ctx context.Context, e env, args []string) error {
 	}
 	rows := make([][]string, 0, len(evs))
 	for _, ev := range evs {
-		rows = append(rows, []string{strconv.FormatInt(ev.ID, 10), ev.Kind, ev.Message, ts(ev.CreatedAt)})
+		// The actor was added to events when operator identity landed and the
+		// CLI never showed it, which made the audit trail attributable
+		// everywhere except where an operator reads it.
+		actor := "system"
+		if ev.ActorEmail != nil && *ev.ActorEmail != "" {
+			actor = *ev.ActorEmail
+		}
+		rows = append(rows, []string{strconv.FormatInt(ev.ID, 10), ev.Kind, actor, ev.Message, ts(ev.CreatedAt)})
 	}
-	return emit(e, evs, []string{"ID", "KIND", "MESSAGE", "CREATED"}, rows)
+	return emit(e, evs, []string{"ID", "KIND", "ACTOR", "MESSAGE", "CREATED"}, rows)
 }
 
 func join(ss []string) string {

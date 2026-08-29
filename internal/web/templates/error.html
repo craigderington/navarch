@@ -1,0 +1,7 @@
+{{define "error.html"}}{{template "layout" .}}{{end}}
+{{define "content"}}
+  <h1>The control plane did not answer</h1>
+  <p class="sub">This is the console reporting a failure, not an empty fleet — the two look identical when a page renders blank, which is why it says so.</p>
+  <div class="err">{{.Err}}</div>
+  <p class="sub"><a href="/">Try the fleet again</a></p>
+{{end}}

@@ -52,6 +52,12 @@ jobs:
           if go list -deps ./cmd/controlplane ./cmd/agent | grep -q 'charmbracelet'; then
             echo "server binaries link the charmbracelet tree" >&2; exit 1
           fi
+          # The console is a second consumer of internal/client, the same shape
+          # the TUI is. If it ever links pgx, the Docker SDK or compose-go it
+          # has stopped going through the API and started reimplementing it.
+          if go list -deps ./cmd/navarch-web | grep -qE 'jackc/pgx|docker/docker|compose-spec'; then
+            echo "the web console links a package it should reach through the API" >&2; exit 1
+          fi
 
       # The same migrate image and invocation the dev stack uses, so CI
       # applies migrations exactly as `make up` does.

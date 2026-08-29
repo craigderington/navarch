@@ -28,6 +28,9 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags="-s -w -X $MOD/internal/version.Version=$VERSION -X $MOD/internal/version.Commit=$COMMIT -X $MOD/internal/version.Date=$BUILD_DATE" \
     -o /out/composectl-agent ./cmd/agent
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+    -ldflags="-s -w -X $MOD/internal/version.Version=$VERSION -X $MOD/internal/version.Commit=$COMMIT -X $MOD/internal/version.Date=$BUILD_DATE" \
+    -o /out/navarch-web ./cmd/navarch-web
 
 # --- control plane: HTTP API, runs unprivileged --------------------------
 FROM gcr.io/distroless/static-debian12:nonroot AS controlplane
@@ -42,3 +45,10 @@ ENTRYPOINT ["/composectl-controlplane"]
 FROM gcr.io/distroless/static-debian12 AS agent
 COPY --from=build /out/composectl-agent /composectl-agent
 ENTRYPOINT ["/composectl-agent"]
+
+# --- web console: renders HTML, holds operator sessions, talks only to the API
+FROM gcr.io/distroless/static-debian12:nonroot AS web
+COPY --from=build /out/navarch-web /navarch-web
+USER nonroot:nonroot
+EXPOSE 8418
+ENTRYPOINT ["/navarch-web"]
