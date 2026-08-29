@@ -12,7 +12,7 @@
       <table>
         <thead><tr>
           <th>Node</th><th>State</th><th>Address</th><th>CPU</th><th>Memory</th>
-          <th>Heartbeat</th><th>Key</th><th>Agent</th>
+          <th>Heartbeat</th><th>Key</th><th>Agent</th><th></th>
         </tr></thead>
         <tbody>
         {{range .Nodes}}
@@ -40,9 +40,19 @@
               {{else}}<span class="pill s-idle">— none</span>{{end}}
             </td>
             <td class="mono dim">{{dash .AgentVersion}}</td>
+            <td style="text-align:right">
+              {{if .PendingAgeRecipient}}
+                <a class="act act-danger" href="/confirm?action=rotate-recipient&amp;id={{.ID}}&amp;subject={{.Hostname}}&amp;back=/">Approve key</a>
+              {{end}}
+              {{if eq .State "draining"}}
+                <a class="act" href="/confirm?action=uncordon&amp;id={{.ID}}&amp;subject={{.Hostname}}&amp;back=/">Uncordon</a>
+              {{else}}
+                <a class="act act-danger" href="/confirm?action=drain&amp;id={{.ID}}&amp;subject={{.Hostname}}&amp;back=/">Drain</a>
+              {{end}}
+            </td>
           </tr>
         {{else}}
-          <tr><td colspan="8" class="empty">No nodes registered. Enrol one with <span class="mono">navarch node join-token create {{.Org.Slug}}</span>.</td></tr>
+          <tr><td colspan="9" class="empty">No nodes registered. Enrol one with <span class="mono">navarch node join-token create {{.Org.Slug}}</span>.</td></tr>
         {{end}}
         </tbody>
       </table>

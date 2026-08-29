@@ -11,6 +11,7 @@ package web
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"net/http"
 	"sync"
@@ -23,8 +24,17 @@ const (
 )
 
 type session struct {
-	token   string
-	email   string
+	token string
+	email string
+	// csrf is per-session and lives for as long as the session does. Every
+	// mutating form carries it and every POST checks it.
+	//
+	// SameSite=Lax already stops a cross-site POST in any current browser, so
+	// this is the second lock rather than the only one — and it is the one that
+	// does not depend on the browser being current, or on nobody ever relaxing
+	// the cookie to None for an embed.
+	csrf    string
+	flash   string
 	expires time.Time
 }
 
@@ -44,6 +54,11 @@ func (s *sessions) create(token, email string) (string, error) {
 		return "", err
 	}
 	id := hex.EncodeToString(b[:])
+	var c [32]byte
+	if _, err := rand.Read(c[:]); err != nil {
+		return "", err
+	}
+	csrf := hex.EncodeToString(c[:])
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Opportunistic sweep: a console with a handful of operators never needs a
@@ -55,7 +70,7 @@ func (s *sessions) create(token, email string) (string, error) {
 			delete(s.m, k)
 		}
 	}
-	s.m[id] = session{token: token, email: email, expires: now.Add(sessionTTL)}
+	s.m[id] = session{token: token, email: email, csrf: csrf, expires: now.Add(sessionTTL)}
 	return id, nil
 }
 
@@ -95,4 +110,44 @@ func clearCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, MaxAge: -1,
 	})
+}
+
+// validCSRF compares in constant time. The comparison is cheap either way; the
+// habit is what matters, and this file is where a reader looks to check it.
+func (s *sessions) validCSRF(id, got string) bool {
+	v, ok := s.get(id)
+	if !ok || v.csrf == "" || got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(v.csrf), []byte(got)) == 1
+}
+
+// setFlash records the outcome of an action for the page the operator is about
+// to be redirected to.
+//
+// A one-shot message in the session rather than a query parameter: an action's
+// result can name a hostname or a failure reason, and those do not belong in a
+// URL that lands in browser history, a proxy log, and the next Referer header.
+func (s *sessions) setFlash(id, msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, ok := s.m[id]; ok {
+		v.flash = msg
+		s.m[id] = v
+	}
+}
+
+// takeFlash reads and clears, so a message shows once rather than on every
+// subsequent page load.
+func (s *sessions) takeFlash(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.m[id]
+	if !ok || v.flash == "" {
+		return ""
+	}
+	msg := v.flash
+	v.flash = ""
+	s.m[id] = v
+	return msg
 }

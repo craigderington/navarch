@@ -2,12 +2,17 @@
 {{define "content"}}
   <h1>{{.Env.Slug}}</h1>
   <p class="sub"><a href="/">Fleet</a> · {{dash .Env.Hostname}}</p>
+  <p style="margin:0 0 18px;display:flex;gap:8px">
+    <a class="act" href="/confirm?action=deploy&amp;id={{.Env.ID}}&amp;subject={{.Env.Slug}}&amp;back=/envs/{{.Env.ID}}">Deploy latest</a>
+    <a class="act act-danger" href="/confirm?action=rollback&amp;id={{.Env.ID}}&amp;subject={{.Env.Slug}}&amp;back=/envs/{{.Env.ID}}">Roll back</a>
+  </p>
+
   <h2>Revisions</h2>
   <div class="panel scroll">
     <table>
       <thead><tr>
         <th class="num">Rev</th><th>State</th><th>Slot</th><th>Deployment</th>
-        <th>By</th><th>Created</th><th class="wrap">Failure reason</th>
+        <th>By</th><th>Created</th><th class="wrap">Failure reason</th><th></th>
       </tr></thead>
       <tbody>
       {{range .Deployments}}
@@ -25,9 +30,14 @@
           <td class="mono dim">{{dash .CreatedBy}}</td>
           <td class="mono dim">{{ago .CreatedAt}}</td>
           <td class="wrap dim">{{dash .FailureReason}}</td>
+          <td style="text-align:right">
+            {{if eq .State "healthy"}}
+              <a class="act" href="/confirm?action=promote&amp;id={{.ID}}&amp;subject=revision {{.Revision}}&amp;back=/envs/{{$.Env.ID}}">Promote</a>
+            {{end}}
+          </td>
         </tr>
       {{else}}
-        <tr><td colspan="7" class="empty">Nothing has been deployed to this environment yet.</td></tr>
+        <tr><td colspan="8" class="empty">Nothing has been deployed to this environment yet.</td></tr>
       {{end}}
       </tbody>
     </table>

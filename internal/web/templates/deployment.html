@@ -23,5 +23,10 @@
       <dt>Created</dt><dd>{{ago .D.CreatedAt}}</dd>
       {{if .D.FailureReason}}<dt>Failure</dt><dd>{{.D.FailureReason}}</dd>{{end}}
     </dl>
+    {{if eq .D.State "healthy"}}
+    <div style="padding:14px 20px;border-top:1px solid var(--line)">
+      <a class="act" href="/confirm?action=promote&amp;id={{.D.ID}}&amp;subject=revision {{.D.Revision}}&amp;back=/deployments/{{.D.ID}}">Promote this revision</a>
+    </div>
+    {{end}}
   </div>
 {{end}}

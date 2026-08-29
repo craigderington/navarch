@@ -815,12 +815,39 @@ the shared-set version. Note what the guard must key on: the page **heading**,
 not a node hostname — the environments page legitimately shows hostnames in its
 home-node column, and keying on one made the assertion fail on correct output.
 
-**`navarch tui` stays read-only; the console is where acting will live.** These
-are not contradictory. `TestNoKeyPerformsAnAction` is about a full-screen
-terminal app where a keystroke is one character from an accident; a web form
-with an explicit confirmation is a different interaction. Slice A ships no
-mutating form at all, which is why it needs no CSRF — the moment one exists it
-needs a per-session token in the form and checked on submit.
+**`navarch tui` stays read-only; the console is where acting lives.** These are
+not contradictory. `TestNoKeyPerformsAnAction` is about a full-screen terminal
+app where a keystroke is one character from an accident and there is nowhere to
+put a confirmation that is not also a keystroke. A web form is a deliberate
+click on a page that names the object, says what will happen, and submits a
+token the page had to be served to know.
+
+**Every mutating request carries a per-session CSRF token**, checked in constant
+time before the control plane is touched. `SameSite=Lax` already blocks a
+cross-site POST in any current browser, so this is the second lock — the one
+that does not depend on the browser being current, or on nobody later relaxing
+the cookie to `None` for an embed. A request that fails it gets a plain 403 and
+no redirect: it did not come from a page this console served, so there is
+nowhere sensible to send it back to.
+
+**Action results are rendered from the API's answer, never assumed.** Uncordon
+reports the state the control plane *derived* rather than a hopeful "ready";
+drain reports released **and** stranded, because drain's whole contract is that
+it evacuates what it can and reports what it cannot, and an operator told only
+the good half will believe the node is empty. Failures land in the flash beside
+the thing being acted on rather than on an error page — the operator is
+mid-task. The flash lives in the session, not a query parameter: results name
+hostnames and failure reasons, which do not belong in a URL that reaches browser
+history, proxy logs, and the next `Referer`.
+
+**`back` is validated against an open redirect** (`backTo`), because a
+"return where you were" parameter is the classic way a convenience becomes a
+phishing hop.
+
+**Every template using the layout must be listed in `pages`.** A missing entry
+is a runtime "no such template" and a blank page — which is exactly how
+`confirm.html` shipped broken for one build. `TestEveryLayoutTemplateIsRegistered`
+walks the embedded directory instead of trusting the list.
 
 **A node's organization comes from the credential that enrolled it, never from
 the request.** `handleRegisterNode` used to resolve the org from `req.Org` and

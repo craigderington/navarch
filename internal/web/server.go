@@ -49,6 +49,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /orgs/{org}/events", s.guard(s.events))
 	s.mux.HandleFunc("GET /envs/{env}", s.guard(s.environment))
 	s.mux.HandleFunc("GET /deployments/{id}", s.guard(s.deployment))
+	s.routeActions()
 }
 
 // guard resolves the session and builds the client for it. Every page below
@@ -155,7 +156,7 @@ func (s *Server) fleet(w http.ResponseWriter, r *http.Request, cl *client.Client
 		fleets = append(fleets, f)
 	}
 	s.render(w, "fleet.html", map[string]any{
-		"Email": sess.email, "Me": me, "Fleets": fleets, "Now": time.Now(),
+		"Email": sess.email, "CSRF": sess.csrf, "Flash": s.flash(r), "Me": me, "Fleets": fleets, "Now": time.Now(),
 	})
 }
 
@@ -169,7 +170,7 @@ func (s *Server) environments(w http.ResponseWriter, r *http.Request, cl *client
 		return
 	}
 	s.render(w, "environments.html", map[string]any{
-		"Email": sess.email, "Org": org, "Envs": envs,
+		"Email": sess.email, "CSRF": sess.csrf, "Flash": s.flash(r), "Org": org, "Envs": envs,
 	})
 }
 
@@ -188,7 +189,7 @@ func (s *Server) environment(w http.ResponseWriter, r *http.Request, cl *client.
 		return
 	}
 	s.render(w, "environment.html", map[string]any{
-		"Email": sess.email, "Env": env, "Deployments": deps,
+		"Email": sess.email, "CSRF": sess.csrf, "Flash": s.flash(r), "Env": env, "Deployments": deps,
 	})
 }
 
@@ -200,7 +201,7 @@ func (s *Server) deployment(w http.ResponseWriter, r *http.Request, cl *client.C
 		s.fail(w, r, sess, err)
 		return
 	}
-	s.render(w, "deployment.html", map[string]any{"Email": sess.email, "D": d})
+	s.render(w, "deployment.html", map[string]any{"Email": sess.email, "CSRF": sess.csrf, "Flash": s.flash(r), "D": d})
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request, cl *client.Client, sess session) {
@@ -212,7 +213,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, cl *client.Clien
 		return
 	}
 	s.render(w, "events.html", map[string]any{
-		"Email": sess.email, "Org": r.PathValue("org"), "Events": evs,
+		"Email": sess.email, "CSRF": sess.csrf, "Flash": s.flash(r), "Org": r.PathValue("org"), "Events": evs,
 	})
 }
 
@@ -249,5 +250,14 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, sess session, err 
 		return
 	}
 	w.WriteHeader(http.StatusBadGateway)
-	s.render(w, "error.html", map[string]any{"Email": sess.email, "Err": err.Error()})
+	s.render(w, "error.html", map[string]any{"Email": sess.email, "CSRF": sess.csrf, "Flash": s.flash(r), "Err": err.Error()})
+}
+
+// flash reads and clears any pending one-shot message for this session.
+func (s *Server) flash(r *http.Request) string {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return ""
+	}
+	return s.sessions.takeFlash(c.Value)
 }

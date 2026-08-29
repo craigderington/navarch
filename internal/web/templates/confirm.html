@@ -1,0 +1,21 @@
+{{define "confirm.html"}}{{template "layout" .}}{{end}}
+{{define "content"}}
+  <h1>{{.A.Title}}</h1>
+  <p class="sub">This will not happen until you confirm.</p>
+
+  <div class="panel" style="max-width:640px">
+    <div style="padding:18px 20px">
+      {{if .Subject}}<p style="margin:0 0 12px"><span class="dim">Applies to</span>
+        <span class="mono" style="font-size:13px">{{.Subject}}</span></p>{{end}}
+      <p style="margin:0 0 4px;color:var(--fg-2)">{{.A.Explain}}</p>
+    </div>
+    <div style="padding:14px 20px;border-top:1px solid var(--line);display:flex;gap:10px;align-items:center">
+      <form method="post" action="{{.A.Path}}" style="margin:0">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <input type="hidden" name="back" value="{{.Back}}">
+        <button type="submit" class="{{if .A.Danger}}btn-danger{{else}}btn-go{{end}}">{{.A.Verb}}</button>
+      </form>
+      <a href="{{.Back}}" class="btn-cancel">Cancel</a>
+    </div>
+  </div>
+{{end}}

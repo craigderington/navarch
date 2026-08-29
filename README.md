@@ -47,7 +47,8 @@ The platform loop is implemented end to end across a multi-node fleet:
 - Cross-node ingress: a stack is reachable regardless of which node runs it
 - On-demand container logs, fetched through the agent poll and never stored
 - A read-only terminal dashboard (`navarch tui`) and a browser console
-  (`navarch-web`) that keeps your token on the server
+  (`navarch-web`) that keeps your token on the server and puts every destructive
+  action behind a confirmation
 - Operator identity with per-organization authorization, and an audit timeline
   that names who did what
 - TLS terminated at a reverse proxy, with both binaries refusing to send

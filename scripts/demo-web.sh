@@ -93,10 +93,49 @@ if [ -n "${DEP:-}" ] && [ "$DEP" != "null" ]; then
     note "deployment page renders"
 fi
 
+step "Actions are behind a confirmation and a CSRF token"
+NODE_ID=$($NAV node list --org dev -o json | jq -r '.[0].id')
+NODE_NAME=$($NAV node list --org dev -o json | jq -r '.[0].hostname')
+CONFIRM=$(curl -s -b "$JAR" "$BASE/confirm?action=drain&id=$NODE_ID&subject=$NODE_NAME&back=/")
+grep -q "Drain this node" <<<"$CONFIRM" || fail "the confirmation page did not render"
+grep -qF "$NODE_NAME" <<<"$CONFIRM" || fail "the confirmation does not name what it will act on"
+CSRF=$(grep -oE 'value="[a-f0-9]{64}"' <<<"$CONFIRM" | grep -oE '[a-f0-9]{64}' | head -1)
+[ -n "$CSRF" ] || fail "the confirmation form carries no CSRF token"
+note "confirmation names $NODE_NAME and carries a token"
+
+# The check that matters: a POST that did not come from that page is refused,
+# and the control plane is never reached.
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X POST "$BASE/nodes/$NODE_ID/drain")
+[ "$code" = "403" ] || fail "a POST with no CSRF token returned $code, want 403"
+[ "$($NAV node list --org dev -o json | jq -r --arg n "$NODE_NAME" '.[]|select(.hostname==$n)|.state')" = "ready" ] ||
+    fail "the refused request drained the node anyway"
+note "403 without a token, and the node is untouched"
+
+step "With the token, the action runs and reports what the API answered"
+curl -s -o /dev/null -b "$JAR" -X POST -d "csrf=$CSRF&back=/" "$BASE/nodes/$NODE_ID/drain"
+state=$($NAV node list --org dev -o json | jq -r --arg n "$NODE_NAME" '.[]|select(.hostname==$n)|.state')
+[ "$state" = "draining" ] || fail "the node is $state after drain, want draining"
+PAGE=$(curl -s -b "$JAR" "$BASE/")
+grep -q 'class="flash' <<<"$PAGE" || fail "no flash reported the result"
+grep -q "cordoned" <<<"$PAGE" || fail "the flash did not describe what happened"
+note "node is draining, and the page said so"
+
+# Shown once, not on every load — a message that never clears becomes furniture.
+grep -q 'class="flash' <<<"$(curl -s -b "$JAR" "$BASE/")" && fail "the flash persisted across loads"
+note "flash cleared after being read"
+
+step "And put it back, through the console"
+CSRF=$(curl -s -b "$JAR" "$BASE/confirm?action=uncordon&id=$NODE_ID&subject=$NODE_NAME&back=/" |
+    grep -oE 'value="[a-f0-9]{64}"' | grep -oE '[a-f0-9]{64}' | head -1)
+curl -s -o /dev/null -b "$JAR" -X POST -d "csrf=$CSRF&back=/" "$BASE/nodes/$NODE_ID/uncordon"
+state=$($NAV node list --org dev -o json | jq -r --arg n "$NODE_NAME" '.[]|select(.hostname==$n)|.state')
+[ "$state" = "ready" ] || fail "the node is $state after uncordon, want ready"
+note "$NODE_NAME is ready again"
+
 step "Signing out ends the session"
 curl -s -b "$JAR" -c "$JAR" -o /dev/null -X POST "$BASE/logout"
 code=$(curl -s -b "$JAR" -o /dev/null -w '%{http_code}' "$BASE/")
 [ "$code" = "303" ] || fail "the session survived sign-out (got $code)"
 note "back to the login form"
 
-printf '\n\033[32mThe console renders the fleet, and the browser never held a credential.\033[0m\n'
+printf '\n\033[32mThe console renders the fleet, acts on it behind a confirmation, and never hands the browser a credential.\033[0m\n'

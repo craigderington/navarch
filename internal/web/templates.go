@@ -23,9 +23,12 @@ var templates embed.FS
 // file parsed silently wins and every page renders the same body. It fails
 // quietly — the layout renders, the tables are simply empty — which is exactly
 // the shape of bug this console exists to make visible in other systems.
+// Every page that uses the layout must be listed. A missing entry is a
+// runtime "no such template" and a blank page — which is why the demo loads
+// each route rather than trusting this list to be complete.
 var pages = []string{
 	"fleet.html", "environments.html", "environment.html",
-	"deployment.html", "events.html", "error.html",
+	"deployment.html", "events.html", "error.html", "confirm.html",
 }
 
 func parsePages() (map[string]*template.Template, error) {
@@ -91,7 +94,8 @@ var funcs = template.FuncMap{
 	"gib": func(b int64) string {
 		return itoa(int(b/(1<<30))) + "G"
 	},
-	"upper": strings.ToUpper,
+	"upper":     strings.ToUpper,
+	"hasPrefix": strings.HasPrefix,
 	"dash": func(s string) string {
 		if s == "" {
 			return "—"

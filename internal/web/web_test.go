@@ -204,3 +204,130 @@ func truncate(s string) string {
 	}
 	return s
 }
+
+// A mutating request must have come from a page this console served.
+//
+// SameSite=Lax already blocks a cross-site POST in any current browser, so this
+// is the second lock — and the one that does not depend on the browser being
+// current, or on nobody later relaxing the cookie to None for an embed.
+func TestActionsRequireTheCSRFToken(t *testing.T) {
+	var called int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/whoami" {
+			io.WriteString(w, `{"operator":{"id":"op1","email":"ada@example.com"},
+				"organizations":[{"id":"org1","slug":"acme"}]}`)
+			return
+		}
+		called++
+		io.WriteString(w, `{"id":"d1","revision":3,"state":"pending"}`)
+	}))
+	defer api.Close()
+	s, _ := New(api.URL, discard())
+	id := login(t, s, "good")
+	if id == "" {
+		t.Fatal("login failed")
+	}
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/envs/e1/deploy", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: id})
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := post(""); rec.Code != http.StatusForbidden {
+		t.Fatalf("a POST with no CSRF token returned %d, want 403", rec.Code)
+	}
+	if rec := post("csrf=wrong"); rec.Code != http.StatusForbidden {
+		t.Fatalf("a POST with the wrong CSRF token returned %d, want 403", rec.Code)
+	}
+	if called != 0 {
+		t.Fatal("a rejected request still reached the control plane")
+	}
+
+	// With the real token it goes through, so the guard is about the token and
+	// not about actions never working.
+	sess, _ := s.sessions.get(id)
+	rec := post("csrf=" + sess.csrf)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("a valid POST returned %d, want a redirect", rec.Code)
+	}
+	if called == 0 {
+		t.Fatal("a valid POST never reached the control plane")
+	}
+}
+
+// The `back` parameter must not be able to send somebody off this console —
+// that is how a convenience turns into a phishing hop.
+func TestBackRefusesAnOpenRedirect(t *testing.T) {
+	for _, bad := range []string{"https://evil.example", "//evil.example", "javascript:alert(1)", ""} {
+		if got := backTo(bad); got != "/" {
+			t.Errorf("backTo(%q) = %q, want /", bad, got)
+		}
+	}
+	for _, ok := range []string{"/", "/envs/e1", "/orgs/o1/events"} {
+		if got := backTo(ok); got != ok {
+			t.Errorf("backTo(%q) = %q, want it unchanged", ok, got)
+		}
+	}
+}
+
+// A failed action reports what the control plane said, next to the thing the
+// operator was acting on — not on a dead-end error page mid-task.
+func TestAFailedActionFlashesTheReason(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/whoami" {
+			io.WriteString(w, `{"operator":{"id":"op1","email":"ada@example.com"},
+				"organizations":[{"id":"org1","slug":"acme"}]}`)
+			return
+		}
+		w.WriteHeader(http.StatusConflict)
+		io.WriteString(w, `{"error":"an active deployment already exists"}`)
+	}))
+	defer api.Close()
+	s, _ := New(api.URL, discard())
+	id := login(t, s, "good")
+	sess, _ := s.sessions.get(id)
+
+	req := httptest.NewRequest(http.MethodPost, "/envs/e1/deploy",
+		strings.NewReader("csrf="+sess.csrf+"&back=/envs/e1"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: id})
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected a redirect after a failed action, got %d", rec.Code)
+	}
+	msg := s.sessions.takeFlash(id)
+	if !strings.HasPrefix(msg, "✗") || !strings.Contains(msg, "active deployment") {
+		t.Fatalf("the flash did not carry the control plane's reason: %q", msg)
+	}
+}
+
+// Every template that uses the layout has to be registered in `pages`, or it is
+// a runtime "no such template" and a blank page. A list is exactly the kind of
+// thing that goes stale, so this walks the embedded files instead of trusting
+// it — confirm.html was missing when actions first landed.
+func TestEveryLayoutTemplateIsRegistered(t *testing.T) {
+	parsed, err := parsePages()
+	if err != nil {
+		t.Fatalf("parsePages: %v", err)
+	}
+	files, err := templates.ReadDir("templates")
+	if err != nil {
+		t.Fatalf("read templates: %v", err)
+	}
+	for _, f := range files {
+		name := f.Name()
+		if name == "layout.html" {
+			continue
+		}
+		if _, ok := parsed[name]; !ok {
+			t.Errorf("%s exists but is not in `pages`, so rendering it is a blank page", name)
+		}
+	}
+}
