@@ -19,8 +19,14 @@ services:
     ports:
       # 80 is needed for the ACME HTTP challenge in production. Loopback-bound
       # here because the dev box is not the internet.
+      #
+      # Both address families: a `.localhost` name resolves to ::1 first, so
+      # publishing only 127.0.0.1 leaves a browser with connection refused while
+      # curl quietly falls back to IPv4 and reports success.
       - "127.0.0.1:8443:443"
+      - "[::1]:8443:443"
       - "127.0.0.1:8480:80"
+      - "[::1]:8480:80"
 
 volumes:
   caddy-data:

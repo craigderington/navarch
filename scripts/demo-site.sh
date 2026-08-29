@@ -19,7 +19,14 @@ GW=${GW:-http://localhost:8095}
 COMPOSE=${COMPOSE:-examples/site/compose.yaml}
 NAV=${NAV:-./bin/navarch}
 SUFFIX=${SUFFIX:-$RANDOM}
-HOST=${HOST:-navarch-$SUFFIX.example.com}
+# A .localhost name rather than .example.com: RFC 6761 reserves the whole
+# .localhost tree for loopback and every mainstream resolver honours it, so the
+# hostname Traefik routes on is one a browser on this machine can already reach.
+# The demo is worth looking at, and "edit /etc/hosts first" is how a demo stops
+# being looked at. Still suffixed per run — environments linger (there is no
+# delete endpoint) and `environments.hostname` is uniquely indexed, so a fixed
+# name would 409 on the second run.
+HOST=${HOST:-navarch-$SUFFIX.localhost}
 export NAVARCH_URL=$API NAVARCH_TOKEN=$API_TOKEN
 
 step() { printf '\n\033[36m▸ %s\033[0m\n' "$1"; }
@@ -141,6 +148,7 @@ done
 [ "$worst" -lt 2 ] || fail "$worst consecutive requests failed — the flip dropped traffic"
 note "$((total - misses))/$total served, longest gap ${worst} request(s)"
 
+GW_PORT=${GW##*:}
 printf '\n\033[32mThe site is live on the platform it describes.\033[0m\n'
-printf '  \033[90mcurl -H "Host: %s" %s\033[0m\n' "$HOST" "$GW"
-printf '  \033[90mor add to /etc/hosts:  127.0.0.1  %s   then open http://%s:8095\033[0m\n' "$HOST" "$HOST"
+printf '  \033[1mhttp://%s:%s\033[0m\n' "$HOST" "$GW_PORT"
+printf '  \033[90m(.localhost resolves to loopback; nothing to add to /etc/hosts)\033[0m\n'

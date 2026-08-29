@@ -34,7 +34,13 @@ env8_of() { fleet_psql "SELECT replace(e.id::text,'-','') FROM deployments d
                           JOIN environments e ON e.id = d.environment_id
                          WHERE d.id = '$1'" | cut -c1-8; }
 
-GW_PORT=$(docker compose config --format json | jq -r '.services.traefik.ports[] | select(.target==80) | .published')
+# `first(...)` because the same container port is published once per address
+# family — 127.0.0.1 and [::1] — and without it this yields two identical lines,
+# making GW "http://localhost:8095\n8095". Every request then fails and the
+# demo reports whatever it was checking as broken, which is exactly the wrong
+# place to go looking.
+GW_PORT=$(docker compose config --format json |
+    jq -r 'first(.services.traefik.ports[] | select(.target==80) | .published)')
 
 step "The fleet"
 mapfile -t NODES < <(fleet_ready_nodes)

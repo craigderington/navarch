@@ -158,8 +158,18 @@ services:
       controlplane:
         condition: service_healthy
     ports:
-      # Loopback only. The dashboard/API is disabled; do not publish :8080.
+      # Loopback only, on BOTH families. The dashboard/API is disabled; do not
+      # publish :8080.
+      #
+      # The IPv6 line is not redundant. A `.localhost` name resolves to ::1
+      # first on a modern resolver, so a browser opening
+      # http://navarch.localhost:8095 connects over IPv6 and gets connection
+      # refused if only 127.0.0.1 is published. curl hides this — it falls back
+      # to IPv4 and reports 200 — which makes it exactly the kind of bug that
+      # passes every check here and fails for the person actually looking at
+      # the page.
       - "127.0.0.1:8095:80"
+      - "[::1]:8095:80"
     labels:
       cc.role: ingress-router
     volumes:

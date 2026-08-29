@@ -58,7 +58,13 @@ wait_state() {
 # Traefik's host port lives in the dev stack's own compose file; ask `docker
 # compose config` to resolve it (it applies the same defaulting compose
 # itself would) rather than duplicating that logic by hardcoding 8095 here.
-GW_PORT=$(docker compose config --format json | jq -r '.services.traefik.ports[] | select(.target==80) | .published')
+# `first(...)` because the same container port is published once per address
+# family — 127.0.0.1 and [::1] — and without it this yields two identical lines,
+# making GW "http://localhost:8095\n8095". Every request then fails and the
+# demo reports whatever it was checking as broken, which is exactly the wrong
+# place to go looking.
+GW_PORT=$(docker compose config --format json |
+    jq -r 'first(.services.traefik.ports[] | select(.target==80) | .published)')
 [ -n "$GW_PORT" ] || { echo "could not read traefik's published port from compose.yaml" >&2; exit 1; }
 GW=${GW:-http://localhost:$GW_PORT}
 
