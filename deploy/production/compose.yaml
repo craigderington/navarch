@@ -14,10 +14,9 @@
 #   3. The agent drives the host's own Docker daemon over a mounted socket.
 #      The dev stack uses Docker-in-Docker to fake a fleet; a real single-node
 #      install has one real daemon and should use it.
-#   4. Only two ports face the world, and they belong to different things.
-#      Traefik holds 80 — that is your tenants' ingress. The API and the console
-#      publish nothing at all; deploy/production/tls.yaml puts Caddy on 443 in
-#      front of both, using the ACME challenge that does not need port 80.
+#   4. One component faces the world: Traefik, on 80 and 443, serving your
+#      tenants' stacks, the console and the API, with a certificate per
+#      hostname. Everything else publishes nothing.
 #
 # Bring it up:
 #   cp deploy/production/env.example .env && $EDITOR .env
@@ -82,6 +81,11 @@ services:
       COMPOSECTL_BOOTSTRAP_OPERATOR_EMAIL: ${NAVARCH_OPERATOR_EMAIL:?set NAVARCH_OPERATOR_EMAIL in .env}
       COMPOSECTL_ROUTER_DIR: /dynamic
       COMPOSECTL_PREVIEW_DOMAIN: ${NAVARCH_PREVIEW_DOMAIN:-preview.localhost}
+      # Every generated tenant route becomes an HTTPS router using this ACME
+      # resolver. Leave it unset and routes stay plain HTTP, which is correct
+      # for any install whose hostnames do not resolve publicly — ACME cannot
+      # succeed there, and failing on every route is worse than no TLS.
+      COMPOSECTL_ROUTER_CERT_RESOLVER: ${NAVARCH_CERT_RESOLVER:-le}
     volumes:
       - traefik-dynamic:/dynamic
     healthcheck:
@@ -89,13 +93,29 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
-    # Deliberately no `ports:`. deploy/production/tls.yaml fronts it on 443.
+    # Deliberately no `ports:`. Traefik fronts it on 443.
 
+  # The only thing that faces the world, and it serves everything: your
+  # tenants' stacks, the console and the API.
+  #
+  # One ingress rather than a proxy in front of another, because Traefik is
+  # already the component that knows every hostname the platform serves. That
+  # makes it the right place for certificates: it issues for exactly the
+  # hostnames it has routers for, so the route list *is* the authorization. A
+  # separate proxy would need telling which hostnames are legitimate, kept in
+  # step with the route list, and wrong in the dangerous direction whenever it
+  # drifted.
   traefik:
     image: traefik:v3.3
     restart: unless-stopped
     command:
       - "--entryPoints.web.address=:80"
+      # Plain HTTP redirects to HTTPS. Verified against traefik:v3.3 that this
+      # redirect does NOT swallow /.well-known/acme-challenge/ — the challenge
+      # is served before routing, so certificates still issue.
+      - "--entryPoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entryPoints.web.http.redirections.entryPoint.scheme=https"
+      - "--entryPoints.websecure.address=:443"
       - "--providers.file.directory=/dynamic"
       - "--providers.file.watch=true"
       # Traefik batches provider updates at 2s by default, which is how long a
@@ -103,21 +123,36 @@ services:
       # superseded. The control plane's teardown grace covers that window; this
       # shortens it. See CLAUDE.md's teardown-grace invariant.
       - "--providers.providersThrottleDuration=100ms"
+      # Per-hostname certificates over the HTTP-01 challenge, which needs port
+      # 80 — the port this already owns. No wildcard, and therefore no DNS
+      # provider credential sitting in the ingress; a customer pointing their
+      # own domain here gets a certificate for it like any other route.
+      - "--certificatesresolvers.le.acme.email=${NAVARCH_ACME_EMAIL:?set NAVARCH_ACME_EMAIL in .env}"
+      - "--certificatesresolvers.le.acme.storage=/acme/acme.json"
+      - "--certificatesresolvers.le.acme.httpchallenge=true"
+      - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
       - "--log.level=INFO"
+    environment:
+      # Read by the templated platform.yml below.
+      NAVARCH_DOMAIN: ${NAVARCH_DOMAIN:?set NAVARCH_DOMAIN in .env}
     ports:
-      # This is the tenant ingress — the port your deployed stacks are served
-      # on. It is the one thing here that faces the world.
       - "80:80"
+      - "443:443"
     volumes:
       - traefik-dynamic:/dynamic:ro
+      # The static routes for the console and the API, alongside the generated
+      # tenant routes. Traefik reads the whole directory.
+      - ./deploy/production/dynamic/platform.yml:/dynamic/platform.yml:ro
+      # Issued certificates. Back this up with pgdata: losing it means every
+      # hostname re-issues, and Let's Encrypt rate limits will notice.
+      - acme:/acme
 
   # The browser console. A separate service because it is optional: an install
   # that only ever uses the CLI simply does not run it, and the API is not
   # carrying HTML rendering for anybody else.
   #
   # No published port, for the same reason the control plane has none — it
-  # holds operator sessions and must sit behind TLS. deploy/production/tls.yaml
-  # terminates for it.
+  # holds operator sessions and must sit behind TLS. Traefik terminates for it.
   console:
     image: ${NAVARCH_WEB_IMAGE:-ghcr.io/craigderington/navarch/web}:${NAVARCH_VERSION}
     restart: unless-stopped
@@ -161,3 +196,4 @@ volumes:
   pgdata:
   traefik-dynamic:
   age-identity:
+  acme:

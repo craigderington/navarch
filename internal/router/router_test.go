@@ -82,3 +82,76 @@ func TestSyncRejectsUnsafeTarget(t *testing.T) {
 		t.Fatal("expected an unsafe target to be rejected")
 	}
 }
+
+// With no resolver the generated config must be byte-identical to what it
+// always was. Every existing install runs this way, and a stray `tls:` key
+// would fail the whole file — Traefik refuses an element with no children, the
+// same trap the empty-config bug fell into.
+func TestNoCertResolverEmitsNoTLSKey(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir)
+	if err := r.Sync([]Route{{Key: "abc12345", Hostname: "app.example.com", Target: "10.0.0.1", Port: 32768}}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	body := readConfig(t, dir)
+	if strings.Contains(body, "tls") {
+		t.Fatalf("plaintext config must not mention tls:\n%s", body)
+	}
+	if !strings.Contains(body, "- web") || strings.Contains(body, "websecure") {
+		t.Fatalf("plaintext config must use only the web entrypoint:\n%s", body)
+	}
+}
+
+// With one, every route is a TLS router naming the resolver.
+//
+// websecure only. This test first asserted "both entrypoints", on the belief
+// that port 80 had to stay routable for the ACME challenge. Running it against
+// traefik:v3.3 showed otherwise: a router with `tls` set matches TLS
+// connections only, so listing `web` changed nothing, and the challenge is
+// served by Traefik itself before any router or redirect sees the request.
+// Sending plain HTTP somewhere useful is a static-config redirect, not a
+// property of this file.
+func TestCertResolverMakesEveryRouteTLSOnly(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir, WithCertResolver("le"))
+	if err := r.Sync([]Route{
+		{Key: "abc12345", Hostname: "app.example.com", Target: "10.0.0.1", Port: 32768},
+		{Key: "def67890", Hostname: "shop.acme.com", Target: "10.0.0.2", Port: 32769},
+	}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	body := readConfig(t, dir)
+	if strings.Count(body, "certResolver: le") != 2 {
+		t.Fatalf("expected both routes to name the resolver:\n%s", body)
+	}
+	if strings.Count(body, "- websecure") != 2 {
+		t.Fatalf("expected both routes on websecure:\n%s", body)
+	}
+	if strings.Contains(body, "- web\n") {
+		t.Fatalf("a tls router must not also claim the plain entrypoint:\n%s", body)
+	}
+}
+
+// An empty route set still writes the comment-only file, resolver or not. This
+// is the case the empty-config bug was about: `http: {}` or `routers: {}` fails
+// the entire file, Traefik keeps the last config it accepted, and a torn-down
+// environment goes on being served.
+func TestEmptyStaysCommentOnlyWithAResolver(t *testing.T) {
+	dir := t.TempDir()
+	if err := New(dir, WithCertResolver("le")).Sync(nil); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	body := readConfig(t, dir)
+	if strings.Contains(body, "http:") || strings.Contains(body, "tls") {
+		t.Fatalf("an empty config must carry no sections at all:\n%s", body)
+	}
+}
+
+func readConfig(t *testing.T, dir string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "composectl.yml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	return string(b)
+}

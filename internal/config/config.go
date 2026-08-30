@@ -84,6 +84,12 @@ type Config struct {
 	// same reasoning: compose and the demos share a constant rather than
 	// scraping a generated one out of a log.
 	BootstrapJoinToken string
+	// RouterCertResolver names a Traefik ACME resolver. Set it and every tenant
+	// route is served over HTTPS with a certificate Traefik obtains for that
+	// hostname. Empty means plain HTTP, which is the dev stack and any install
+	// whose hostnames do not resolve publicly — ACME cannot succeed there, and
+	// a failing certificate request on every route is worse than no TLS.
+	RouterCertResolver string
 }
 
 func Load() (*Config, error) {
@@ -100,6 +106,7 @@ func Load() (*Config, error) {
 		BootstrapOperatorToken: os.Getenv("COMPOSECTL_BOOTSTRAP_OPERATOR_TOKEN"),
 		RequireJoinToken:       os.Getenv("COMPOSECTL_REQUIRE_JOIN_TOKEN") == "1",
 		BootstrapJoinToken:     os.Getenv("COMPOSECTL_BOOTSTRAP_JOIN_TOKEN"),
+		RouterCertResolver:     os.Getenv("COMPOSECTL_ROUTER_CERT_RESOLVER"),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("COMPOSECTL_DATABASE_URL is required")

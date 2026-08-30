@@ -1,0 +1,37 @@
+# The platform's own two routes: the console and the API.
+#
+# Hand-written and static, unlike composectl.yml beside it, which the control
+# plane regenerates every tick. Traefik's file provider reads the whole
+# directory, so the two coexist without either knowing about the other — which
+# is the point: the control plane must never have to write a route it did not
+# derive from a live deployment.
+#
+# `{{env "NAVARCH_DOMAIN"}}` is expanded by Traefik itself: the file provider
+# treats dynamic files as Go templates.
+http:
+  routers:
+    navarch-console:
+      rule: Host(`{{env "NAVARCH_DOMAIN"}}`)
+      entryPoints:
+        - websecure
+      service: navarch-console
+      tls:
+        certResolver: le
+
+    navarch-api:
+      rule: Host(`api.{{env "NAVARCH_DOMAIN"}}`)
+      entryPoints:
+        - websecure
+      service: navarch-api
+      tls:
+        certResolver: le
+
+  services:
+    navarch-console:
+      loadBalancer:
+        servers:
+          - url: http://console:8418
+    navarch-api:
+      loadBalancer:
+        servers:
+          - url: http://controlplane:8417

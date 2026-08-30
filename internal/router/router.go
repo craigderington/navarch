@@ -27,9 +27,40 @@ type Route struct {
 	Port   int
 }
 
-type Router struct{ dir string }
+type Router struct {
+	dir string
+	// certResolver names a Traefik ACME resolver. Empty means plain HTTP only,
+	// which is the dev stack and any install with no public DNS.
+	certResolver string
+}
 
-func New(dir string) *Router { return &Router{dir: dir} }
+type Option func(*Router)
+
+// WithCertResolver makes every generated route serve HTTPS with a certificate
+// obtained by the named Traefik ACME resolver.
+//
+// Traefik is the right place for tenant certificates rather than a proxy in
+// front of it, for one reason that decides it: it already holds the router for
+// every hostname the platform serves, so it issues certificates for exactly
+// those and nothing else. A proxy in front would need to be told separately
+// which hostnames are legitimate — an endpoint to ask, kept in step with the
+// route list, and wrong in the dangerous direction whenever it drifts. Here the
+// route list *is* the authorization.
+//
+// It also means a customer's own domain works: they point a record at this
+// host, the control plane routes the hostname, and the certificate follows. No
+// wildcard, and so no DNS-provider credential sitting in the ingress.
+func WithCertResolver(name string) Option {
+	return func(r *Router) { r.certResolver = name }
+}
+
+func New(dir string, opts ...Option) *Router {
+	r := &Router{dir: dir}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
+}
 
 // hostNamePattern matches a lowercase DNS name. Same alphabet as store
 // hostname validation — Traefik Host() rules are interpolated from this.
@@ -54,6 +85,14 @@ type traefikRouter struct {
 	Rule        string   `yaml:"rule"`
 	EntryPoints []string `yaml:"entryPoints"`
 	Service     string   `yaml:"service"`
+	// omitempty matters: Traefik refuses an element with no children, so an
+	// empty `tls: {}` fails the whole file the way `routers: {}` does. The
+	// plaintext case must emit no key at all.
+	TLS *traefikTLS `yaml:"tls,omitempty"`
+}
+
+type traefikTLS struct {
+	CertResolver string `yaml:"certResolver"`
 }
 
 type traefikService struct {
@@ -98,11 +137,27 @@ func (r *Router) Sync(routes []Route) error {
 		}
 		key := "r-" + rt.Key
 		svc := "s-" + rt.Key
-		cfg.HTTP.Routers[key] = traefikRouter{
+		router := traefikRouter{
 			Rule:        fmt.Sprintf("Host(`%s`)", rt.Hostname),
 			EntryPoints: []string{"web"},
 			Service:     svc,
 		}
+		if r.certResolver != "" {
+			// websecure only, and deliberately not "web" as well. A router with
+			// `tls` set matches TLS connections *only*, so listing the plain
+			// entrypoint achieves nothing — verified against traefik:v3.3, where
+			// both forms behave identically. Sending HTTP somewhere useful is
+			// the static config's job:
+			//
+			//   --entryPoints.web.http.redirections.entryPoint.to=websecure
+			//
+			// which redirects before routing and, checked on the same Traefik,
+			// leaves /.well-known/acme-challenge/ alone — so HTTP-01 still
+			// completes and the certificate arrives.
+			router.EntryPoints = []string{"websecure"}
+			router.TLS = &traefikTLS{CertResolver: r.certResolver}
+		}
+		cfg.HTTP.Routers[key] = router
 		cfg.HTTP.Services[svc] = traefikService{
 			LoadBalancer: traefikLB{Servers: []traefikServer{
 				{URL: fmt.Sprintf("http://%s:%d", rt.Target, rt.Port)},

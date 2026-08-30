@@ -134,8 +134,12 @@ func run(log *slog.Logger) error {
 	// (up to healthy + auto-promote); only external traffic steering is off.
 	var rtr rollout.RouterSync
 	if cfg.RouterDir != "" {
-		rtr = router.New(cfg.RouterDir)
-		log.Info("router enabled", "dir", cfg.RouterDir)
+		var ropts []router.Option
+		if cfg.RouterCertResolver != "" {
+			ropts = append(ropts, router.WithCertResolver(cfg.RouterCertResolver))
+		}
+		rtr = router.New(cfg.RouterDir, ropts...)
+		log.Info("router enabled", "dir", cfg.RouterDir, "certResolver", cfg.RouterCertResolver)
 	}
 	sched := rollout.NewScheduler(st, log)
 	ctrl := rollout.NewController(st, log, rtr,

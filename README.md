@@ -51,8 +51,9 @@ The platform loop is implemented end to end across a multi-node fleet:
   action behind a confirmation
 - Operator identity with per-organization authorization, and an audit timeline
   that names who did what
-- TLS terminated at a reverse proxy, with both binaries refusing to send
-  credentials over plaintext they cannot contain
+- HTTPS for every deployed environment, with a certificate per hostname issued
+  by the same component that routes it — including customers' own domains
+- Both binaries refuse to send credentials over plaintext they cannot contain
 - Versioned, reproducible release binaries and a single-host deployment whose
   upgrade path is tested rather than described
 - Bring your own infrastructure: enrol a node with a join token scoped to one

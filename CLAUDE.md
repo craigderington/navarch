@@ -759,6 +759,42 @@ occur occasionally during the config swap and are not yet fully explained.
 Counting them is honest; failing on them would make the demo flaky, and a flaky
 demo teaches people to re-run rather than to look.
 
+**Tenant certificates belong to Traefik, not to a proxy in front of it.**
+`COMPOSECTL_ROUTER_CERT_RESOLVER` makes every generated route an HTTPS router
+using a Traefik ACME resolver. Traefik is the right place because **it already
+holds a router for every hostname the platform serves, so it issues for exactly
+those — the route list is the authorization.** Anything in front would need
+telling separately which hostnames are legitimate, kept in step with the route
+list, and wrong in the dangerous direction the moment it drifted. The challenge
+is HTTP-01 on port 80, which Traefik already owns, so there is **no wildcard and
+therefore no DNS-provider credential in the ingress** — and a customer's own
+domain gets a certificate like any other route.
+
+Two details, both established by running `traefik:v3.3` rather than by reading:
+
+- **A router with `tls` set matches TLS connections only.** Listing `web` in its
+  entrypoints does nothing — verified, both forms behave identically. The
+  generated routers are `websecure` only, and sending plain HTTP somewhere
+  useful is a static redirect
+  (`--entryPoints.web.http.redirections.entryPoint.to=websecure`), not a
+  property of the generated file. The first version of this asserted the
+  opposite in a unit test, on a belief that was wrong.
+- **That redirect does not swallow `/.well-known/acme-challenge/`.** Traefik
+  serves the challenge before routing, so issuance still completes. Checked,
+  because "the redirect ate the challenge and no certificate ever arrives" is
+  silent and would only show up as expiry months later.
+
+`tls` is emitted through a pointer with `omitempty` for the reason the empty
+config has its own invariant: Traefik refuses an element with no children, so a
+stray `tls: {}` fails the whole file exactly as `routers: {}` does.
+
+**Production runs one ingress.** Traefik holds 80 and 443 and serves tenants,
+the console and the API. The platform's own two routes are static, in
+`deploy/production/dynamic/platform.yml`, beside the file the control plane
+regenerates every tick — the file provider reads a directory, so neither knows
+about the other. That separation is load-bearing: **the control plane must never
+write a route it did not derive from a live deployment.**
+
 **The control plane speaks plaintext HTTP, and that is not an oversight — TLS
 terminates in front of it.** It does not know whether it is behind a proxy, and
 a process listening on loopback has no need of a certificate. `deploy/tls/`

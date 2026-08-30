@@ -6,33 +6,45 @@ Three things live here:
 |---|---|
 | `Dockerfile` | Builds the control plane, agent and console images. Multi-stage, distroless, static. |
 | `production/` | A single-host install: Postgres, migrations, API, router, console, one agent. |
-| `production/tls.yaml` | Caddy on 443 in front of the console and the API. |
+| `production/dynamic/` | Static Traefik routes for the console and the API. |
 | `tls/` | The dev-stack proxy `make demo-tls` exercises. |
 
 ### What faces the world, and what does not
 
-Two ports, and they belong to different things:
+**One component: Traefik, on 80 and 443.** It serves your tenants' stacks, the
+console and the API, with a certificate per hostname. The control plane,
+the console and Postgres publish nothing at all.
 
-| Port | Served by | For |
-|---|---|---|
-| 80 | Traefik | **Your tenants' stacks.** Hostnames the control plane routes dynamically. |
-| 443 | Caddy | The console and the API. |
+One ingress rather than a proxy in front of another, because Traefik is already
+the component that knows every hostname the platform serves — which makes it the
+right place for certificates. **It issues for exactly the hostnames it has
+routers for, so the route list is the authorization.** A separate proxy would
+need telling which hostnames are legitimate, kept in step with the route list,
+and wrong in the dangerous direction the moment it drifted.
 
-The control plane and the console publish **nothing**. Postgres publishes
-nothing. That is why Caddy takes 443 only and gets its certificates over the
-TLS-ALPN-01 challenge, which runs on 443: HTTP-01 needs port 80, and port 80 is
-your tenant ingress. A proxy that took it would be an outage that looks like a
-platform bug.
+Certificates come from the ACME HTTP-01 challenge on port 80, which Traefik
+already owns. No wildcard, so **no DNS-provider credential sits in the
+ingress** — and a customer pointing their own domain at this host gets a
+certificate for it like any other route.
 
-The consequence to know: **plain `http://` to the console or the API does not
-redirect.** Caddy has no port 80 to redirect from, so the request reaches
-Traefik, which has no route for that hostname, and gets a 404. Use `https://`.
+Plain HTTP redirects to HTTPS. That redirect does **not** swallow
+`/.well-known/acme-challenge/` — checked against `traefik:v3.3`, where the
+challenge is served before routing, so issuance still completes.
 
-**Tenant hostnames are served over HTTP today.** Traefik serves them on 80 with
-no certificate. Giving each deployed environment TLS needs either a wildcard
-certificate (a DNS-01 challenge, so a DNS provider credential) or Caddy's
-on-demand issuance in front of Traefik. Neither is built. If your tenants need
-HTTPS, that is the next piece of work, not a setting.
+| Name | Serves |
+|---|---|
+| `navarch.example.com` | the console — what a person opens |
+| `api.navarch.example.com` | the API — agents, the CLI, CI |
+| anything else you route | your deployed environments |
+
+The platform's own two routes are static, in
+`deploy/production/dynamic/platform.yml`, alongside the tenant routes the
+control plane regenerates every tick. Traefik reads the whole directory, so
+neither file knows about the other — which is the point: the control plane must
+never write a route it did not derive from a live deployment.
+
+**Back up the `acme` volume with `pgdata`.** Losing it re-issues every hostname,
+and Let's Encrypt's rate limits will notice.
 
 ---
 
@@ -88,31 +100,32 @@ anything is confusing later. Authorization refuses with 404 rather than 403 so
 that one tenant cannot probe another's ids, which means "not found" and "not
 yours" look identical — `whoami` is how you tell them apart.
 
-### Put TLS in front of it
+### TLS
 
 The control plane speaks plaintext HTTP and does not know whether it is behind a
 proxy — correct for a process on a private network, wrong the moment it is
 reachable from anywhere else. An operator token is a bearer credential and a
 node token pulls that node's age ciphertext.
 
-Point two names at the host first, or the first certificate request fails and
-Caddy backs off:
+DNS must resolve **before** you start it: ACME verifies by connecting to the
+name, so a certificate request for a hostname that does not point here fails and
+Traefik backs off.
 
 ```
 A  navarch.example.com      -> your static IP    # the console
 A  api.navarch.example.com  -> your static IP    # the API
-```
-
-Then bring it up with the TLS overlay:
-
-```bash
-docker compose -f deploy/production/compose.yaml \
-               -f deploy/production/tls.yaml up -d
+A  *.preview.example.com    -> your static IP    # preview environments
 ```
 
 Two names because they are two audiences: a person opens the console, and agents
 and CI talk to the API. Neither has to know the other's routes, and either can
-move without breaking the other. The CLI enforces the other half: it refuses to send a token
+move without breaking the other.
+
+Tenant hostnames need DNS too — each environment's hostname must resolve here
+before it will get a certificate. A wildcard covers the ones you generate;
+a customer's own domain is theirs to point.
+
+The CLI enforces the other half: it refuses to send a token
 over plaintext HTTP to anything that is not loopback or a container network,
 unless `NAVARCH_INSECURE=1` — which warns on every single invocation.
 
