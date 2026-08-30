@@ -4,9 +4,35 @@ Three things live here:
 
 | Path | What it is |
 |---|---|
-| `Dockerfile` | Builds the control plane and agent images. Multi-stage, distroless, static. |
-| `production/` | A single-host control plane: Postgres, migrations, API, router, one agent. |
-| `tls/` | The reverse proxy that terminates TLS in front of the API. |
+| `Dockerfile` | Builds the control plane, agent and console images. Multi-stage, distroless, static. |
+| `production/` | A single-host install: Postgres, migrations, API, router, console, one agent. |
+| `production/tls.yaml` | Caddy on 443 in front of the console and the API. |
+| `tls/` | The dev-stack proxy `make demo-tls` exercises. |
+
+### What faces the world, and what does not
+
+Two ports, and they belong to different things:
+
+| Port | Served by | For |
+|---|---|---|
+| 80 | Traefik | **Your tenants' stacks.** Hostnames the control plane routes dynamically. |
+| 443 | Caddy | The console and the API. |
+
+The control plane and the console publish **nothing**. Postgres publishes
+nothing. That is why Caddy takes 443 only and gets its certificates over the
+TLS-ALPN-01 challenge, which runs on 443: HTTP-01 needs port 80, and port 80 is
+your tenant ingress. A proxy that took it would be an outage that looks like a
+platform bug.
+
+The consequence to know: **plain `http://` to the console or the API does not
+redirect.** Caddy has no port 80 to redirect from, so the request reaches
+Traefik, which has no route for that hostname, and gets a 404. Use `https://`.
+
+**Tenant hostnames are served over HTTP today.** Traefik serves them on 80 with
+no certificate. Giving each deployed environment TLS needs either a wildcard
+certificate (a DNS-01 challenge, so a DNS provider credential) or Caddy's
+on-demand issuance in front of Traefik. Neither is built. If your tenants need
+HTTPS, that is the next piece of work, not a setting.
 
 ---
 
@@ -32,9 +58,9 @@ without echo, or read from stdin — because argv lands in shell history, `ps`,
 and every exec audit log on the box:
 
 ```bash
-navarch login --url https://navarch.example.com
+navarch login --url https://api.navarch.example.com
 Operator token:
-logged in to https://navarch.example.com as you@example.com
+logged in to https://api.navarch.example.com as you@example.com
 ```
 
 It is verified against the control plane before it is written, so a config file
@@ -64,18 +90,29 @@ yours" look identical — `whoami` is how you tell them apart.
 
 ### Put TLS in front of it
 
-`production/compose.yaml` publishes **no API port at all**. The control plane
-speaks plaintext HTTP and does not know whether it is behind a proxy; that is
-correct for a process on a private network and wrong the moment it is reachable
-from anywhere else. An operator token is a bearer credential and a node token
-pulls that node's age ciphertext.
+The control plane speaks plaintext HTTP and does not know whether it is behind a
+proxy — correct for a process on a private network, wrong the moment it is
+reachable from anywhere else. An operator token is a bearer credential and a
+node token pulls that node's age ciphertext.
 
-```bash
-docker compose -f deploy/production/compose.yaml -f deploy/tls/compose.yaml up -d
+Point two names at the host first, or the first certificate request fails and
+Caddy backs off:
+
+```
+A  navarch.example.com      -> your static IP    # the console
+A  api.navarch.example.com  -> your static IP    # the API
 ```
 
-Edit `deploy/tls/Caddyfile` to your hostname first; Caddy obtains a certificate
-on first request. The CLI enforces the other half: it refuses to send a token
+Then bring it up with the TLS overlay:
+
+```bash
+docker compose -f deploy/production/compose.yaml \
+               -f deploy/production/tls.yaml up -d
+```
+
+Two names because they are two audiences: a person opens the console, and agents
+and CI talk to the API. Neither has to know the other's routes, and either can
+move without breaking the other. The CLI enforces the other half: it refuses to send a token
 over plaintext HTTP to anything that is not loopback or a container network,
 unless `NAVARCH_INSECURE=1` — which warns on every single invocation.
 
@@ -149,7 +186,7 @@ services:
     image: ghcr.io/craigderington/navarch/agent:1.0.0
     restart: unless-stopped
     environment:
-      COMPOSECTL_CONTROLPLANE_URL: https://navarch.example.com
+      COMPOSECTL_CONTROLPLANE_URL: https://api.navarch.example.com
       COMPOSECTL_ORG: dev
       COMPOSECTL_NODE_HOSTNAME: node-2
       COMPOSECTL_ADVERTISE_ADDR: 10.0.1.12   # reachable from the router's host
@@ -196,7 +233,7 @@ services:
   agent:
     image: ghcr.io/craigderington/navarch/agent:1.0.0
     environment:
-      COMPOSECTL_CONTROLPLANE_URL: https://navarch.example.com
+      COMPOSECTL_CONTROLPLANE_URL: https://api.navarch.example.com
       COMPOSECTL_AGENT_TOKEN: <the join token>   # no org: the token names it
       COMPOSECTL_NODE_HOSTNAME: acme-1
       COMPOSECTL_ADVERTISE_ADDR: 10.0.1.12       # reachable from THEIR router

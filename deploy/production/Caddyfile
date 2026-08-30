@@ -1,0 +1,42 @@
+# TLS for the platform's own two surfaces: the console and the API.
+#
+# Port 80 belongs to Traefik, which serves your deployed stacks. Caddy therefore
+# takes 443 only and obtains certificates over TLS-ALPN-01, the ACME challenge
+# that runs on 443 — the HTTP-01 challenge needs port 80 and would fight the
+# tenant ingress for it. This is why `acme_dns` is not required and why nothing
+# here publishes 80.
+#
+# Two names, because they are two audiences: a person opens the console, and
+# agents and CI talk to the API. Splitting them means neither has to know the
+# other's route layout, and either can move later without breaking the other.
+
+{
+	# The admin API is unauthenticated and binds localhost by default, which is
+	# one container-network hop from every tenant on this host.
+	admin off
+	# Caddy would otherwise stand up an HTTP->HTTPS redirect on port 80, which it
+	# does not have — Traefik does. Left on, it advertises a redirect that never
+	# answers; a plain http:// request to these names reaches Traefik instead and
+	# gets a 404, because they are not tenant hostnames. Turning it off is the
+	# honest configuration. Use https:// for the console and the API.
+	auto_https disable_redirects
+	acme_ca https://acme-v02.api.letsencrypt.org/directory
+}
+
+# The console. The bare domain, because it is what a human types.
+{$NAVARCH_DOMAIN} {
+	reverse_proxy console:8418
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
+
+# The API. Agents, the CLI and CI point here.
+api.{$NAVARCH_DOMAIN} {
+	reverse_proxy controlplane:8417
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}

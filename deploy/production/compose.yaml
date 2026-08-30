@@ -14,8 +14,10 @@
 #   3. The agent drives the host's own Docker daemon over a mounted socket.
 #      The dev stack uses Docker-in-Docker to fake a fleet; a real single-node
 #      install has one real daemon and should use it.
-#   4. Nothing but the TLS proxy is published. The API listens on the compose
-#      network only — see deploy/tls/ for terminating TLS in front of it.
+#   4. Only two ports face the world, and they belong to different things.
+#      Traefik holds 80 — that is your tenants' ingress. The API and the console
+#      publish nothing at all; deploy/production/tls.yaml puts Caddy on 443 in
+#      front of both, using the ACME challenge that does not need port 80.
 #
 # Bring it up:
 #   cp deploy/production/env.example .env && $EDITOR .env
@@ -87,7 +89,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
-    # Deliberately no `ports:`. Put deploy/tls/ in front of it.
+    # Deliberately no `ports:`. deploy/production/tls.yaml fronts it on 443.
 
   traefik:
     image: traefik:v3.3
@@ -109,6 +111,25 @@ services:
     volumes:
       - traefik-dynamic:/dynamic:ro
 
+  # The browser console. A separate service because it is optional: an install
+  # that only ever uses the CLI simply does not run it, and the API is not
+  # carrying HTML rendering for anybody else.
+  #
+  # No published port, for the same reason the control plane has none — it
+  # holds operator sessions and must sit behind TLS. deploy/production/tls.yaml
+  # terminates for it.
+  console:
+    image: ${NAVARCH_WEB_IMAGE:-ghcr.io/craigderington/navarch/web}:${NAVARCH_VERSION}
+    restart: unless-stopped
+    depends_on:
+      controlplane:
+        condition: service_healthy
+    environment:
+      # Reached over the compose network, which the transport guard treats as
+      # contained — a single-label name resolves nowhere else.
+      NAVARCH_URL: http://controlplane:8417
+      NAVARCH_WEB_ADDR: 0.0.0.0:8418
+
   agent:
     image: ${NAVARCH_AGENT_IMAGE:-ghcr.io/craigderington/navarch/agent}:${NAVARCH_VERSION}
     restart: unless-stopped
@@ -125,7 +146,7 @@ services:
       COMPOSECTL_ADVERTISE_ADDR: ${NAVARCH_ADVERTISE_ADDR:-172.17.0.1}
       COMPOSECTL_AGENT_TOKEN: ${NAVARCH_SERVICE_TOKEN}
       COMPOSECTL_NODE_LABELS: ingress=true
-      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-4096}
+      COMPOSECTL_NODE_MEMORY_MB: ${NAVARCH_NODE_MEMORY_MB:-3072}
     volumes:
       # The agent drives this host's Docker daemon. This is the one genuinely
       # privileged thing in the file: the socket is root-equivalent, which is
