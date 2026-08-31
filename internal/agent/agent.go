@@ -42,6 +42,22 @@ type Config struct {
 	// running beside it — the bring-your-own-infrastructure shape, where the
 	// customer owns ingress and the control plane never connects to them.
 	RouterDir string
+	// RouterCertResolver names an ACME resolver in the *customer's own* router
+	// static config, and makes every route this agent writes an HTTPS router
+	// using it. Without it a BYO node serves its tenant hostnames over plain
+	// HTTP while the platform's own router has served HTTPS since tenant TLS
+	// landed — the customer-side path is the one place that asymmetry can hide,
+	// because nothing the control plane can see reports it.
+	//
+	// It is read from the agent's environment rather than delivered by the
+	// control plane, and that is the boundary rather than an omission: a
+	// resolver name is Traefik's vocabulary, and GET /v1/nodes/{id}/routes
+	// deliberately answers in the platform's (hostname, target, port) so a
+	// different router stays a change in one package. The name also has to
+	// match a `--certificatesresolvers.<name>.acme...` flag the customer wrote,
+	// which the control plane has never seen. Both live in their compose file,
+	// where one person can see them together.
+	RouterCertResolver string
 	// InsecureTransport records that the control-plane URL is plaintext to
 	// somewhere it could be read, and that COMPOSECTL_INSECURE allowed it
 	// anyway. Kept as a field rather than re-derived so Run warns about exactly
@@ -88,10 +104,9 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	// bring-your-own-infrastructure possible — the control plane's own router
 	// cannot reach a node behind NAT, but a router on the same machine can, and
 	// the agent is already polling with a credential.
-	var rtr *router.Router
-	if cfg.RouterDir != "" {
-		rtr = router.New(cfg.RouterDir)
-		log.Info("router mode enabled", "dir", cfg.RouterDir)
+	rtr := newRouter(cfg)
+	if rtr != nil {
+		log.Info("router mode enabled", "dir", cfg.RouterDir, "certResolver", cfg.RouterCertResolver)
 	}
 
 	ticker := time.NewTicker(cfg.PollInterval)
@@ -114,6 +129,22 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// newRouter builds the router for router mode, or nil when it is off.
+//
+// Split out of Run so the wiring is reachable from a test: Run needs a Docker
+// daemon and a registered node, so the one line that decides whether a BYO
+// customer's tenants get HTTPS would otherwise be exercised by nothing.
+func newRouter(cfg Config) *router.Router {
+	if cfg.RouterDir == "" {
+		return nil
+	}
+	var opts []router.Option
+	if cfg.RouterCertResolver != "" {
+		opts = append(opts, router.WithCertResolver(cfg.RouterCertResolver))
+	}
+	return router.New(cfg.RouterDir, opts...)
 }
 
 type cpClient struct {

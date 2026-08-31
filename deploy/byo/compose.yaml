@@ -82,6 +82,13 @@ services:
       # Router mode. With this set the agent fetches its org's routes each tick
       # and writes the config for the router beside it.
       COMPOSECTL_ROUTER_DIR: /dynamic
+      # COMPOSECTL_ROUTER_CERT_RESOLVER is deliberately unset here, and a real
+      # BYO node should set it. The demo routes .localhost hostnames on a box
+      # with no public DNS, where ACME cannot complete — every route would sit
+      # on a certificate that never arrives, and the demo would be asserting
+      # against Traefik's self-signed fallback rather than against routing. See
+      # deploy/README.md for the shape a customer actually runs.
+
       # Containers publish inside byo-dind's network namespace, so that is the
       # address their router connects to.
       COMPOSECTL_ADVERTISE_ADDR: byo-dind

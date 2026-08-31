@@ -251,6 +251,7 @@ services:
       COMPOSECTL_NODE_HOSTNAME: acme-1
       COMPOSECTL_ADVERTISE_ADDR: 10.0.1.12       # reachable from THEIR router
       COMPOSECTL_ROUTER_DIR: /dynamic            # router mode
+      COMPOSECTL_ROUTER_CERT_RESOLVER: le        # names the resolver below
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - dynamic:/dynamic
@@ -258,12 +259,37 @@ services:
   router:
     image: traefik:v3.3
     command: ["--entryPoints.web.address=:80",
+              "--entryPoints.web.http.redirections.entryPoint.to=websecure",
+              "--entryPoints.web.http.redirections.entryPoint.scheme=https",
+              "--entryPoints.websecure.address=:443",
               "--providers.file.directory=/dynamic",
               "--providers.file.watch=true",
-              "--providers.providersThrottleDuration=100ms"]
-    ports: ["80:80"]
-    volumes: [ "dynamic:/dynamic:ro" ]
+              "--providers.providersThrottleDuration=100ms",
+              "--certificatesresolvers.le.acme.email=them@example.com",
+              "--certificatesresolvers.le.acme.storage=/acme/acme.json",
+              "--certificatesresolvers.le.acme.httpchallenge=true",
+              "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"]
+    ports: ["80:80", "443:443"]
+    volumes: [ "dynamic:/dynamic:ro", "acme:/acme" ]
 ```
+
+**Their router terminates TLS, not ours.** `COMPOSECTL_ROUTER_CERT_RESOLVER`
+does for a customer-side router exactly what it does for the platform's: every
+route the agent writes becomes an HTTPS router using that ACME resolver. Leave
+it unset and their tenant hostnames are served over **plain HTTP** — the
+platform's own router has served HTTPS since tenant TLS landed, and this is the
+one place that asymmetry can hide, because a router we do not run is a router we
+cannot observe.
+
+The name has to match a `--certificatesresolvers.<name>.acme...` flag on their
+Traefik, which is why it is set in their environment rather than delivered by
+the control plane: a resolver name is Traefik's vocabulary, and
+`GET /v1/nodes/{id}/routes` deliberately answers in ours. Both live in their
+compose file, where one person sees them together.
+
+The certificates are theirs too. Their tenant hostnames must resolve to **their**
+box for HTTP-01 to complete, and the `acme` volume wants the same backup
+treatment as ours.
 
 `make demo-byo` runs exactly this shape and asserts the part that matters: the
 platform's own router **cannot** reach that node.

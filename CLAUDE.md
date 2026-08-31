@@ -788,6 +788,26 @@ Two details, both established by running `traefik:v3.3` rather than by reading:
 config has its own invariant: Traefik refuses an element with no children, so a
 stray `tls: {}` fails the whole file exactly as `routers: {}` does.
 
+**A customer-side router terminates TLS on the same switch, set on their side.**
+Tenant TLS landed on the control plane's router and left the BYO path plain
+HTTP — an asymmetry that hides better than most, because a router we do not run
+is a router we cannot observe, and nothing in the control plane's own output
+would ever report it. `COMPOSECTL_ROUTER_CERT_RESOLVER` is therefore read by the
+**agent** too (`newRouter`), doing exactly what it does for the control plane.
+It is read from their environment rather than delivered over
+`GET /v1/nodes/{id}/routes` for the reason that endpoint answers in hostname /
+target / port: a resolver name is Traefik's vocabulary, and putting it on the
+wire would make a different router a change to a published contract instead of a
+change in `internal/router`. The name must also match a
+`--certificatesresolvers.<name>.acme...` flag the customer wrote, which the
+control plane has never seen; both live in their compose file, where one person
+sees them together. `TestRouterModeCarriesTheCertResolverThrough` asserts on the
+**bytes the router writes**, not on the config field — the field being set while
+the option is never passed is precisely the failure that would otherwise ship,
+and it is unobservable from here. `deploy/byo/compose.yaml` leaves it unset on
+purpose: the demo routes `.localhost` with no public DNS, where ACME cannot
+complete and every assertion would land against Traefik's self-signed fallback.
+
 **Production runs one ingress.** Traefik holds 80 and 443 and serves tenants,
 the console and the API. The platform's own two routes are static, in
 `deploy/production/dynamic/platform.yml`, beside the file the control plane

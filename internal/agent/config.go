@@ -37,6 +37,8 @@ func LoadConfig() (Config, error) {
 		NodeTokenFile:   envOr("COMPOSECTL_NODE_TOKEN_FILE", filepath.Join(filepath.Dir(identity), "node.token")),
 		Labels:          parseLabels(os.Getenv("COMPOSECTL_NODE_LABELS")),
 		RouterDir:       os.Getenv("COMPOSECTL_ROUTER_DIR"),
+		// Only meaningful with RouterDir set; harmless otherwise.
+		RouterCertResolver: os.Getenv("COMPOSECTL_ROUTER_CERT_RESOLVER"),
 	}
 	if cfg.ControlPlaneURL == "" {
 		return Config{}, fmt.Errorf("COMPOSECTL_CONTROLPLANE_URL is required")

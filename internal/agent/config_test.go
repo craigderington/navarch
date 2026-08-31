@@ -1,6 +1,13 @@
 package agent
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/craigderington/navarch/internal/router"
+)
 
 func TestLoadConfigRequiresAgentToken(t *testing.T) {
 	t.Setenv("COMPOSECTL_AGENT_TOKEN", "")
@@ -139,5 +146,58 @@ func TestLoadConfigRefusesPlaintextItCannotContain(t *testing.T) {
 	// URL usable.
 	if _, err := load(t, "ftp://controlplane:8417", "1"); err == nil {
 		t.Fatal("the insecure opt-in must not rescue an unsupported scheme")
+	}
+}
+
+// A BYO node's tenants get HTTPS only if the resolver actually reaches the
+// router, so this asserts on the bytes the router writes rather than on the
+// config field — the field being set and the option never being passed is
+// exactly the failure that would otherwise ship silently, and it is invisible
+// from the control plane because a customer's router is not ours to observe.
+func TestRouterModeCarriesTheCertResolverThrough(t *testing.T) {
+	t.Setenv("COMPOSECTL_AGENT_TOKEN", "t")
+	t.Setenv("COMPOSECTL_ROUTER_DIR", t.TempDir())
+	t.Setenv("COMPOSECTL_ROUTER_CERT_RESOLVER", "le")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rtr := newRouter(cfg)
+	if rtr == nil {
+		t.Fatal("router mode is configured but no router was built")
+	}
+	if err := rtr.Sync([]router.Route{{Key: "abc", Hostname: "app.example.com", Target: "10.0.0.4", Port: 32768}}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(filepath.Join(cfg.RouterDir, "composectl.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "certResolver: le") {
+		t.Fatalf("route was written without the cert resolver — a BYO tenant would be served over plain HTTP:\n%s", out)
+	}
+}
+
+// The other half: no resolver configured must emit no tls key at all. Traefik
+// refuses an element with no children, so a stray empty one fails the whole
+// file and the file provider keeps serving the last config it accepted.
+func TestRouterModeWithoutAResolverStaysPlain(t *testing.T) {
+	t.Setenv("COMPOSECTL_AGENT_TOKEN", "t")
+	t.Setenv("COMPOSECTL_ROUTER_DIR", t.TempDir())
+	t.Setenv("COMPOSECTL_ROUTER_CERT_RESOLVER", "")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rtr := newRouter(cfg)
+	if err := rtr.Sync([]router.Route{{Key: "abc", Hostname: "app.example.com", Target: "10.0.0.4", Port: 32768}}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(filepath.Join(cfg.RouterDir, "composectl.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "tls") {
+		t.Fatalf("emitted a tls key with no resolver configured:\n%s", out)
 	}
 }
