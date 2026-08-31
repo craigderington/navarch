@@ -8,10 +8,16 @@
 #
 # `{{env "NAVARCH_DOMAIN"}}` is expanded by Traefik itself: the file provider
 # treats dynamic files as Go templates.
+#
+# Note what is NOT here: the apex. The platform's static routes deliberately
+# claim only subdomains, leaving the bare domain for a stack you deploy — a
+# marketing site, usually. Two routers with the same Host rule is not an error
+# in Traefik, it is an arbitrary winner, so a static route on the apex would
+# quietly fight every tenant route the control plane generated for it.
 http:
   routers:
     navarch-console:
-      rule: Host(`{{env "NAVARCH_DOMAIN"}}`)
+      rule: Host(`console.{{env "NAVARCH_DOMAIN"}}`)
       entryPoints:
         - websecure
       service: navarch-console

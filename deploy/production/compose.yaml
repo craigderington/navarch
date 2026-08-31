@@ -54,7 +54,16 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ./migrations:/migrations:ro
+      # Relative to THIS file's directory, because that is what Compose makes
+      # the project directory when it is selected with a bare
+      # `-f deploy/production/compose.yaml`. Written as `./migrations` these
+      # resolved to deploy/production/migrations, which does not exist — Docker
+      # then creates an empty directory and mounts that, so `migrate up` finds
+      # no migrations, exits 0, and the control plane starts against an empty
+      # schema. A failure that looks like success is the worst shape available,
+      # so the paths are anchored where the documented command actually puts
+      # them.
+      - ../../migrations:/migrations:ro
     command:
       - "-path=/migrations"
       - "-database=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-navarch}?sslmode=disable"
@@ -142,7 +151,7 @@ services:
       - traefik-dynamic:/dynamic:ro
       # The static routes for the console and the API, alongside the generated
       # tenant routes. Traefik reads the whole directory.
-      - ./deploy/production/dynamic/platform.yml:/dynamic/platform.yml:ro
+      - ./dynamic/platform.yml:/dynamic/platform.yml:ro
       # Issued certificates. Back this up with pgdata: losing it means every
       # hostname re-issues, and Let's Encrypt rate limits will notice.
       - acme:/acme

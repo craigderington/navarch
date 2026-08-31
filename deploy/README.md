@@ -33,9 +33,15 @@ challenge is served before routing, so issuance still completes.
 
 | Name | Serves |
 |---|---|
-| `navarch.example.com` | the console — what a person opens |
+| `console.navarch.example.com` | the console — what a person opens |
 | `api.navarch.example.com` | the API — agents, the CLI, CI |
+| `navarch.example.com` | whatever stack you deploy there — see below |
 | anything else you route | your deployed environments |
+
+**The platform claims only subdomains.** The bare domain is left for a stack you
+deploy, because two routers with the same `Host` rule is not an error in Traefik
+— it is an arbitrary winner, so a static route on the apex would quietly fight
+every tenant route generated for it.
 
 The platform's own two routes are static, in
 `deploy/production/dynamic/platform.yml`, alongside the tenant routes the
@@ -112,14 +118,15 @@ name, so a certificate request for a hostname that does not point here fails and
 Traefik backs off.
 
 ```
-A  navarch.example.com      -> your static IP    # the console
-A  api.navarch.example.com  -> your static IP    # the API
-A  *.preview.example.com    -> your static IP    # preview environments
+A  console.navarch.example.com -> your static IP   # the console
+A  api.navarch.example.com     -> your static IP   # the API
+A  navarch.example.com         -> your static IP   # a stack you deploy there
+A  *.preview.example.com       -> your static IP   # preview environments
 ```
 
-Two names because they are two audiences: a person opens the console, and agents
-and CI talk to the API. Neither has to know the other's routes, and either can
-move without breaking the other.
+Separate names because they are separate audiences: a person opens the console,
+agents and CI talk to the API. Neither has to know the other's routes, and
+either can move without breaking the other.
 
 Tenant hostnames need DNS too — each environment's hostname must resolve here
 before it will get a certificate. A wildcard covers the ones you generate;
@@ -128,6 +135,41 @@ a customer's own domain is theirs to point.
 The CLI enforces the other half: it refuses to send a token
 over plaintext HTTP to anything that is not loopback or a container network,
 unless `NAVARCH_INSECURE=1` — which warns on every single invocation.
+
+---
+
+## Deploy something on it
+
+The first thing a fresh install should do is run a stack, because that is the
+only proof the whole path works: parse, schedule, place, pull, start, health,
+promote, route, certificate. This repository's own marketing site is the
+smallest honest one — a single swappable service with an ingress and no durable
+state — and it is what goes on the bare domain.
+
+```bash
+navarch app   create site --org acme --name "Site"
+navarch stack create main --app acme/site
+navarch stack push  acme/site/main examples/site/compose.yaml
+navarch env   create www --stack acme/site/main --hostname navarch.example.com
+navarch deploy --env acme/site/main/www
+navarch wait <deployment-id> --state live
+```
+
+That is the whole sequence, and it is the same six commands for any stack. The
+hostname is yours to choose; the certificate follows the route, so there is no
+seventh step for TLS.
+
+`ghcr.io/craigderington/navarch/site:1` is published by the release workflow
+alongside the platform images. **The platform never builds** — `build:` is a
+rejected compose directive — so every stack you deploy is an image you pushed
+somewhere the node can pull from. That is the contract that makes a deployed
+revision reproducible, and it applies to this repository's own site too.
+
+If the deployment sits in `scheduling`, the node has no capacity: reservations
+come from declared limits and nothing releases a live environment's, so
+`NAVARCH_NODE_MEMORY_MB` is the number to look at. If it reaches `live` but the
+hostname does not answer, DNS is the first thing to check — Traefik will not
+have a certificate for a name that does not point here.
 
 ---
 

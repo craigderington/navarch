@@ -71,6 +71,20 @@ jobs:
             ghcr.io/${{ github.repository }}/agent:${{ steps.v.outputs.version }}
             ghcr.io/${{ github.repository }}/agent:latest
 
+      # The marketing site is a tenant stack, not part of the platform — but it
+      # is the stack a fresh install deploys first, to prove itself. Publishing
+      # it here is the operator half of the contract that makes `build:` a
+      # rejected directive: the platform never builds, so somebody must push.
+      - name: Site image
+        uses: docker/build-push-action@v6
+        with:
+          context: examples/site
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/site:1
+            ghcr.io/${{ github.repository }}/site:${{ steps.v.outputs.version }}
+
       - name: Console image
         uses: docker/build-push-action@v6
         with:

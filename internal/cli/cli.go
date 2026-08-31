@@ -387,7 +387,7 @@ The previous COMPOSECTL_* variables and ~/.config/composectl/config.yaml are
 still read, at lower precedence, so an existing setup keeps working.
 
 Examples:
-  navarch login --url https://navarch.example.com   # prompts, never takes a token on argv
+  navarch login --url https://api.navarch.example.com   # prompts, never takes a token on argv
   navarch health
   navarch validate examples/hello/compose.yaml
   navarch stack push dev/preview/main examples/hello/compose.yaml

@@ -15,7 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-IMAGE=${IMAGE:-navarch-site:1}
+IMAGE=${IMAGE:-ghcr.io/craigderington/navarch/site:1}
 
 step() { printf '\n\033[36m▸ %s\033[0m\n' "$1"; }
 note() { printf '  \033[90m%s\033[0m\n' "$1"; }
