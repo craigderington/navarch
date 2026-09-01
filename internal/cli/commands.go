@@ -1384,3 +1384,150 @@ func orDash(s string) string {
 	}
 	return s
 }
+
+// cmdInvite manages invitations: the way somebody who does not yet have a
+// credential comes to have one.
+//
+// `accept` is deliberately in the same command group as `create` even though
+// they are used by different people at different times. Someone who receives an
+// invitation and looks for what to do with it will look under `invite`, and
+// splitting them would mean the answer to "I was sent this link" lives under a
+// verb they have no reason to guess.
+func cmdInvite(ctx context.Context, e env, args []string) error {
+	if len(args) == 0 {
+		return usage("usage: navarch invite list|create|revoke|accept ...")
+	}
+	switch args[0] {
+	case "list":
+		if err := need(args, 2, "usage: navarch invite list ORG"); err != nil {
+			return err
+		}
+		orgID, err := e.resolveOrg(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		invites, err := e.c.ListInvites(ctx, orgID)
+		if err != nil {
+			return err
+		}
+		rows := make([][]string, 0, len(invites))
+		for _, i := range invites {
+			rows = append(rows, []string{i.ID, i.Email, i.Role, i.State(), i.ExpiresAt.Format(time.RFC3339)})
+		}
+		return emit(e, invites, []string{"ID", "EMAIL", "ROLE", "STATE", "EXPIRES"}, rows)
+
+	case "create":
+		if err := need(args, 3, "usage: navarch invite create ORG EMAIL [--role ROLE] [--expires-in-days N]"); err != nil {
+			return err
+		}
+		orgID, err := e.resolveOrg(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		flags, _, err := flagMap(args[3:])
+		if err != nil {
+			return err
+		}
+		hours := 0
+		if v := flags["expires-in-days"]; v != "" {
+			days, err := strconv.Atoi(v)
+			if err != nil || days <= 0 {
+				return usage("--expires-in-days must be a positive whole number of days")
+			}
+			hours = days * 24
+		}
+		res, err := e.c.CreateInvite(ctx, orgID, client.CreateInviteInput{
+			Email: args[2], Role: flags["role"], TTLHours: hours,
+		})
+		if err != nil {
+			return err
+		}
+		if e.cfg.Output == "json" {
+			return printJSON(e.out, res)
+		}
+		// The link on its own line, for the same reason a new token is: it is
+		// the thing that gets copied, and table furniture around it makes that
+		// worse.
+		fmt.Fprintf(e.out, "%s\n", res.URL)
+		switch {
+		case res.Emailed:
+			fmt.Fprintf(e.err, "invited %s; emailed, and the link above works too\n", res.Invite.Email)
+		case res.Error != "":
+			// Say it plainly. An operator who believes the mail arrived will not
+			// send the link, and the invitation will simply expire unused.
+			fmt.Fprintf(e.err, "invited %s, but the email was NOT sent: %s\nsend them the link above yourself\n",
+				res.Invite.Email, res.Error)
+		default:
+			fmt.Fprintf(e.err, "invited %s; no mail provider is configured, so send them the link above\n",
+				res.Invite.Email)
+		}
+		return nil
+
+	case "revoke":
+		if err := need(args, 3, "usage: navarch invite revoke ORG INVITE_ID"); err != nil {
+			return err
+		}
+		orgID, err := e.resolveOrg(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		if err := e.c.RevokeInvite(ctx, orgID, args[2]); err != nil {
+			return err
+		}
+		fmt.Fprintf(e.out, "revoked\t%s\n", args[2])
+		return nil
+
+	case "accept":
+		return inviteAccept(ctx, e, args)
+
+	default:
+		return usage(fmt.Sprintf("unknown invite subcommand %q", args[0]))
+	}
+}
+
+// inviteAccept redeems an invitation and saves the resulting credential, so the
+// first Navarch command somebody ever runs leaves them logged in.
+//
+// It builds its own client rather than using e.c, because e.c carries whatever
+// token the environment happens to hold — and the person accepting an invitation
+// characteristically has none. A stale or wrong token in the environment must
+// not make this fail.
+func inviteAccept(ctx context.Context, e env, args []string) error {
+	if err := need(args, 2, "usage: navarch invite accept TOKEN [--url URL]"); err != nil {
+		return err
+	}
+	flags, _, err := flagMap(args[2:])
+	if err != nil {
+		return err
+	}
+	url := flags["url"]
+	if url == "" {
+		url = e.cfg.URL
+	}
+	if err := guardTransport(url, e.err); err != nil {
+		return err
+	}
+	c, err := client.New(url, "")
+	if err != nil {
+		return err
+	}
+	res, err := c.RedeemInvite(ctx, strings.TrimSpace(args[1]), "cli")
+	if err != nil {
+		// Unknown, expired, revoked and already-used are deliberately
+		// indistinguishable at the API, so say all four rather than guess.
+		return fmt.Errorf("that invitation was not accepted — it may be expired, "+
+			"already used, revoked, or for a different control plane: %w", err)
+	}
+	path, err := saveConfig(url, res.Token)
+	if err != nil {
+		return err
+	}
+	who := "operator"
+	if res.Operator != nil {
+		who = res.Operator.Email
+	}
+	fmt.Fprintf(e.out, "accepted; logged in to %s as %s\n", url, who)
+	fmt.Fprintf(e.out, "saved to %s\n", path)
+	fmt.Fprintln(e.out, "run `navarch whoami` to see what you can reach")
+	return nil
+}

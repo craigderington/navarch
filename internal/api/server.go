@@ -44,6 +44,13 @@ type Server struct {
 	// GET /v1/nodes/{id}/routes answers the same question the control-plane
 	// router asks, and two different answers would be worse than either.
 	routeStrand time.Duration
+	// mailer delivers invitations. Nil is a supported configuration: an invite
+	// still returns its link, which is the path an install with no mail
+	// provider uses.
+	mailer Mailer
+	// consoleURL is where an invited operator redeems. Configured, never
+	// derived from the request — see inviteURL.
+	consoleURL string
 }
 
 // ServerOption keeps NewServer's existing two-argument form working; only the
@@ -77,6 +84,16 @@ func WithRequireJoinToken(v bool) ServerOption {
 	return func(s *Server) { s.requireJoinToken = v }
 }
 
+// WithMailer makes invitations arrive by email as well as by link.
+func WithMailer(m Mailer) ServerOption {
+	return func(s *Server) { s.mailer = m }
+}
+
+// WithConsoleURL sets the base an invitation link is built from.
+func WithConsoleURL(u string) ServerOption {
+	return func(s *Server) { s.consoleURL = u }
+}
+
 func WithMetrics(reg *metrics.Registry) ServerOption {
 	return func(s *Server) { s.metrics = reg }
 }
@@ -98,9 +115,34 @@ func NewServer(st *store.Store, log *slog.Logger, opts ...ServerOption) *Server 
 	return s
 }
 
+// publicPath lists the two paths that carry no credential of the kind
+// authenticate() understands.
+//
+// This is a hand-written path match running before the mux, which is the trap
+// nodeAgentPathID exists to work around — so it is deliberately an exact-match
+// list of complete paths with no placeholders in them, where a prefix match
+// cannot go wrong. Anything needing a path *parameter* must not be added here;
+// it belongs behind authentication with an authorize call inside the handler.
+func publicPath(p string) bool {
+	switch p {
+	case "/healthz":
+		// A liveness probe touching no tenant data.
+		return true
+	case "/v1/invites/redeem":
+		// The person redeeming has no identity yet — that is the entire point
+		// of an invitation. The invite token in the body IS the credential:
+		// single-use, expiring, hashed at rest, and claimed by one UPDATE ...
+		// RETURNING so two simultaneous redemptions cannot both succeed. It
+		// names exactly one organization, so nothing it grants is broader than
+		// the invitation itself.
+		return true
+	}
+	return false
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-	if r.URL.Path != "/healthz" && s.bearerToken != "" {
+	if !publicPath(r.URL.Path) && s.bearerToken != "" {
 		id, ok := s.authenticate(r)
 		if !ok {
 			rw.Header().Set("WWW-Authenticate", `Bearer realm="composectl"`)
@@ -431,6 +473,10 @@ func (s *Server) routes() {
 	s.handle("GET /v1/orgs/{org}/members", s.handleListMembers)
 	s.handle("POST /v1/orgs/{org}/members", s.handleAddMember)
 	s.handle("DELETE /v1/orgs/{org}/members/{operator}", s.handleRemoveMember)
+	s.handle("POST /v1/orgs/{org}/invites", s.handleCreateInvite)
+	s.handle("GET /v1/orgs/{org}/invites", s.handleListInvites)
+	s.handle("DELETE /v1/orgs/{org}/invites/{invite}", s.handleRevokeInvite)
+	s.handle("POST /v1/invites/redeem", s.handleRedeemInvite)
 
 	s.handle("POST /v1/orgs", s.handleCreateOrg)
 	s.handle("GET /v1/orgs", s.handleListOrgs)

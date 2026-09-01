@@ -33,6 +33,10 @@ var unscopedRoutes = map[string]string{
 	"GET /v1/whoami": "the answer is the caller themselves; it addresses no object, " +
 		"and it is how an operator tells \"wrong org\" from \"wrong id\" given that " +
 		"the two are deliberately indistinguishable everywhere else",
+	"POST /v1/invites/redeem": "the person redeeming has no identity yet — that is " +
+		"the entire point. The invite token is the credential, it names exactly one " +
+		"org, and the store's claim is a single UPDATE ... RETURNING so it cannot be " +
+		"spent twice",
 	"POST /v1/validate": "parses a compose file the caller supplied and stores nothing; " +
 		"it addresses no object, so there is no org to check",
 	"POST /v1/nodes/register": "an agent enrolling has no identity yet; an operator " +
@@ -159,7 +163,7 @@ func newScopedOperator(t *testing.T, st *store.Store) *scopedOperator {
 type scopedFixture struct {
 	op                                             *scopedOperator
 	orgID, appID, stackID, envID, deployID, nodeID uuid.UUID
-	logID, joinTokenID                             uuid.UUID
+	logID, joinTokenID, inviteID                   uuid.UUID
 }
 
 func newScopedFixture(t *testing.T, st *store.Store) *scopedFixture {
@@ -237,9 +241,20 @@ func newScopedFixture(t *testing.T, st *store.Store) *scopedFixture {
 		t.Fatalf("CreateJoinToken: %v", err)
 	}
 
+	// A real invitation, for the same reason as the join token: the intruder
+	// must be refused for not being a member, not for naming a row that is not
+	// there — a 404 that would have happened anyway proves nothing.
+	inv, err := st.CreateInvite(ctx, store.CreateInviteParams{
+		OrgID: org.ID, Email: "invited-" + slug + "@example.com",
+	})
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+
 	return &scopedFixture{
 		op: op, orgID: org.ID, appID: app.ID, stackID: stack.ID,
 		envID: env.ID, deployID: dep.ID, nodeID: node.ID, joinTokenID: jt.ID,
+		inviteID: inv.ID,
 		// No log request is created: GET/DELETE /v1/logs/{id} resolve through
 		// OrgForLogRequest, which returns ErrNotFound for an unknown id — the
 		// same 404 a non-member gets, which is exactly the property under test.
@@ -258,6 +273,7 @@ func (f *scopedFixture) fill(t *testing.T, path string) string {
 		"{stack}", f.stackID.String(),
 		"{env}", f.envID.String(),
 		"{operator}", f.op.id.String(),
+		"{invite}", f.inviteID.String(),
 		"{key}", "some-key",
 	)
 	out := rep.Replace(path)

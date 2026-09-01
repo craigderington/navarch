@@ -248,3 +248,65 @@ func (s *Store) sweepTombstones(ctx context.Context, orgID *uuid.UUID, maxAge ti
 		maxAge.Seconds(), orgID)
 	return mapErr(err)
 }
+
+// ExpiringPreview is a preview environment about to be reaped.
+type ExpiringPreview struct {
+	ID        uuid.UUID
+	ExpiresAt time.Time
+}
+
+// ClaimPreviewsForExpiryWarning returns previews expiring within the window
+// that have not been warned about, and marks them warned in the same statement.
+//
+// Claim-and-mark is one UPDATE ... RETURNING because the reaper ticks every
+// second: a separate check and mark would let two ticks — or two control planes
+// — both pass the check, and the result would be a mail per tick rather than a
+// warning. The cost is that a warning whose send then fails is never retried.
+// That is the right direction here and the opposite of what a retry loop would
+// give: a missed warning about an expected event is a small loss, and a flood
+// of them is the kind of noise that teaches operators to filter the sender.
+//
+// Already-expired previews are excluded. The reaper deletes those on the same
+// tick, and warning about something already gone is worse than silence.
+func (s *Store) ClaimPreviewsForExpiryWarning(ctx context.Context, within time.Duration) ([]ExpiringPreview, error) {
+	return s.claimPreviewsForExpiryWarning(ctx, within, nil)
+}
+
+// ClaimPreviewsForExpiryWarningForOrg is the scoped form, used by isolated loop
+// tests for the reason the other scoped variants exist: parallel test binaries
+// share one database and must not claim one another's fixtures.
+func (s *Store) ClaimPreviewsForExpiryWarningForOrg(ctx context.Context, within time.Duration, orgID uuid.UUID) ([]ExpiringPreview, error) {
+	return s.claimPreviewsForExpiryWarning(ctx, within, &orgID)
+}
+
+func (s *Store) claimPreviewsForExpiryWarning(ctx context.Context, within time.Duration, orgID *uuid.UUID) ([]ExpiringPreview, error) {
+	// make_interval(secs => ...) rather than a ::interval cast of
+	// Duration.String(): the string form renders a sub-second value as "1ns",
+	// which Postgres's interval parser rejects outright.
+	rows, err := s.pool.Query(ctx, `
+		UPDATE environments e
+		SET expiry_warned_at = now()
+		FROM stacks s, applications a
+		WHERE e.stack_id = s.id AND s.app_id = a.id
+		  AND e.ephemeral
+		  AND e.expiry_warned_at IS NULL
+		  AND e.expires_at IS NOT NULL
+		  AND e.expires_at > now()
+		  AND e.expires_at < now() + make_interval(secs => $1)
+		  AND ($2::uuid IS NULL OR a.org_id = $2)
+		RETURNING e.id, e.expires_at
+	`, within.Seconds(), orgID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := []ExpiringPreview{}
+	for rows.Next() {
+		var p ExpiringPreview
+		if err := rows.Scan(&p.ID, &p.ExpiresAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}

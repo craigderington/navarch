@@ -331,3 +331,104 @@ func TestEveryLayoutTemplateIsRegistered(t *testing.T) {
 		}
 	}
 }
+
+// A GET must not spend a single-use credential. Link previewers, mail scanners
+// and browser prefetch all issue GETs nobody asked for, and the invitee would
+// find their invitation already used before they ever saw the page.
+func TestOpeningAnInviteLinkDoesNotRedeemIt(t *testing.T) {
+	var redeems int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/invites/redeem" {
+			redeems++
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"operator":{"id":"1","email":"ada@example.com"},"token":"nav_minted"}`)
+	}))
+	defer api.Close()
+
+	srv, err := New(api.URL, discard())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/invite?token=nav_the-invite", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /invite = %d", rec.Code)
+	}
+	if redeems != 0 {
+		t.Fatalf("a GET redeemed the invitation %d time(s)", redeems)
+	}
+	// And the page must carry the invitation forward into the form, or the
+	// button has nothing to submit.
+	if !strings.Contains(rec.Body.String(), "nav_the-invite") {
+		t.Fatalf("the acceptance form must carry the token:\n%s", rec.Body.String())
+	}
+}
+
+// Accepting signs the person in with a session cookie, and the operator token
+// the API minted must never reach the browser — the same property the console
+// guarantees for login.
+func TestAcceptingAnInviteSetsASessionAndNotAToken(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"operator":{"id":"1","email":"ada@example.com"},"token":"nav_minted-secret"}`)
+	}))
+	defer api.Close()
+
+	srv, err := New(api.URL, discard())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/invite", strings.NewReader("token=nav_the-invite"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
+		t.Fatalf("accept should redirect to the dashboard, got %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	var cookie string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie {
+			cookie = c.Value
+		}
+	}
+	if cookie == "" {
+		t.Fatal("accepting must establish a session")
+	}
+	if strings.Contains(rec.Body.String(), "nav_minted-secret") ||
+		strings.Contains(cookie, "nav_minted-secret") {
+		t.Fatal("the operator token must never reach the browser")
+	}
+}
+
+// A dead invitation lands back on the page with an explanation rather than an
+// error page, and the explanation must not narrow down which failure it was —
+// the API deliberately does not say, and the console must not guess.
+func TestARejectedInviteExplainsWithoutGuessing(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, `{"error":"not found"}`)
+	}))
+	defer api.Close()
+
+	srv, err := New(api.URL, discard())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/invite", strings.NewReader("token=nav_dead"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("got %d, want a redirect back to the page", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.HasPrefix(loc, "/invite?error=") {
+		t.Fatalf("should return to the invite page: %q", loc)
+	}
+	if len(rec.Result().Cookies()) != 0 {
+		t.Fatal("a rejected invitation must not establish a session")
+	}
+}

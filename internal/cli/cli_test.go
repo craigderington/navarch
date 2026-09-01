@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -409,5 +410,45 @@ func TestLoginPreservesOtherConfig(t *testing.T) {
 	body, _ := os.ReadFile(cfgPath)
 	if !strings.Contains(string(body), "output: json") {
 		t.Fatalf("saveConfig discarded an unrelated setting: %s", body)
+	}
+}
+
+// The invitee has no credential — that is the point of an invitation — so
+// `invite accept` must build its own client rather than inherit whatever token
+// the environment happens to hold. A stale token in NAVARCH_TOKEN must not make
+// accepting fail.
+func TestInviteAcceptIgnoresAnyExistingToken(t *testing.T) {
+	var gotAuth string
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		body, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"operator":{"id":"1","email":"ada@example.com","name":"Ada"},"token":"nav_minted"}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"invite", "accept", "nav_the-invite", "--url", srv.URL}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if gotAuth != "" {
+		t.Fatalf("accept must not send a bearer token, sent %q", gotAuth)
+	}
+	if !strings.Contains(string(body), "nav_the-invite") {
+		t.Fatalf("the invitation must be in the body, not a header: %s", body)
+	}
+	if !strings.Contains(out.String(), "ada@example.com") {
+		t.Fatalf("output should name who was logged in:\n%s", out.String())
+	}
+	// And the minted token must have been stored, or the next command asks
+	// them to log in with a credential they were never given.
+	if !strings.Contains(out.String(), "saved to") {
+		t.Fatalf("the minted token must be saved:\n%s", out.String())
 	}
 }

@@ -106,6 +106,18 @@ services:
       # one variable turns the whole path on, so the resolver name never has to
       # agree with a second setting somebody could get wrong.
       COMPOSECTL_ROUTER_WILDCARD_RESOLVER: ${NAVARCH_DNS_PROVIDER:+lewild}
+      # Where an invited operator lands to redeem. Derived from the domain
+      # rather than being a setting of its own, because it is always the console
+      # route this same file publishes — and a link built from a request's Host
+      # header would be one an attacker could aim.
+      COMPOSECTL_CONSOLE_URL: https://console.${NAVARCH_DOMAIN}
+    env_file:
+      # The Mailgun credential, and nothing else. Optional: without it invites
+      # still return a link to paste, failed rollouts are still recorded, and
+      # previews still expire on time — nothing is sent, and nothing else
+      # changes. See mail.env.example.
+      - path: ./mail.env
+        required: false
     volumes:
       - traefik-dynamic:/dynamic
     healthcheck:

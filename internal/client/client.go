@@ -622,3 +622,85 @@ func (c *Client) CreateJoinToken(ctx context.Context, orgID, name string, expire
 func (c *Client) RevokeJoinToken(ctx context.Context, orgID, tokenID string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/orgs/"+orgID+"/join-tokens/"+tokenID, nil, nil)
 }
+
+// ------------------------------------------------------------------ invites
+
+type Invite struct {
+	ID         string     `json:"id"`
+	OrgID      string     `json:"org_id"`
+	Email      string     `json:"email"`
+	Role       string     `json:"role"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	RedeemedAt *time.Time `json:"redeemed_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// State mirrors the store's derivation rather than being sent over the wire.
+// It is a function of the clock, and a value computed on the server would be
+// stale by the time it was rendered.
+func (i *Invite) State() string {
+	switch {
+	case i.RedeemedAt != nil:
+		return "redeemed"
+	case i.RevokedAt != nil:
+		return "revoked"
+	case time.Now().After(i.ExpiresAt):
+		return "expired"
+	default:
+		return "pending"
+	}
+}
+
+type CreateInviteInput struct {
+	Email    string `json:"email"`
+	Role     string `json:"role,omitempty"`
+	TTLHours int    `json:"ttl_hours,omitempty"`
+}
+
+type CreateInviteResult struct {
+	Invite  Invite `json:"invite"`
+	URL     string `json:"url"`
+	Emailed bool   `json:"emailed"`
+	Error   string `json:"email_error,omitempty"`
+}
+
+func (c *Client) CreateInvite(ctx context.Context, orgID string, in CreateInviteInput) (*CreateInviteResult, error) {
+	var out CreateInviteResult
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/orgs/"+orgID+"/invites", in, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) ListInvites(ctx context.Context, orgID string) ([]Invite, error) {
+	var out struct {
+		Invites []Invite `json:"invites"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/orgs/"+orgID+"/invites", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Invites, nil
+}
+
+func (c *Client) RevokeInvite(ctx context.Context, orgID, inviteID string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/orgs/"+orgID+"/invites/"+inviteID, nil, nil)
+}
+
+type RedeemInviteResult struct {
+	Operator *Operator `json:"operator"`
+	Token    string    `json:"token"`
+}
+
+// RedeemInvite exchanges an invitation for an operator token. It is the one
+// call that works on a client with no token of its own — the invite is the
+// credential, which is why `navarch invite accept` can be the first command
+// somebody ever runs.
+func (c *Client) RedeemInvite(ctx context.Context, token, tokenName string) (*RedeemInviteResult, error) {
+	var out RedeemInviteResult
+	body := map[string]string{"token": token, "token_name": tokenName}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/invites/redeem", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

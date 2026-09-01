@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/craigderington/navarch/internal/mail"
 )
 
 // DefaultListenAddr is the API bind address. Deliberately a high port —
@@ -107,6 +110,15 @@ type Config struct {
 	// matching --certificatesresolvers flag leaves previews on Traefik's
 	// self-signed fallback, which is why deploy/README.md says to open one.
 	RouterWildcardResolver string
+	// Mail configures transactional email. Unconfigured is the default and a
+	// supported mode, not a degraded one: every path that would send checks
+	// first, and the two notification paths carry on without it. See
+	// internal/mail for why only invites treat a send failure as fatal.
+	Mail mail.Config
+	// ConsoleURL is where an invited operator is sent to redeem an invitation.
+	// It lives here rather than being derived from the request, because an
+	// invite link built from a Host header is a link an attacker can aim.
+	ConsoleURL string
 }
 
 func Load() (*Config, error) {
@@ -125,6 +137,13 @@ func Load() (*Config, error) {
 		BootstrapJoinToken:     os.Getenv("COMPOSECTL_BOOTSTRAP_JOIN_TOKEN"),
 		RouterCertResolver:     os.Getenv("COMPOSECTL_ROUTER_CERT_RESOLVER"),
 		RouterWildcardResolver: os.Getenv("COMPOSECTL_ROUTER_WILDCARD_RESOLVER"),
+		ConsoleURL:             strings.TrimSuffix(os.Getenv("COMPOSECTL_CONSOLE_URL"), "/"),
+		Mail: mail.Config{
+			Domain:  os.Getenv("COMPOSECTL_MAILGUN_DOMAIN"),
+			APIKey:  os.Getenv("COMPOSECTL_MAILGUN_API_KEY"),
+			From:    os.Getenv("COMPOSECTL_MAIL_FROM"),
+			BaseURL: os.Getenv("COMPOSECTL_MAILGUN_BASE_URL"),
+		},
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("COMPOSECTL_DATABASE_URL is required")

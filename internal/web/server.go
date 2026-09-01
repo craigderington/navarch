@@ -43,6 +43,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /login", s.getLogin)
 	s.mux.HandleFunc("POST /login", s.postLogin)
 	s.mux.HandleFunc("POST /logout", s.postLogout)
+	s.mux.HandleFunc("GET /invite", s.getInvite)
+	s.mux.HandleFunc("POST /invite", s.postInvite)
 
 	s.mux.HandleFunc("GET /{$}", s.guard(s.fleet))
 	s.mux.HandleFunc("GET /orgs/{org}", s.guard(s.environments))
@@ -112,6 +114,67 @@ func (s *Server) postLogin(w http.ResponseWriter, r *http.Request) {
 		email = me.Operator.Email
 	}
 	id, err := s.sessions.create(token, email)
+	if err != nil {
+		s.fail(w, r, session{}, err)
+		return
+	}
+	setCookie(w, r, id)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// getInvite renders the acceptance page. It does not redeem: a GET must not
+// spend a single-use credential, because link previewers, mail scanners and
+// browser prefetch all issue GETs nobody asked for — and the person would find
+// their invitation already used before they ever saw it.
+func (s *Server) getInvite(w http.ResponseWriter, r *http.Request) {
+	s.render(w, "invite.html", map[string]any{
+		"Token": r.URL.Query().Get("token"),
+		"Error": r.URL.Query().Get("error"),
+	})
+}
+
+// postInvite redeems the invitation and signs the new operator in.
+//
+// No CSRF token, and it is the one form here without one: there is no session
+// yet to hold a token against. What stands in its place is the invitation
+// itself — a cross-site POST would have to already know it, and anyone who
+// knows it can simply redeem it directly. SameSite=Lax on the session cookie
+// this sets still applies from the next request onward.
+func (s *Server) postInvite(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/invite?error=bad+form", http.StatusSeeOther)
+		return
+	}
+	token := strings.TrimSpace(r.PostFormValue("token"))
+	if token == "" {
+		http.Redirect(w, r, "/invite?error=that+link+carried+no+invitation", http.StatusSeeOther)
+		return
+	}
+	// A client with no bearer token of its own: the person accepting has none,
+	// which is the entire point of an invitation.
+	cl, err := client.New(s.api, "")
+	if err != nil {
+		s.fail(w, r, session{}, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	res, err := cl.RedeemInvite(ctx, token, "console")
+	if err != nil {
+		s.log.Warn("invite rejected", "err", err)
+		// Expired, revoked, unknown and already-used are deliberately
+		// indistinguishable at the API, so the page says all of them rather
+		// than picking one and being wrong.
+		http.Redirect(w, r,
+			"/invite?error=that+invitation+is+no+longer+valid+—+it+may+be+expired%2C+already+used%2C+or+revoked",
+			http.StatusSeeOther)
+		return
+	}
+	email := "operator"
+	if res.Operator != nil {
+		email = res.Operator.Email
+	}
+	id, err := s.sessions.create(res.Token, email)
 	if err != nil {
 		s.fail(w, r, session{}, err)
 		return

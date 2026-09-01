@@ -7,3 +7,4 @@ deploy/production/dns.env
 deploy/wildcard/dynamic/
 deploy/wildcard/pebble.minica.pem
 deploy/wildcard/root.pem
+deploy/production/mail.env

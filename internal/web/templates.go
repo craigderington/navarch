@@ -40,13 +40,15 @@ func parsePages() (map[string]*template.Template, error) {
 		}
 		out[name] = t
 	}
-	// login.html is standalone: it renders before there is a session, so it
-	// cannot use a layout whose header shows who you are.
-	t, err := template.New("login.html").Funcs(funcs).ParseFS(templates, "templates/login.html")
-	if err != nil {
-		return nil, fmt.Errorf("parse login.html: %w", err)
+	// login.html and invite.html are standalone: both render before there is a
+	// session, so neither can use a layout whose header shows who you are.
+	for _, name := range []string{"login.html", "invite.html"} {
+		t, err := template.New(name).Funcs(funcs).ParseFS(templates, "templates/"+name)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", name, err)
+		}
+		out[name] = t
 	}
-	out["login.html"] = t
 	return out, nil
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/craigderington/navarch/internal/api"
 	"github.com/craigderington/navarch/internal/config"
 	"github.com/craigderington/navarch/internal/logbuf"
+	"github.com/craigderington/navarch/internal/mail"
 	"github.com/craigderington/navarch/internal/metrics"
 	"github.com/craigderington/navarch/internal/rollout"
 	"github.com/craigderington/navarch/internal/router"
@@ -106,8 +107,29 @@ func run(log *slog.Logger) error {
 	// copy of this state would be a second place secrets could outlive the
 	// request that fetched them.
 	logBuffer := logbuf.New()
+
+	// Transactional email, opt-in, built before the API server because both it
+	// and the loops take the same one. Declared as *mail.Sender and handed to
+	// each consumer's own interface, with the nil case kept explicit: a nil
+	// *mail.Sender assigned to an interface is NOT a nil interface, and every
+	// `if m == nil` guard downstream would silently stop working.
+	var sender *mail.Sender
+	if cfg.Mail.Configured() {
+		sender = mail.New(cfg.Mail)
+		log.Info("transactional email enabled", "domain", cfg.Mail.Domain, "from", cfg.Mail.From)
+	} else {
+		log.Info("transactional email not configured; invites still return a link")
+	}
+	var apiMailer api.Mailer
+	var notifier rollout.Notifier
+	if sender != nil {
+		apiMailer, notifier = sender, sender
+	}
+
 	srvHandler := api.NewServer(st, log,
+		api.WithMailer(apiMailer),
 		api.WithPreviewDomain(cfg.PreviewDomain),
+		api.WithConsoleURL(cfg.ConsoleURL),
 		api.WithBearerToken(cfg.AgentToken),
 		api.WithRequireJoinToken(cfg.RequireJoinToken),
 		api.WithRouteStrand(time.Duration(cfg.RouteStrandSeconds)*time.Second),
@@ -153,8 +175,9 @@ func run(log *slog.Logger) error {
 	}
 	sched := rollout.NewScheduler(st, log)
 	ctrl := rollout.NewController(st, log, rtr,
-		rollout.WithRouteStrand(time.Duration(cfg.RouteStrandSeconds)*time.Second))
-	reaper := rollout.NewReaper(st, log).WithLogBuffer(logBuffer)
+		rollout.WithRouteStrand(time.Duration(cfg.RouteStrandSeconds)*time.Second),
+		rollout.WithNotifier(notifier))
+	reaper := rollout.NewReaper(st, log).WithLogBuffer(logBuffer).WithNotifier(notifier)
 	go runLoop(ctx, cfg.TickInterval, log, metricsRegistry, "scheduler", sched.ScheduleOnce)
 	go runLoop(ctx, cfg.TickInterval, log, metricsRegistry, "controller", ctrl.ReconcileOnce)
 	go runLoop(ctx, cfg.TickInterval, log, metricsRegistry, "reaper", reaper.ReapOnce)

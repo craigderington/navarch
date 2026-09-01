@@ -109,6 +109,56 @@ wildcard covers. Point an ordinary environment two labels deep —
 `a.b.preview.navar.ch` — and it keeps its own certificate, because claiming a
 name the wildcard cannot cover would serve the browser a mismatch.
 
+### Transactional email
+
+Optional, and off unless configured. With it, three things reach an
+organization's operators: an **invitation** to join, a **failed rollout** with
+the reason the node agent reported, and a **warning** an hour before a preview
+environment is destroyed.
+
+```bash
+cp deploy/production/mail.env.example deploy/production/mail.env
+$EDITOR deploy/production/mail.env      # domain, key, from
+docker compose -f deploy/production/compose.yaml up -d
+```
+
+Its own file, like `dns.env` — so the key can be rotated without opening the one
+that holds the database password. Gitignored.
+
+**A Mailgun subdomain sends; it does not receive.** Do not put an address at it
+anywhere something has to reach you — `NAVARCH_ACME_EMAIL` above all, since
+Let's Encrypt mails expiry warnings there and one nobody reads is worse than
+none.
+
+**Nothing depends on it.** A rollout that failed is still recorded as failed, a
+preview still expires on time, and an invitation still returns a link to paste.
+`navarch invite create` says which of those happened rather than assuming the
+mail arrived.
+
+### Inviting operators
+
+```bash
+navarch invite create acme ada@example.com --role member
+navarch invite list acme
+navarch invite revoke acme <invite-id>
+```
+
+The invited person opens the link, which signs them in and creates their own
+credentials — or, if they would rather stay in the terminal:
+
+```bash
+navarch invite accept nav_... --url https://api.navar.ch
+```
+
+That is the one command that needs no token first, which is the whole point.
+
+**The link is exchanged for a credential; it is never the credential.** It works
+once, expires in seven days by default, and is worth nothing afterwards.
+Re-inviting the same address supersedes the previous link rather than leaving
+two live. Opening the link does not spend it — only accepting does — so a mail
+scanner or a link previewer cannot burn an invitation before its recipient sees
+it.
+
 **Back up the `acme` volume with `pgdata`.** Losing it re-issues every hostname
 from scratch, against that same weekly budget.
 

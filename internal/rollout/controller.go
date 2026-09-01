@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/craigderington/navarch/internal/mail"
 	"github.com/craigderington/navarch/internal/router"
 	"github.com/craigderington/navarch/internal/store"
 )
@@ -21,10 +22,20 @@ type RouterSync interface {
 	Sync(routes []router.Route) error
 }
 
+// Notifier delivers an operator-facing message. An interface for the same
+// reason RouterSync is one — the controller stays testable without a network,
+// and internal/mail stays the only thing that knows a provider exists. Nil is
+// allowed and is the default: mail is opt-in, and a rollout must fail correctly
+// whether or not anyone can be told.
+type Notifier interface {
+	Send(ctx context.Context, m mail.Message) error
+}
+
 type Controller struct {
 	st           *store.Store
 	log          *slog.Logger
 	rtr          RouterSync
+	notify       Notifier
 	startTimeout time.Duration
 	orgID        *uuid.UUID
 	// routeStrand is how long a node may go unheard from before its routes are
@@ -66,6 +77,12 @@ const DefaultTeardownGrace = 5 * time.Second
 // correct when nothing external routes to it.
 func WithTeardownGrace(d time.Duration) func(*Controller) {
 	return func(c *Controller) { c.teardownGrace = d }
+}
+
+// WithNotifier makes failed rollouts email the organization's operators.
+// Without it nothing is sent and nothing else changes.
+func WithNotifier(n Notifier) func(*Controller) {
+	return func(c *Controller) { c.notify = n }
 }
 
 // WithRouteStrand sets how long a node may go unheard from before its routes
@@ -223,7 +240,15 @@ func (c *Controller) advance(ctx context.Context, dep store.Deployment) error {
 		// the instance rows on the way out, and the agent's description of what
 		// went wrong lives only there. "an instance failed to start" on its own
 		// is true of every possible cause and useful for none of them.
-		return c.st.UpdateDeploymentState(ctx, dep.ID, store.DeployFailed, c.failureReason(ctx, dep.ID))
+		reason := c.failureReason(ctx, dep.ID)
+		if err := c.st.UpdateDeploymentState(ctx, dep.ID, store.DeployFailed, reason); err != nil {
+			return err
+		}
+		// After the transition, never before, and never in a way that can undo
+		// it. The state change is the thing that must be durable; the email is
+		// a courtesy that already has a more reliable copy in failure_reason.
+		c.notifyFailure(ctx, dep, reason)
+		return nil
 	case dep.State == store.DeployScheduling && pending == 0:
 		// Every instance has a container (moved past pending) → starting.
 		return c.st.UpdateDeploymentState(ctx, dep.ID, store.DeployStarting, "")
@@ -268,4 +293,64 @@ func (c *Controller) failureReason(ctx context.Context, depID uuid.UUID) string 
 		}
 	}
 	return generic + ": " + strings.Join(parts, "; ")
+}
+
+// notifyFailure emails the organization's operators that a rollout failed.
+//
+// Every failure here is swallowed into a log line, on purpose: this runs after
+// UpdateDeploymentState has already committed, so returning an error would
+// re-run a tick over a deployment that is correctly failed, and repeatedly fail
+// to mail about it. The deployment state is the record; the mail is a courtesy.
+//
+// Synchronous rather than a goroutine, because a deployment fails once — the
+// row leaves the rollout list on the next tick — so this is bounded by deploy
+// attempts, not by ticks, and a rare ten-second stall is worth the loop staying
+// deterministic and the behaviour staying testable without waiting on one.
+func (c *Controller) notifyFailure(ctx context.Context, dep store.Deployment, reason string) {
+	if c.notify == nil {
+		return
+	}
+	target, err := c.st.NotifyTargetsForDeployment(ctx, dep.ID)
+	if err != nil {
+		c.log.Warn("could not resolve failure notification recipients", "deployment", dep.ID, "error", err)
+		return
+	}
+	if len(target.Emails) == 0 {
+		return // an org with no enabled members; nothing to say and nobody to say it to
+	}
+
+	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := c.notify.Send(sendCtx, failureMessage(target, dep, reason)); err != nil {
+		c.log.Warn("could not send failure notification", "deployment", dep.ID, "error", err)
+		return
+	}
+	c.log.Info("failure notification sent", "deployment", dep.ID, "recipients", len(target.Emails))
+}
+
+// failureMessage is separate so the wording can be asserted on without a
+// network. The subject names the environment by its slug path, which is what
+// the CLI takes, so an operator can paste it straight into a command.
+func failureMessage(t *store.NotifyTarget, dep store.Deployment, reason string) mail.Message {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Deployment of %s failed.\n\n", t.Path())
+	fmt.Fprintf(&b, "  environment  %s\n", t.Path())
+	if t.Hostname != "" {
+		fmt.Fprintf(&b, "  hostname     %s\n", t.Hostname)
+	}
+	fmt.Fprintf(&b, "  revision     %d\n", dep.Revision)
+	fmt.Fprintf(&b, "  deployment   %s\n\n", dep.ID)
+	fmt.Fprintf(&b, "Reason reported by the node agent:\n\n  %s\n\n", reason)
+	// The previous revision is still serving. Saying so is the difference
+	// between an alert that needs acting on tonight and one that does not.
+	b.WriteString("The previously live revision is untouched and still serving.\n")
+	b.WriteString("Deployments are append-only: nothing was rolled back because nothing changed.\n\n")
+	fmt.Fprintf(&b, "  navarch deployment get %s\n", dep.ID)
+	fmt.Fprintf(&b, "  navarch logs %s\n", t.Path())
+
+	return mail.Message{
+		To:      t.Emails,
+		Subject: fmt.Sprintf("[navarch] rollout failed: %s (revision %d)", t.Path(), dep.Revision),
+		Body:    b.String(),
+	}
 }

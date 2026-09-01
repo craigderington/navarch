@@ -54,11 +54,15 @@ type OrgMember struct {
 
 const maxEmailLen = 254
 
-// validateEmail is deliberately not an RFC 5322 parser. The email is an
-// identifier and a display string, never something this system delivers mail
-// to, so the only failures worth catching are the ones that would make it a
-// bad identifier: empty, absurdly long, or carrying whitespace that makes two
-// visually identical addresses distinct rows.
+// validateEmail is deliberately not an RFC 5322 parser, even though this system
+// now does deliver mail to the address — invites, failed rollouts, expiring
+// previews. Tightening it would not help: the only check that establishes an
+// address is real is sending to it, and Mailgun rejects what it cannot deliver
+// with a reason far better than a regex could produce. So the failures worth
+// catching here are still the ones that make it a bad *identifier* — empty,
+// absurdly long, or carrying whitespace that makes two visually identical
+// addresses distinct rows — plus, now, the newline that would let an address
+// forge a mail header if it ever reached something that writes them.
 func validateEmail(email string) error {
 	switch {
 	case email == "":

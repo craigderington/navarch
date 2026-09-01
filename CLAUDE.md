@@ -152,6 +152,7 @@ internal/agent/dockerd the ONLY package importing the Docker SDK
 internal/router       the ONLY package knowing Traefik's config shape
 internal/client       the ONLY package knowing the HTTP API's wire format
 internal/cli          argv parsing, output formatting; no HTTP of its own
+internal/mail         the ONLY package knowing a mail provider exists
 internal/secrets      age sealing/opening
 internal/metrics      Prometheus text-format registry
 internal/config       env-var config (control plane only)
@@ -1115,6 +1116,74 @@ the restart that deployed the change. Metrics rides along because a scraper is
 not a person and the surface carries no tenant identifiers. Removing it entirely
 wants an operator-issued join token, which is its own decision.
 
+**Mail is opt-in, and two of its three consumers must not care whether it
+works.** `internal/mail` is a leaf — no pgx, no Docker SDK, no platform types —
+that posts a form to Mailgun's HTTP API. No SDK: the API is basic auth and four
+form fields, which is forty lines, and keeping it that way leaves the provider
+swappable at one seam. The body is plain text, deliberately, because the only
+variable content in any of these messages is a hostname, a URL, and a failure
+reason that came out of a tenant's container — an HTML body would make that last
+one an injection surface for a prettier email nobody asked for. It is truncated
+and stripped of line breaks for the same reason.
+
+The three consumers make **different** bargains, and the difference is the
+design:
+
+- **A failed rollout** notifies after `UpdateDeploymentState` has committed, and
+  every error from there is a log line. Returning one would re-run a tick over a
+  deployment that is correctly failed and fail to mail about it again — and
+  `failure_reason` is already the durable, better copy of what the email says.
+- **An expiring preview** is claimed and marked in one `UPDATE … RETURNING`
+  (`ClaimPreviewsForExpiryWarning`), the same shape `RedeemJoinToken` uses. The
+  reaper ticks every second: a separate check and mark would send a mail per
+  tick rather than a warning. The cost is that a warning whose send fails is
+  never retried, which is the right direction — a missed notice about an
+  expected event is a small loss, a flood is what teaches people to filter the
+  sender. TTL must not depend on a mail provider being reachable.
+- **An invitation** reports the send outcome instead of swallowing it, because
+  an operator who believes the mail arrived will not send the link and the
+  invitation will simply expire unused. It is still not fatal: the link is
+  returned to the caller either way, so an install with no provider — or one
+  whose provider is having a bad day — onboards by pasting it.
+
+**An invitation is exchanged for a credential; it is never the credential.**
+`operator_invites` stores a hash, like `operator_tokens`, so the row cannot be
+read back into access. Redemption is one `UPDATE … RETURNING` inside the
+transaction that finds-or-creates the operator, adds the membership and mints
+the token, so an invite is never spent without producing what it promised — and
+two simultaneous redemptions cannot both succeed. Unknown, expired, revoked and
+already-redeemed all return `ErrNotFound` and are **indistinguishable**: the
+endpoint is unauthenticated, and a specific reason tells someone guessing that
+they guessed a real invite.
+
+Four details that are not obvious:
+
+- **`POST /v1/invites/redeem` skips authentication**, not just authorization —
+  the person redeeming has no identity yet, which is the whole point. It is in
+  `publicPath`, which is an exact-match list of complete paths with no
+  placeholders, because a hand-written path match before the mux is the trap
+  `nodeAgentPathID` exists to work around. Anything needing a path *parameter*
+  must not go there.
+- **The link is built from `COMPOSECTL_CONSOLE_URL`, never from the request.** A
+  link assembled out of the `Host` header is one an attacker can aim: invite
+  somebody, set `Host` to a site you control, and the victim types their
+  invitation into it. `TestInviteLinkIgnoresTheHostHeader` pins it.
+- **`GET /invite` renders; only `POST /invite` redeems.** Link previewers, mail
+  scanners and browser prefetch all issue GETs nobody asked for, and a
+  single-use credential spent by one of those is gone before the invitee ever
+  sees the page. It is also the one console form with no CSRF token — there is
+  no session yet to hold one against, and the invitation itself stands in its
+  place, since a cross-site POST would have to already know it.
+- **Re-inviting supersedes rather than fails.** Two live credentials for one
+  person, only one of which anybody is tracking, is worse than either erroring
+  or replacing — and revoking "the invite" would leave the other working. It is
+  also what keeps the one-live-invite partial index satisfiable, which a
+  predicate cannot do alone because `now()` is not immutable.
+
+A disabled operator redeeming an invite would re-enable themselves by the back
+door, so that is an `ErrConflict` and the transaction rolls back — the invite is
+not consumed by the attempt.
+
 **The audit actor rides on the context, not on signatures.** Events are appended
 deep inside store transactions — `CreateDeployment`, `PromoteDeployment`,
 `SetSecret`, `RegisterNode`, the reaper — so threading an actor argument would
@@ -1339,6 +1408,7 @@ deployments, nodes, secrets, previews, logs, auth and org scoping),
 `internal/agent/dockerd` (against a real daemon), `internal/cli` (26, pure —
 argv, output, config precedence), `internal/client` (13, pure — `httptest`),
 `internal/router`, `internal/secrets`, `internal/metrics`, `internal/logbuf`,
+`internal/mail` (pure — `httptest`),
 `internal/tui`, `internal/spec`, `internal/config` and `cmd/controlplane`.
 Counts drift; treat them as a shape, and `grep -c "^func Test"` for the number.
 
