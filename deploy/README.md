@@ -295,7 +295,7 @@ have a certificate for a name that does not point here.
 
 ```bash
 # 1. Choose the version
-$EDITOR .env                      # NAVARCH_VERSION=1.1.0
+$EDITOR deploy/production/.env    # NAVARCH_VERSION=1.2.0
 docker compose -f deploy/production/compose.yaml pull
 
 # 2. Apply migrations while the OLD control plane is still serving
