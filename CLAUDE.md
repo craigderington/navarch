@@ -64,6 +64,20 @@ carry the bearer token and an unset token is a hard failure, not a degraded
 mode. `TestEnvPrecedenceAcrossTheRename` covers both directions. The legacy
 half is removable once nothing sets it.
 
+**The domain is `navar.ch`, and it renames nothing.** Every `navarch.*` was
+taken or priced as a sale, and this is not the consolation it looks like: the
+domain hack spells the product across the dot, so the binary, the module path,
+the `NAVARCH_*` variables and every row of the table above stay exactly as they
+are. There is no second name to keep in step, which is the failure mode a real
+rebrand would have introduced on top of the half-finished one above. Where the
+domain appears is split by whether the file is *read* or *run*: docs and CLI
+help carry `navar.ch`, while `deploy/production/env.example` and
+`deploy/tls/Caddyfile` keep reserved `example.com` names, because both are
+copied and started and compose's `:?` guard cannot fire on a value that is
+present — a real domain left unedited would point a stranger's install at a name
+they do not own. The site wordmark is the address (`navar` · dot · `ch`) and the
+footer carries the product name; prose says Navarch throughout.
+
 `docs/navarch-brand-and-naming-guide.md` is gitignored and not present in the
 working tree; if it exists elsewhere it, not this table, is the authority on
 naming.

@@ -6,7 +6,9 @@
 # and a node token pulls that node's age ciphertext, so anyone on the path gets
 # both for as long as the token is valid. TLS terminates here.
 #
-# Replace navarch.example.com with your hostname and Caddy obtains a certificate
+# Replace api.example.com with your own hostname — a reserved name is used here
+# because this file is copied and started, and a real one left unedited sends
+# ACME requests for a domain the copier does not own. Caddy obtains a certificate
 # from Let's Encrypt automatically on first request. The site block below is the
 # whole production configuration; `tls internal` in the local block is the same
 # shape with a self-signed CA, which is what `make demo-tls` exercises.
@@ -18,7 +20,7 @@
 	auto_https disable_redirects
 }
 
-navarch.example.com {
+api.example.com {
 	reverse_proxy controlplane:8417
 
 	# The control plane sets no HSTS of its own — it does not know whether it

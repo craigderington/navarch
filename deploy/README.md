@@ -31,11 +31,18 @@ Plain HTTP redirects to HTTPS. That redirect does **not** swallow
 `/.well-known/acme-challenge/` — checked against `traefik:v3.3`, where the
 challenge is served before routing, so issuance still completes.
 
+`navar.ch` throughout is the real install, not a placeholder — the domain spells
+the product across the dot, so the worked examples below are the commands that
+were actually run rather than ones with a name to substitute. Substitute your
+own anywhere it appears. `deploy/production/env.example` deliberately does
+*not* carry it: that file is copied to `.env` and started, and a real domain
+left unedited would point this host's ACME requests at a name it does not own.
+
 | Name | Serves |
 |---|---|
-| `console.navarch.example.com` | the console — what a person opens |
-| `api.navarch.example.com` | the API — agents, the CLI, CI |
-| `navarch.example.com` | whatever stack you deploy there — see below |
+| `console.navar.ch` | the console — what a person opens |
+| `api.navar.ch` | the API — agents, the CLI, CI |
+| `navar.ch` | whatever stack you deploy there — see below |
 | anything else you route | your deployed environments |
 
 **The platform claims only subdomains.** The bare domain is left for a stack you
@@ -49,8 +56,18 @@ control plane regenerates every tick. Traefik reads the whole directory, so
 neither file knows about the other — which is the point: the control plane must
 never write a route it did not derive from a live deployment.
 
-**Back up the `acme` volume with `pgdata`.** Losing it re-issues every hostname,
-and Let's Encrypt's rate limits will notice.
+Everything the platform serves now sits under one registered domain, and with
+no wildcard **every hostname is its own certificate** — the console, the API,
+each tenant environment, and each preview, which is a fresh name every time CI
+opens one. Let's Encrypt counts issuance per registered domain per week (50, at
+the time of writing; check before you lean on it), so a busy preview workflow is
+the thing that reaches it first, not the tenants. If that becomes real the
+answer is a DNS-01 wildcard for `*.preview.navar.ch` alone — one credential,
+scoped to the names the platform generates itself, leaving customer domains on
+HTTP-01 where no credential is needed.
+
+**Back up the `acme` volume with `pgdata`.** Losing it re-issues every hostname
+from scratch, against that same weekly budget.
 
 ---
 
@@ -76,9 +93,9 @@ without echo, or read from stdin — because argv lands in shell history, `ps`,
 and every exec audit log on the box:
 
 ```bash
-navarch login --url https://api.navarch.example.com
+navarch login --url https://api.navar.ch
 Operator token:
-logged in to https://api.navarch.example.com as you@example.com
+logged in to https://api.navar.ch as you@example.com
 ```
 
 It is verified against the control plane before it is written, so a config file
@@ -118,10 +135,10 @@ name, so a certificate request for a hostname that does not point here fails and
 Traefik backs off.
 
 ```
-A  console.navarch.example.com -> your static IP   # the console
-A  api.navarch.example.com     -> your static IP   # the API
-A  navarch.example.com         -> your static IP   # a stack you deploy there
-A  *.preview.example.com       -> your static IP   # preview environments
+A  console.navar.ch    -> your static IP   # the console
+A  api.navar.ch        -> your static IP   # the API
+A  navar.ch            -> your static IP   # a stack you deploy there
+A  *.preview.navar.ch  -> your static IP   # preview environments
 ```
 
 Separate names because they are separate audiences: a person opens the console,
@@ -150,7 +167,7 @@ state — and it is what goes on the bare domain.
 navarch app   create site --org acme --name "Site"
 navarch stack create main --app acme/site
 navarch stack push  acme/site/main examples/site/compose.yaml
-navarch env   create www --stack acme/site/main --hostname navarch.example.com
+navarch env   create www --stack acme/site/main --hostname navar.ch
 navarch deploy --env acme/site/main/www
 navarch wait <deployment-id> --state live
 ```
@@ -159,7 +176,7 @@ That is the whole sequence, and it is the same six commands for any stack. The
 hostname is yours to choose; the certificate follows the route, so there is no
 seventh step for TLS.
 
-`ghcr.io/craigderington/navarch/site:1` is published by the release workflow
+`ghcr.io/craigderington/navarch/site:2` is published by the release workflow
 alongside the platform images. **The platform never builds** — `build:` is a
 rejected compose directive — so every stack you deploy is an image you pushed
 somewhere the node can pull from. That is the contract that makes a deployed
@@ -241,7 +258,7 @@ services:
     image: ghcr.io/craigderington/navarch/agent:1.0.0
     restart: unless-stopped
     environment:
-      COMPOSECTL_CONTROLPLANE_URL: https://api.navarch.example.com
+      COMPOSECTL_CONTROLPLANE_URL: https://api.navar.ch
       COMPOSECTL_ORG: dev
       COMPOSECTL_NODE_HOSTNAME: node-2
       COMPOSECTL_ADVERTISE_ADDR: 10.0.1.12   # reachable from the router's host
@@ -288,7 +305,7 @@ services:
   agent:
     image: ghcr.io/craigderington/navarch/agent:1.0.0
     environment:
-      COMPOSECTL_CONTROLPLANE_URL: https://api.navarch.example.com
+      COMPOSECTL_CONTROLPLANE_URL: https://api.navar.ch
       COMPOSECTL_AGENT_TOKEN: <the join token>   # no org: the token names it
       COMPOSECTL_NODE_HOSTNAME: acme-1
       COMPOSECTL_ADVERTISE_ADDR: 10.0.1.12       # reachable from THEIR router

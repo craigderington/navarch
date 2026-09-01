@@ -64,9 +64,9 @@ step "The customer puts their image on their own daemon"
 # The platform does not build and does not distribute: `build:` is a rejected
 # directive. In BYO that contract lands squarely on the customer, and this is
 # what honouring it looks like from their side — no registry between us.
-docker build -q -t ghcr.io/craigderington/navarch/site:1 examples/site >/dev/null
-docker save ghcr.io/craigderington/navarch/site:1 | "${COMPOSE[@]}" exec -T byo-dind docker load >/dev/null
-note "ghcr.io/craigderington/navarch/site:1 loaded onto byo-dind"
+docker build -q -t ghcr.io/craigderington/navarch/site:2 examples/site >/dev/null
+docker save ghcr.io/craigderington/navarch/site:2 | "${COMPOSE[@]}" exec -T byo-dind docker load >/dev/null
+note "ghcr.io/craigderington/navarch/site:2 loaded onto byo-dind"
 
 step "It enrolled with a join token, not the shared service token"
 deadline=$((SECONDS + 90)); NODE=""

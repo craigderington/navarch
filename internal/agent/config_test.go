@@ -124,7 +124,7 @@ func TestLoadConfigRefusesPlaintextItCannotContain(t *testing.T) {
 	} else if cfg.InsecureTransport {
 		t.Fatal("a contained URL must not be flagged insecure")
 	}
-	if _, err := load(t, "https://navarch.example.com", ""); err != nil {
+	if _, err := load(t, "https://navar.ch", ""); err != nil {
 		t.Fatalf("https must be allowed: %v", err)
 	}
 

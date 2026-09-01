@@ -7,7 +7,7 @@ import (
 
 func TestCheckBaseURLAllowsWhatCannotLeave(t *testing.T) {
 	for _, raw := range []string{
-		"https://navarch.example.com",
+		"https://navar.ch",
 		"https://10.0.1.7:8417", // TLS anywhere is fine, private or not
 		"http://localhost:8417",
 		"http://127.0.0.1:8417",
@@ -30,7 +30,7 @@ func TestCheckBaseURLAllowsWhatCannotLeave(t *testing.T) {
 // is valid — so it must not be waved through for looking internal.
 func TestCheckBaseURLRefusesPlaintextThatCanLeave(t *testing.T) {
 	for _, raw := range []string{
-		"http://navarch.example.com",
+		"http://navar.ch",
 		"http://10.0.1.7:8417",
 		"http://192.168.1.10:8417",
 		"http://172.16.4.4:8417",

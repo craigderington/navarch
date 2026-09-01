@@ -283,7 +283,7 @@ func TestGuardTransportRefusesPlaintextThatCanLeave(t *testing.T) {
 	var errb bytes.Buffer
 
 	// Contained URLs pass silently — the default and the dev stack among them.
-	for _, u := range []string{"http://localhost:8417", "http://controlplane:8417", "https://navarch.example.com"} {
+	for _, u := range []string{"http://localhost:8417", "http://controlplane:8417", "https://navar.ch"} {
 		errb.Reset()
 		if err := guardTransport(u, &errb); err != nil {
 			t.Fatalf("guardTransport(%q) = %v, want nil", u, err)
