@@ -128,6 +128,9 @@ demo-web: build ## Load every console page against the real fleet
 demo-byo: build ## A customer-owned node with its own router, unreachable from ours
 	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-byo.sh
 
+demo-wildcard: ## One certificate for every preview, against a real ACME server
+	./scripts/demo-wildcard.sh
+
 demo-site: build site-image ## Deploy Navarch's own marketing site onto Navarch
 	API=$(API) API_TOKEN=$(API_TOKEN) ./scripts/demo-site.sh
 

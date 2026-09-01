@@ -90,6 +90,23 @@ type Config struct {
 	// whose hostnames do not resolve publicly — ACME cannot succeed there, and
 	// a failing certificate request on every route is worse than no TLS.
 	RouterCertResolver string
+	// RouterWildcardResolver names a second Traefik ACME resolver, one using a
+	// DNS-01 challenge, and switches preview routes onto a single
+	// `*.<PreviewDomain>` certificate obtained by it.
+	//
+	// Scoped to previews on purpose, and it is the preview domain rather than a
+	// domain of its own so the two cannot drift: a wildcard covering names the
+	// platform does not generate would be a credential held for no reason.
+	// Tenant hostnames and customers' own domains stay on RouterCertResolver's
+	// HTTP-01, which needs no credential at all.
+	//
+	// Empty is the default and the right answer for most installs: it costs a
+	// DNS-provider credential in the ingress, and that is only worth paying when
+	// preview churn is high enough to approach the CA's per-domain issuance
+	// limit. Nothing validates that the resolver exists — a name with no
+	// matching --certificatesresolvers flag leaves previews on Traefik's
+	// self-signed fallback, which is why deploy/README.md says to open one.
+	RouterWildcardResolver string
 }
 
 func Load() (*Config, error) {
@@ -107,6 +124,7 @@ func Load() (*Config, error) {
 		RequireJoinToken:       os.Getenv("COMPOSECTL_REQUIRE_JOIN_TOKEN") == "1",
 		BootstrapJoinToken:     os.Getenv("COMPOSECTL_BOOTSTRAP_JOIN_TOKEN"),
 		RouterCertResolver:     os.Getenv("COMPOSECTL_ROUTER_CERT_RESOLVER"),
+		RouterWildcardResolver: os.Getenv("COMPOSECTL_ROUTER_WILDCARD_RESOLVER"),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("COMPOSECTL_DATABASE_URL is required")

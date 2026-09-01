@@ -56,15 +56,58 @@ control plane regenerates every tick. Traefik reads the whole directory, so
 neither file knows about the other — which is the point: the control plane must
 never write a route it did not derive from a live deployment.
 
-Everything the platform serves now sits under one registered domain, and with
-no wildcard **every hostname is its own certificate** — the console, the API,
-each tenant environment, and each preview, which is a fresh name every time CI
-opens one. Let's Encrypt counts issuance per registered domain per week (50, at
-the time of writing; check before you lean on it), so a busy preview workflow is
-the thing that reaches it first, not the tenants. If that becomes real the
-answer is a DNS-01 wildcard for `*.preview.navar.ch` alone — one credential,
-scoped to the names the platform generates itself, leaving customer domains on
-HTTP-01 where no credential is needed.
+### The preview wildcard, and when to turn it on
+
+By default **every hostname is its own certificate** — the console, the API,
+each tenant, and each preview, which is a fresh name every time CI opens one.
+Let's Encrypt counts issuance per registered domain per week (50, at the time of
+writing; check before you lean on it), and everything here now sits under one
+registered domain. So **previews are what reach that ceiling, not tenants** —
+and reaching it stops issuance for the whole install, tenants included.
+
+The fix is one wildcard, `*.preview.navar.ch`, covering all of them at once. It
+needs the DNS-01 challenge, because there is no host that can answer an HTTP-01
+challenge for a name with a `*` in it — and that means a DNS-provider credential
+sitting in the ingress, which is exactly what HTTP-01 was chosen to avoid.
+
+That trade is why it is **off by default and scoped as narrowly as the mechanism
+allows**. The wildcard covers only the domain the platform mints names in.
+Tenant hostnames and customers' own domains stay on HTTP-01, where there is no
+credential to steal. Turning it on is one variable:
+
+```bash
+cp deploy/production/dns.env.example deploy/production/dns.env
+$EDITOR deploy/production/dns.env      # CF_DNS_API_TOKEN=...
+$EDITOR deploy/production/.env         # NAVARCH_DNS_PROVIDER=cloudflare
+docker compose -f deploy/production/compose.yaml up -d
+```
+
+`dns.env` is separate from `.env` on purpose: `.env` holds the database password
+and the service token, and the one container facing the internet should not be
+handed either. Both are gitignored.
+
+**Scope the token to a delegated zone if you can.** Delegate
+`preview.navar.ch` to its own zone with an `NS` record and issue the token
+against that zone alone — then the credential in the ingress cannot touch the
+apex, `api.`, or `console.`, the three names whose loss is an outage rather than
+an inconvenience. Traefik does not care which zone the challenge record lands
+in.
+
+`make demo-wildcard` runs the whole path locally against Pebble — Let's
+Encrypt's throwaway CA — and asserts the arithmetic: three preview hostnames,
+**one** DNS-01 challenge, all three serving on a chain that verifies. No public
+DNS and no credential needed, because the only substitution is the DNS provider.
+
+**Check it by opening a preview, not by watching it boot.** Traefik starts
+cleanly with a DNS-01 resolver that has no credentials, or a provider name that
+is empty — verified against `traefik:v3.3`. The failure surfaces at issuance:
+the preview serves Traefik's self-signed fallback and the log carries the ACME
+error. `docker compose logs traefik | grep -i acme` is the place to look.
+
+A preview hostname is one label below the preview domain, which is what a
+wildcard covers. Point an ordinary environment two labels deep — 
+`a.b.preview.navar.ch` — and it keeps its own certificate, because claiming a
+name the wildcard cannot cover would serve the browser a mismatch.
 
 **Back up the `acme` volume with `pgdata`.** Losing it re-issues every hostname
 from scratch, against that same weekly budget.
@@ -75,10 +118,16 @@ from scratch, against that same weekly budget.
 
 ```bash
 git clone https://github.com/craigderington/navarch && cd navarch
-cp deploy/production/env.example .env
-$EDITOR .env                      # version, database password, service token, operator email
+cp deploy/production/env.example deploy/production/.env
+$EDITOR deploy/production/.env    # version, database password, service token, operator email
 docker compose -f deploy/production/compose.yaml up -d
 ```
+
+**The `.env` goes beside the compose file, not in the repository root.** Compose
+reads it from the *project* directory, which a bare
+`-f deploy/production/compose.yaml` sets to that file's directory — checked, and
+a root `.env` is ignored even when one is sitting there. The `:?` guards fail
+loudly if you get it wrong, so this costs a minute rather than a mystery.
 
 **Capture the operator token now.** It is minted from `crypto/rand` on first
 boot and logged exactly once. There is no second copy and no way to print it

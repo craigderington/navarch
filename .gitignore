@@ -2,3 +2,8 @@ bin/
 *.test
 docs/navarch-brand-and-naming-guide.md
 dist/
+deploy/production/.env
+deploy/production/dns.env
+deploy/wildcard/dynamic/
+deploy/wildcard/pebble.minica.pem
+deploy/wildcard/root.pem

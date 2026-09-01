@@ -138,8 +138,18 @@ func run(log *slog.Logger) error {
 		if cfg.RouterCertResolver != "" {
 			ropts = append(ropts, router.WithCertResolver(cfg.RouterCertResolver))
 		}
+		// The wildcard is bound to the preview domain rather than configured with
+		// one of its own: those are the only hostnames the platform mints itself,
+		// and a wildcard wider than that is a credential covering names nobody
+		// asked it to cover.
+		if cfg.RouterWildcardResolver != "" {
+			ropts = append(ropts, router.WithWildcard(cfg.PreviewDomain, cfg.RouterWildcardResolver))
+		}
 		rtr = router.New(cfg.RouterDir, ropts...)
-		log.Info("router enabled", "dir", cfg.RouterDir, "certResolver", cfg.RouterCertResolver)
+		log.Info("router enabled", "dir", cfg.RouterDir,
+			"certResolver", cfg.RouterCertResolver,
+			"wildcardResolver", cfg.RouterWildcardResolver,
+			"wildcardDomain", cfg.PreviewDomain)
 	}
 	sched := rollout.NewScheduler(st, log)
 	ctrl := rollout.NewController(st, log, rtr,

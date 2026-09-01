@@ -119,6 +119,7 @@ make demo          # agent-driven rollout to healthy, over HTTP, real containers
 make demo-failure  # bad image → failed, prior deployment untouched
 make demo-fleet    # two nodes, two daemons: ingress pinned, worker spread
 make demo-tls      # real Caddy in front of the API; plaintext refused elsewhere
+make demo-wildcard # three previews, one certificate, against a real ACME server
 make demo-site     # this platform's own marketing site, deployed on it
 make migrate-check # every migration up, down and up again on a scratch database
 make release       # versioned, reproducible navarch binaries into dist/
@@ -780,9 +781,10 @@ holds a router for every hostname the platform serves, so it issues for exactly
 those — the route list is the authorization.** Anything in front would need
 telling separately which hostnames are legitimate, kept in step with the route
 list, and wrong in the dangerous direction the moment it drifted. The challenge
-is HTTP-01 on port 80, which Traefik already owns, so there is **no wildcard and
-therefore no DNS-provider credential in the ingress** — and a customer's own
-domain gets a certificate like any other route.
+is HTTP-01 on port 80, which Traefik already owns, so the default install holds
+**no DNS-provider credential in the ingress at all** — and a customer's own
+domain gets a certificate like any other route. The preview wildcard below is
+the single, scoped exception, and it is off unless an operator asks for it.
 
 Two details, both established by running `traefik:v3.3` rather than by reading:
 
@@ -801,6 +803,68 @@ Two details, both established by running `traefik:v3.3` rather than by reading:
 `tls` is emitted through a pointer with `omitempty` for the reason the empty
 config has its own invariant: Traefik refuses an element with no children, so a
 stray `tls: {}` fails the whole file exactly as `routers: {}` does.
+
+**The preview wildcard is the one place a DNS credential is accepted, and it is
+scoped to the names the platform mints itself.** `COMPOSECTL_ROUTER_WILDCARD_
+RESOLVER` moves routes one label below `COMPOSECTL_PREVIEW_DOMAIN` onto a single
+`*.<preview domain>` certificate from a DNS-01 resolver. The reason is issuance
+volume, not TLS: a preview hostname is minted per CI run and never reused, so
+with a certificate each, **previews reach the CA's per-registered-domain weekly
+limit long before tenants do — and reaching it stops issuance for the whole
+install.** One wildcard turns an unbounded count into one.
+
+Four things make the trade defensible, and each is load-bearing:
+
+- **The wildcard's domain is the preview domain, not a setting of its own**
+  (`cmd/controlplane/main.go` passes `cfg.PreviewDomain`). Two settings could
+  drift, and the drift that matters is a wildcard wider than the names the
+  platform generates — a credential authorized over hostnames nobody asked it to
+  cover. Tenant hostnames and customers' own domains stay on HTTP-01, where
+  there is no credential to steal.
+- **Matching is exactly one label.** `*.preview.x` covers
+  `pr-1-main-93fa144e.preview.x` and does not cover `a.b.preview.x` or the bare
+  `preview.x` — that is what a DNS wildcard means. With `tls.domains` set,
+  Traefik asks for the wildcard and never for the router's own host, so
+  claiming a deeper name would serve a certificate the browser rejects while
+  looking like a certificate bug rather than a routing one.
+- **Each preview route names the wildcard explicitly** rather than relying on
+  Traefik noticing an existing certificate already covers the hostname. The
+  explicit form is order-independent: every preview asks for the same one
+  certificate and Traefik obtains it once, whatever sequence routes appear in.
+- **The agent does not get this option, on purpose.** A BYO node's router
+  serves preview hostnames under *our* preview domain, and its operator cannot
+  hold a DNS credential for a domain they do not own — so those keep per-hostname
+  HTTP-01, which is correct and needs nothing from us. `COMPOSECTL_ROUTER_CERT_
+  RESOLVER` is read by both binaries; this one is control-plane only, and
+  "completing" the symmetry would be asking customers for a key they cannot have.
+- **The credential lives in `deploy/production/dns.env`, never `.env`.** `.env`
+  holds the database password and the service token; the one container facing
+  the internet is handed neither. Both files are gitignored, and `dns.env` is
+  `required: false` so an install without it starts unchanged.
+
+Three behaviours established by running `traefik:v3.3`, not by reading:
+**environment variables are ignored entirely when CLI flags are present** (they
+are mutually exclusive sources, CLI wins — which is why the resolver is compose
+flags and not `TRAEFIK_*` vars); **a DNS-01 resolver with an empty provider, or
+a provider with no credentials, starts cleanly** — the failure surfaces at
+issuance, so the check is opening a preview, not watching the ingress boot; and
+Compose's **`${VAR:+replacement}`** works, which is what lets one variable
+(`NAVARCH_DNS_PROVIDER`) turn on both halves without a second name to keep in
+step.
+
+**`make demo-wildcard` proves the arithmetic, not the TLS.** Three preview
+hostnames, three routes, **one** DNS-01 challenge — and the count is the
+assertion, because a demo that only checked the pages load would pass equally
+well against a certificate per hostname, which is the thing being fixed. It runs
+Pebble (Let's Encrypt's own throwaway CA) and its challenge DNS server, so
+issuance is real end to end on a laptop with no public DNS and no credential.
+The config Traefik reads is written by `deploy/wildcard/gen`, which calls
+`internal/router` — a demo that hand-wrote that YAML would establish only that
+Traefik can obtain a wildcard, which was never in doubt. Verified to fail
+without the wildcard: three challenges, and the first one under the hostname
+rather than the base domain. Exactly one substitution is made — the DNS provider
+is a local adapter behind lego's `httpreq` rather than Cloudflare — and it is
+the one thing that cannot be run locally at all.
 
 **A customer-side router terminates TLS on the same switch, set on their side.**
 Tenant TLS landed on the control plane's router and left the BYO path plain

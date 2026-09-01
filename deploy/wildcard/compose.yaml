@@ -1,0 +1,77 @@
+# A real ACME server, a real Traefik, and a real DNS-01 challenge — the only
+# way the preview wildcard can be shown to work.
+#
+# Everything here is disposable and talks to nothing outside itself. Pebble is
+# Let's Encrypt's own test CA; pebble-challtestsrv is the DNS server Pebble
+# queries to validate a challenge. No public DNS, no real certificate authority,
+# no credential — which is the point: the wildcard path can be exercised on a
+# laptop, where the production path (a genuine DNS provider) cannot.
+#
+# Run it with scripts/demo-wildcard.sh, not by hand.
+
+name: navarch-wildcard
+
+services:
+  # Answers Pebble's DNS lookups, and takes challenge records over an HTTP API.
+  challtestsrv:
+    image: ghcr.io/letsencrypt/pebble-challtestsrv:latest
+    command: ["-defaultIPv6", "", "-defaultIPv4", "10.77.0.30"]
+
+  # The ACME server. It validates the DNS-01 challenge by asking challtestsrv,
+  # so the whole issuance path is real apart from the CA being throwaway.
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:latest
+    command: ["-config", "/test/config/pebble-config.json", "-dnsserver", "challtestsrv:8053"]
+    environment:
+      # Pebble sleeps randomly before validating, to shake out clients that
+      # assume it is instant. A demo asserting on a deadline does not need that.
+      PEBBLE_VA_NOSLEEP: "1"
+    depends_on: [challtestsrv]
+
+  # lego's httpreq DNS provider POSTs the challenge record to an endpoint; this
+  # translates that into challtestsrv's API. It stands in for the one thing that
+  # cannot be faked in production — the provider credential — and for nothing
+  # else, so every other component here is the software that really runs.
+  adapter:
+    image: python:3.12-alpine
+    command: ["python", "/adapter.py"]
+    volumes:
+      - ./adapter.py:/adapter.py:ro
+    depends_on: [challtestsrv]
+
+  backend:
+    image: nginx:alpine
+
+  traefik:
+    image: traefik:v3.3
+    depends_on: [pebble, adapter, backend]
+    command:
+      - "--entryPoints.websecure.address=:443"
+      - "--providers.file.directory=/dynamic"
+      - "--providers.file.watch=true"
+      - "--log.level=INFO"
+      # The same four flags deploy/production/compose.yaml carries, pointed at
+      # Pebble instead of Let's Encrypt. The provider is httpreq here and
+      # whatever the operator set there; nothing else differs.
+      - "--certificatesresolvers.lewild.acme.email=demo@navar.ch"
+      - "--certificatesresolvers.lewild.acme.storage=/acme/acme.json"
+      - "--certificatesresolvers.lewild.acme.caserver=https://pebble:14000/dir"
+      - "--certificatesresolvers.lewild.acme.dnschallenge=true"
+      - "--certificatesresolvers.lewild.acme.dnschallenge.provider=httpreq"
+      # Pebble's DNS view is challtestsrv's, which no public resolver shares, so
+      # the propagation pre-check would wait forever on a record it cannot see.
+      - "--certificatesresolvers.lewild.acme.dnschallenge.propagation.disableChecks=true"
+    environment:
+      LEGO_CA_CERTIFICATES: /pebble.minica.pem
+      HTTPREQ_ENDPOINT: http://adapter:8099
+    volumes:
+      # Written by deploy/wildcard/gen, which calls internal/router — so the
+      # bytes Traefik reads are the bytes the control plane would have written.
+      - ./dynamic:/dynamic:ro
+      - ./pebble.minica.pem:/pebble.minica.pem:ro
+      - acme:/acme
+    ports:
+      - "44443:443"
+
+volumes:
+  acme:

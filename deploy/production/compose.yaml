@@ -19,8 +19,14 @@
 #      hostname. Everything else publishes nothing.
 #
 # Bring it up:
-#   cp deploy/production/env.example .env && $EDITOR .env
+#   cp deploy/production/env.example deploy/production/.env
+#   $EDITOR deploy/production/.env
 #   docker compose -f deploy/production/compose.yaml up -d
+#
+# The .env goes beside this file, not in the repository root. Compose reads it
+# from the *project* directory, which a bare `-f deploy/production/compose.yaml`
+# sets to this file's directory — verified, and a root .env is ignored even when
+# one is sitting there.
 #
 # Upgrading is pull, migrate, restart, in that order — see deploy/README.md.
 # Migrations are immutable and only ever additive, which is what makes that
@@ -95,6 +101,11 @@ services:
       # for any install whose hostnames do not resolve publicly — ACME cannot
       # succeed there, and failing on every route is worse than no TLS.
       COMPOSECTL_ROUTER_CERT_RESOLVER: ${NAVARCH_CERT_RESOLVER:-le}
+      # Preview routes move onto one `*.<preview domain>` certificate when — and
+      # only when — a DNS provider is configured below. `:+` is doing real work:
+      # one variable turns the whole path on, so the resolver name never has to
+      # agree with a second setting somebody could get wrong.
+      COMPOSECTL_ROUTER_WILDCARD_RESOLVER: ${NAVARCH_DNS_PROVIDER:+lewild}
     volumes:
       - traefik-dynamic:/dynamic
     healthcheck:
@@ -140,7 +151,36 @@ services:
       - "--certificatesresolvers.le.acme.storage=/acme/acme.json"
       - "--certificatesresolvers.le.acme.httpchallenge=true"
       - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+      # A second resolver, for previews only. Every hostname above costs its own
+      # certificate, and a preview hostname is minted per CI run and never seen
+      # again — so previews, not tenants, are what reach the CA's per-registered-
+      # domain weekly limit first, and reaching it takes the whole install down
+      # with them. One wildcard turns an unbounded count into one.
+      #
+      # DNS-01 because a wildcard cannot be proved over HTTP-01: there is no
+      # host to answer on. That is the cost — a credential in the ingress, the
+      # thing the resolver above was chosen to avoid — so it is scoped as
+      # narrowly as the mechanism allows: it signs only `*.<preview domain>`,
+      # and tenant hostnames and customers' own domains stay on HTTP-01 where no
+      # credential exists to steal.
+      #
+      # These flags are always present and inert until something names lewild.
+      # Verified against traefik:v3.3 that an empty provider, and a provider with
+      # no credentials, both start cleanly — the failure surfaces at issuance,
+      # not at boot, which is why the README says to open a preview and look.
+      - "--certificatesresolvers.lewild.acme.email=${NAVARCH_ACME_EMAIL}"
+      - "--certificatesresolvers.lewild.acme.storage=/acme/acme.json"
+      - "--certificatesresolvers.lewild.acme.dnschallenge=true"
+      - "--certificatesresolvers.lewild.acme.dnschallenge.provider=${NAVARCH_DNS_PROVIDER:-}"
       - "--log.level=INFO"
+    env_file:
+      # The DNS credential, and nothing else. Deliberately NOT .env: that file
+      # holds the database password and the service token, and handing the whole
+      # of it to the one container facing the internet would undo the reason
+      # every other service reads only what it needs. Absent is fine — the
+      # resolver above simply never succeeds, and nothing names it anyway.
+      - path: ./dns.env
+        required: false
     environment:
       # Read by the templated platform.yml below.
       NAVARCH_DOMAIN: ${NAVARCH_DOMAIN:?set NAVARCH_DOMAIN in .env}

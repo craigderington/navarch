@@ -155,3 +155,94 @@ func readConfig(t *testing.T, dir string) string {
 	}
 	return string(b)
 }
+
+// The wildcard's whole purpose is that N preview routes cost one certificate,
+// so the assertion is on the count: both routes name the wildcard resolver and
+// both ask for the same `*.preview...` domain. Traefik obtains that once.
+//
+// Note what is NOT asserted here, because Go cannot reach it: that Let's
+// Encrypt issues the wildcard, or that Traefik serves it for a matching SNI.
+// This checks the bytes. `make demo-wildcard` puts a real Traefik in front of a
+// real ACME server for the rest.
+func TestWildcardRoutesShareOneCertificate(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir, WithCertResolver("le"), WithWildcard("preview.navar.ch", "lewild"))
+	if err := r.Sync([]Route{
+		{Key: "aaa11111", Hostname: "pr-1-main-aaa11111.preview.navar.ch", Target: "10.0.0.1", Port: 32768},
+		{Key: "bbb22222", Hostname: "pr-2-main-bbb22222.preview.navar.ch", Target: "10.0.0.2", Port: 32769},
+	}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	body := readConfig(t, dir)
+	if strings.Count(body, "certResolver: lewild") != 2 {
+		t.Fatalf("both previews must name the wildcard resolver:\n%s", body)
+	}
+	if strings.Count(body, `main: '*.preview.navar.ch'`) != 2 {
+		t.Fatalf("both previews must ask for the same wildcard:\n%s", body)
+	}
+	if strings.Contains(body, "certResolver: le\n") {
+		t.Fatalf("no preview route should fall through to the per-hostname resolver:\n%s", body)
+	}
+}
+
+// Everything that is not a preview keeps its own certificate, and keeps it from
+// the HTTP-01 resolver — which is the point of scoping the wildcard to a
+// suffix. A tenant's hostname, and a customer's own domain, must never depend
+// on a DNS credential the platform holds for its own preview names.
+func TestWildcardLeavesOtherHostnamesOnHTTP01(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir, WithCertResolver("le"), WithWildcard("preview.navar.ch", "lewild"))
+	if err := r.Sync([]Route{
+		{Key: "aaa11111", Hostname: "shop.acme.com", Target: "10.0.0.1", Port: 32768},
+	}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	body := readConfig(t, dir)
+	if !strings.Contains(body, "certResolver: le\n") {
+		t.Fatalf("a tenant route must stay on the per-hostname resolver:\n%s", body)
+	}
+	if strings.Contains(body, "domains") {
+		t.Fatalf("a tenant route must not name certificate domains:\n%s", body)
+	}
+}
+
+// A DNS wildcard covers exactly one label. Claiming a route the certificate
+// cannot cover would be worse than not claiming it: with `domains` set, Traefik
+// asks for the wildcard and never for the hostname, so the route would serve a
+// name the browser rejects — a failure that looks like a certificate bug rather
+// than a routing one. The bare suffix is excluded for the same reason.
+func TestWildcardCoversExactlyOneLabel(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir, WithCertResolver("le"), WithWildcard("preview.navar.ch", "lewild"))
+	for _, host := range []string{
+		"a.b.preview.navar.ch", // two labels deep — outside the wildcard
+		"preview.navar.ch",     // the suffix itself — a wildcard never covers it
+		"notpreview.navar.ch",  // shares a tail, not a boundary
+	} {
+		if err := r.Sync([]Route{{Key: "abc12345", Hostname: host, Target: "10.0.0.1", Port: 32768}}); err != nil {
+			t.Fatalf("Sync(%s): %v", host, err)
+		}
+		body := readConfig(t, dir)
+		if strings.Contains(body, "lewild") || strings.Contains(body, "domains") {
+			t.Fatalf("%s is not covered by *.preview.navar.ch and must keep its own certificate:\n%s", host, body)
+		}
+	}
+}
+
+// The wildcard needs both halves. A suffix with no resolver is a half-written
+// config, and diverting routes onto a resolver name that is empty would emit
+// `certResolver: ""` — which is not the plaintext case and not the TLS case,
+// but a file Traefik takes and then cannot satisfy.
+func TestWildcardWithoutAResolverChangesNothing(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir, WithCertResolver("le"), WithWildcard("preview.navar.ch", ""))
+	if err := r.Sync([]Route{
+		{Key: "aaa11111", Hostname: "pr-1-main-aaa11111.preview.navar.ch", Target: "10.0.0.1", Port: 32768},
+	}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	body := readConfig(t, dir)
+	if !strings.Contains(body, "certResolver: le\n") || strings.Contains(body, "domains") {
+		t.Fatalf("an incomplete wildcard must leave the route exactly as it was:\n%s", body)
+	}
+}

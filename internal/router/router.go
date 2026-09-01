@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -32,6 +33,11 @@ type Router struct {
 	// certResolver names a Traefik ACME resolver. Empty means plain HTTP only,
 	// which is the dev stack and any install with no public DNS.
 	certResolver string
+	// wildcardSuffix and wildcardResolver divert routes under one domain onto a
+	// single wildcard certificate. Both empty is the ordinary case: every
+	// hostname gets its own certificate.
+	wildcardSuffix   string
+	wildcardResolver string
 }
 
 type Option func(*Router)
@@ -52,6 +58,50 @@ type Option func(*Router)
 // wildcard, and so no DNS-provider credential sitting in the ingress.
 func WithCertResolver(name string) Option {
 	return func(r *Router) { r.certResolver = name }
+}
+
+// WithWildcard makes routes one label below suffix serve a single wildcard
+// certificate — `*.<suffix>` — obtained by the named resolver, instead of one
+// certificate per hostname.
+//
+// This exists for preview environments and nothing else. A preview hostname is
+// minted per run and never seen again, so with HTTP-01 a busy CI pipeline mints
+// a certificate per run too, and Let's Encrypt counts issuance per *registered*
+// domain per week. Previews are therefore the surface that reaches that ceiling
+// first — and when it is reached, it is reached for the whole install, tenants
+// included. One wildcard turns an unbounded count into one.
+//
+// The cost is a DNS-provider credential in the ingress, which is exactly what
+// WithCertResolver's HTTP-01 challenge was chosen to avoid. That is why the
+// wildcard is scoped to a suffix rather than applied to everything: the
+// credential only ever needs to write under the domain the platform generates
+// names in, so tenant hostnames and customers' own domains stay on HTTP-01,
+// where no credential exists to be stolen. Narrowing the wildcard is the whole
+// point; widening it to the apex would put every hostname behind the one
+// credential.
+//
+// Matching is one label, deliberately. `*.preview.example.com` covers
+// `pr-1-main-93fa144e.preview.example.com` and does NOT cover
+// `a.b.preview.example.com` or the bare `preview.example.com` — that is what a
+// DNS wildcard means, and claiming a route the certificate cannot cover would
+// hand the browser a name mismatch. Generated preview hostnames are always one
+// label; an operator is free to point an ordinary environment deeper, and that
+// one keeps its own certificate.
+func WithWildcard(suffix, resolver string) Option {
+	return func(r *Router) {
+		r.wildcardSuffix = strings.TrimPrefix(strings.Trim(suffix, "."), "*.")
+		r.wildcardResolver = resolver
+	}
+}
+
+// coveredByWildcard reports whether host is exactly one label below suffix, the
+// only shape a `*.suffix` certificate is valid for.
+func (r *Router) coveredByWildcard(host string) bool {
+	if r.wildcardSuffix == "" || r.wildcardResolver == "" {
+		return false
+	}
+	label, ok := strings.CutSuffix(host, "."+r.wildcardSuffix)
+	return ok && label != "" && !strings.Contains(label, ".")
 }
 
 func New(dir string, opts ...Option) *Router {
@@ -93,6 +143,15 @@ type traefikRouter struct {
 
 type traefikTLS struct {
 	CertResolver string `yaml:"certResolver"`
+	// Domains overrides what Traefik asks the CA for. Without it a router is
+	// issued a certificate for its own rule host; with it, exactly these — which
+	// is the only way to ask for a wildcard, since no rule host is ever `*.x`.
+	// omitempty because the ordinary route must emit no key at all.
+	Domains []traefikDomain `yaml:"domains,omitempty"`
+}
+
+type traefikDomain struct {
+	Main string `yaml:"main"`
 }
 
 type traefikService struct {
@@ -142,7 +201,17 @@ func (r *Router) Sync(routes []Route) error {
 			EntryPoints: []string{"web"},
 			Service:     svc,
 		}
-		if r.certResolver != "" {
+		// A wildcard route names its certificate explicitly rather than relying on
+		// Traefik noticing that an existing wildcard already covers the hostname.
+		// The explicit form is what makes the count bounded no matter what order
+		// routes appear in: every preview asks for the same one certificate, and
+		// Traefik obtains it once.
+		resolver, domains := r.certResolver, []traefikDomain(nil)
+		if r.coveredByWildcard(rt.Hostname) {
+			resolver = r.wildcardResolver
+			domains = []traefikDomain{{Main: "*." + r.wildcardSuffix}}
+		}
+		if resolver != "" {
 			// websecure only, and deliberately not "web" as well. A router with
 			// `tls` set matches TLS connections *only*, so listing the plain
 			// entrypoint achieves nothing — verified against traefik:v3.3, where
@@ -155,7 +224,7 @@ func (r *Router) Sync(routes []Route) error {
 			// leaves /.well-known/acme-challenge/ alone — so HTTP-01 still
 			// completes and the certificate arrives.
 			router.EntryPoints = []string{"websecure"}
-			router.TLS = &traefikTLS{CertResolver: r.certResolver}
+			router.TLS = &traefikTLS{CertResolver: resolver, Domains: domains}
 		}
 		cfg.HTTP.Routers[key] = router
 		cfg.HTTP.Services[svc] = traefikService{
