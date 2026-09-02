@@ -202,6 +202,9 @@ services:
       NAVARCH_COEXIST_TARGET: ${NAVARCH_COEXIST_TARGET:-}
       NAVARCH_COEXIST_CERT: ${NAVARCH_COEXIST_CERT:-}
       NAVARCH_COEXIST_KEY: ${NAVARCH_COEXIST_KEY:-}
+      # Redirect www.<domain> to the apex. Off unless www resolves here; see
+      # env.example for why the default is the careful one.
+      NAVARCH_WWW_REDIRECT: ${NAVARCH_WWW_REDIRECT:-}
     ports:
       - "80:80"
       - "443:443"
