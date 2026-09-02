@@ -179,6 +179,23 @@ reads it from the *project* directory, which a bare
 a root `.env` is ignored even when one is sitting there. The `:?` guards fail
 loudly if you get it wrong, so this costs a minute rather than a mystery.
 
+The three files holding secrets — `.env`, and `mail.env` / `dns.env` if you use
+them — are gitignored, so they do not arrive with the clone. Copy the ones you
+already validated rather than retyping them on the host:
+
+```bash
+scp deploy/production/{.env,mail.env,dns.env} USER@HOST:navarch/deploy/production/
+```
+
+That is not just convenience. `preflight.sh` checks the `.env` in front of it,
+so a second one written by hand on the host is a file nothing has checked — and
+the failure modes it catches (a surviving `change-me`, an ACME contact at a
+send-only domain) are exactly the ones that look fine until they matter.
+
+**Open 443.** Lightsail's default firewall allows 22 and 80 and not always 443;
+a missing rule looks like a certificate problem, because the HTTP-01 challenge
+on port 80 succeeds and then nothing can reach the site it issued for.
+
 **Capture the operator token now.** It is minted from `crypto/rand` on first
 boot and logged exactly once. There is no second copy and no way to print it
 again — the database stores only its SHA-256.

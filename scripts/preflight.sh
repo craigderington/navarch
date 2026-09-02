@@ -40,6 +40,18 @@ VERSION=${NAVARCH_VERSION:-}
 # before anything has been installed.
 resolve() { getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | sort -u; }
 
+# mx_of prints a domain's MX records, empty if it has none, or the literal
+# "unknown" when this machine has no tool that can ask. Those three are
+# genuinely different answers and collapsing the third into the second is how a
+# check reports a fault that is really a missing dependency.
+mx_of() {
+	if command -v dig >/dev/null 2>&1; then dig +short MX "$1" 2>/dev/null
+	elif command -v host >/dev/null 2>&1; then host -t MX "$1" 2>/dev/null | grep -i "mail is handled" || true
+	elif command -v nslookup >/dev/null 2>&1; then nslookup -type=MX "$1" 2>/dev/null | grep -i "mail exchanger" || true
+	else echo unknown
+	fi
+}
+
 step "Configuration"
 [ -n "$DOMAIN" ]  && ok "domain $DOMAIN"            || bad "NAVARCH_DOMAIN is unset"
 [ -n "$VERSION" ] && ok "version $VERSION"          || bad "NAVARCH_VERSION is unset"
@@ -113,13 +125,15 @@ if [ -f "$MAIL_FILE" ]; then
 		*) ok "mailgun key present" ;;
 	esac
 	if [ -n "$mg_domain" ]; then
-		# Mailgun needs MX and TXT on the sending domain. It needs no A record,
-		# so resolving is not the test — having records at all is.
-		if getent hosts "$mg_domain" >/dev/null 2>&1 || host -t MX "$mg_domain" >/dev/null 2>&1; then
-			ok "$mg_domain has DNS"
-		else
-			warn "$mg_domain has no DNS yet — Mailgun will not send until its MX/TXT/DKIM records exist"
-		fi
+		# MX, never A. A Mailgun sending domain correctly has NO address record,
+		# so an A lookup fails on a perfectly configured one — this check said
+		# "no DNS yet" about a domain whose MX, SPF and DKIM were all in place.
+		# A preflight that cries wolf is one whose next warning gets ignored.
+		case "$(mx_of "$mg_domain")" in
+			unknown) warn "cannot check MX for $mg_domain from here (no dig/host/nslookup)" ;;
+			"")      bad "$mg_domain has no MX — Mailgun will not send until its records exist" ;;
+			*)       ok "$mg_domain has MX records" ;;
+		esac
 	fi
 else
 	warn "no $MAIL_FILE — mail is off; invitations still return a link to paste"
