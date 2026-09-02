@@ -887,6 +887,57 @@ and it is unobservable from here. `deploy/byo/compose.yaml` leaves it unset on
 purpose: the demo routes `.localhost` with no public DNS, where ACME cannot
 complete and every assertion would land against Traefik's self-signed fallback.
 
+**The deploy is checked, not hoped: `scripts/preflight.sh` before the first
+start.** The expensive mistake is starting the stack before DNS resolves — ACME
+verifies by connecting to the name and Let's Encrypt backs off on repeated
+failure, so a premature start does not merely fail, it puts the domain in a
+penalty box and the second attempt fails for reasons resembling nothing about
+the first. Everything else it checks rides along: placeholder secrets that would
+reach production as credentials the whole repository knows, an ACME contact at a
+send-only domain, images not actually published for the pinned version, a
+DNS-01 provider named with no credential file behind it.
+
+Two of its checks were wrong first and are worth keeping right. It asked for an
+**A record on the Mailgun sending domain**, which correctly has none — MX, SPF,
+DKIM and a tracking CNAME and nothing else — so it reported "no DNS yet" about a
+perfectly configured domain; it asks for MX now, and distinguishes *has none*
+from *cannot ask from this machine*, because collapsing those reports a fault
+that is really a missing dependency. And it compared a name to an address
+**without any opinion about whose machine that was**, passing against a host
+already running someone else's live site; it now inspects what answers on 443
+and separates nothing-there / Traefik-with-nothing-issued / somebody-else's
+certificate. `NAVARCH_COEXIST_DOMAIN` is the escape hatch for the third, and it
+is a *name* rather than a flag: declaring one incumbent still fails if something
+unexpected answers, which is the whole value of having looked.
+
+`scripts/dns-route53.sh` emits the four records as a change batch and applies
+nothing without `--apply`, because DNS is the one part of a deploy with no undo
+worth the name. `UPSERT`, never `CREATE`: the apex usually already holds a
+parking record, and `CREATE` would fail on that one while succeeding on the
+other three.
+
+**An incumbent site moves behind Traefik, never beside it.** Traefik must own 80
+and 443 — HTTP-01 is answered on 80 and nothing else can hold it — so
+`platform.yml` carries a template-gated static route for a site that was on the
+host first, off entirely unless `NAVARCH_COEXIST_DOMAIN` is set. Static, in that
+file, for the same reason the console and API routes are: the control plane must
+never write a route it did not derive from a live deployment, and an incumbent
+is not a deployment. `NAVARCH_COEXIST_CERT` serves the certificate already on
+disk from the first request — without it Traefik holds 443 for a hostname it has
+not been issued for and answers with its self-signed default, which on a site
+with HSTS is not a warning anyone clicks through but a hard refusal in every
+browser until ACME finishes. **A dedicated host is still the better answer**:
+sharing means one kernel, one Docker daemon, one failure domain, and an agent
+holding a root-equivalent socket beside somebody else's production.
+
+**`NAVARCH_WWW_REDIRECT` is off by default, and the default is the careful one.**
+The router asks ACME for `www.<domain>` the moment it exists, so on an install
+with no www record it is a validation that fails on every retry forever. Turn it
+on where www does resolve: a name reaching the host with no router gets
+Traefik's self-signed default, and a certificate interstitial is a worse answer
+than NXDOMAIN — somebody who typed www can read a redirect and cannot read a
+browser warning.
+
 **Production runs one ingress.** Traefik holds 80 and 443 and serves tenants,
 the console and the API. The platform's own two routes are static, in
 `deploy/production/dynamic/platform.yml`, beside the file the control plane
@@ -1228,7 +1279,7 @@ indistinguishable from "nothing is happening", which is precisely when the
 distinction matters. Panes also do not cost the same and the poll cadence
 reflects it: fleet, events and health are one request each, and the environment
 catalog is one request too — `GET /v1/orgs/{org}/environments` (the catalog
-walk of apps → stacks → envs it replaced cost 15 requests against the dev
+walk of apps → stacks → envs it replaced cost 115 requests against the dev
 fleet and grew with the catalog, so the TUI keeps the same slow tier and
 only-while-visible cadence out of habit rather than need).
 
