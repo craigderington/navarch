@@ -75,6 +75,23 @@ services:
       - "-database=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-navarch}?sslmode=disable"
       - "up"
 
+  # Makes the router volume writable before anything tries to write it.
+  #
+  # Docker does NOT chown a fresh named volume to the container's user — checked,
+  # and it is the whole reason this exists. The control plane image is
+  # distroless:nonroot (uid 65532), so on a brand-new volume owned by root it
+  # cannot create its own config file. Nothing crashes: the loop logs
+  # "router sync failed ... permission denied" every tick and routes simply
+  # never appear, which is a far worse failure than not starting.
+  #
+  # The dev stack has had this since routing existed. This file was written
+  # without it, and `docker compose config` cannot tell you that.
+  traefik-init:
+    image: busybox
+    command: ["sh", "-c", "mkdir -p /dynamic && chown 65532:65532 /dynamic && chmod 700 /dynamic"]
+    volumes:
+      - traefik-dynamic:/dynamic
+
   controlplane:
     image: ${NAVARCH_IMAGE:-ghcr.io/craigderington/navarch/controlplane}:${NAVARCH_VERSION:?set NAVARCH_VERSION in .env}
     restart: unless-stopped
@@ -82,6 +99,8 @@ services:
       postgres:
         condition: service_healthy
       migrate:
+        condition: service_completed_successfully
+      traefik-init:
         condition: service_completed_successfully
     environment:
       COMPOSECTL_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-navarch}?sslmode=disable
@@ -119,6 +138,11 @@ services:
       - path: ./mail.env
         required: false
     volumes:
+      # A named volume, NOT a host directory. Docker chowns a fresh named volume
+      # to the container's user; it never chowns a bind mount. The control plane
+      # image is distroless:nonroot (uid 65532), so a bind mount here leaves it
+      # unable to write its own router config — which surfaces as a WARN every
+      # tick and routes that silently never appear, not as a failure to start.
       - traefik-dynamic:/dynamic
     healthcheck:
       test: ["CMD", "/composectl-controlplane", "-healthcheck"]
@@ -140,6 +164,14 @@ services:
   traefik:
     image: traefik:v3.3
     restart: unless-stopped
+    # Ordering is load-bearing, not tidiness. Whichever container mounts the
+    # fresh named volume first decides its ownership: Traefik runs as root, so
+    # if it wins the race the volume is root-owned and the nonroot control plane
+    # can never write a route into it. The dev stack has always had this; the
+    # production file was missing it.
+    depends_on:
+      controlplane:
+        condition: service_healthy
     command:
       - "--entryPoints.web.address=:80"
       # Plain HTTP redirects to HTTPS. Verified against traefik:v3.3 that this
@@ -209,9 +241,17 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - traefik-dynamic:/dynamic:ro
-      # The static routes for the console and the API, alongside the generated
-      # tenant routes. Traefik reads the whole directory.
+      # NOT :ro, deliberately, and this is not laziness. platform.yml is bind
+      # mounted INSIDE this volume below, and runc has to create the mountpoint
+      # file before it can bind anything over it — against a read-only mount
+      # that fails at container start with "read-only file system". Traefik
+      # never writes to its file-provider directory; the flag bought nothing and
+      # cost the deploy.
+      - traefik-dynamic:/dynamic
+      # The static routes, alongside the generated ones. Traefik reads the whole
+      # directory, so neither file knows about the other — which is the point:
+      # the control plane must never write a route it did not derive from a live
+      # deployment.
       - ./dynamic/platform.yml:/dynamic/platform.yml:ro
       # Issued certificates. Back this up with pgdata: losing it means every
       # hostname re-issues, and Let's Encrypt rate limits will notice.
