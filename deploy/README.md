@@ -240,6 +240,26 @@ A  navar.ch            -> your static IP   # a stack you deploy there
 A  *.preview.navar.ch  -> your static IP   # preview environments
 ```
 
+On Route 53, `./scripts/dns-route53.sh <static-ip>` prints exactly that as a
+change batch and applies it with `--apply`. A file rather than console clicks
+because DNS has no undo worth the name — a wrong record propagates, gets cached
+by resolvers you do not control, and takes its TTL to come back. It uses
+`UPSERT`, not `CREATE`: the apex almost certainly still holds the registrar's
+parking record, and `CREATE` would fail on that one while succeeding on the
+other three, which is the worst outcome available.
+
+**Use a static IP, not the instance's default public address.** Lightsail
+releases the default one on stop/start, so every record and every certificate
+would break on the first restart.
+
+Then `./scripts/preflight.sh <static-ip>` before anything is started. It checks
+that all four names resolve where they should, that no placeholder secret
+survived into `.env`, that the images for the pinned version are actually
+published, and that a DNS provider named in `.env` has a credential file behind
+it. A failure there can be your own resolver's cache rather than the zone, and
+it says so — that is the one result most likely to be disbelieved and worked
+around.
+
 Separate names because they are separate audiences: a person opens the console,
 agents and CI talk to the API. Neither has to know the other's routes, and
 either can move without breaking the other.
