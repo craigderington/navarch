@@ -102,6 +102,44 @@ else
 	echo "     you just added may need their TTL to pass before this agrees"
 fi
 
+step "The host itself"
+if [ -z "$IP" ]; then
+	warn "no target IP; cannot check what is already on it"
+elif ! command -v openssl >/dev/null 2>&1; then
+	warn "openssl not available; cannot check what is already serving on $IP"
+else
+	# "The name points at the IP you gave me" is necessary and NOT sufficient:
+	# it says nothing about whose machine that is. This check exists because the
+	# apex passed against an address that turned out to be a different, live
+	# production service — Apache serving another domain, with a valid
+	# certificate and HSTS preload. Deploying there would have failed to bind
+	# 80/443, and "fixing" that by stopping the incumbent would have taken a
+	# real site down.
+	cert=$(echo | timeout 12 openssl s_client -connect "$IP:443" -servername "$DOMAIN" 2>/dev/null 		| openssl x509 -noout -subject -ext subjectAltName 2>/dev/null)
+	case "$cert" in
+		"")
+			ok "nothing serving TLS on $IP yet"
+			;;
+		*"TRAEFIK DEFAULT CERT"*)
+			# Traefik presents this before ACME has issued anything. On a fresh
+			# install it is exactly what should be there.
+			ok "traefik is up on $IP with no certificate issued yet"
+			;;
+		*"$DOMAIN"*)
+			ok "$IP already serves a certificate covering $DOMAIN"
+			;;
+		*)
+			bad "SOMETHING ELSE IS ALREADY SERVING ON $IP"
+			printf '     %s\n' "$(echo "$cert" | tr -s ' \n' ' ')"
+			printf '     Traefik needs 80 and 443. It cannot bind them here, and stopping\n'
+			printf '     whatever holds them would take that service down instead.\n'
+			;;
+	esac
+	srv=$(timeout 10 curl -sS -o /dev/null -D- "http://$IP/" -H "Host: $DOMAIN" 2>/dev/null \
+		| grep -i '^server:' | tr -d '\r')
+	[ -n "$srv" ] && printf '     port 80 answers: %s\n' "$srv"
+fi
+
 step "Images"
 if command -v docker >/dev/null 2>&1 && [ -n "$VERSION" ]; then
 	for img in "controlplane:$VERSION" "agent:$VERSION" "web:$VERSION"; do
