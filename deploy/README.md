@@ -134,13 +134,7 @@ every browser, with no click-through and no plain-HTTP fallback.
 # 1. Docker first, so docker0 exists for Apache to bind to.
 curl -fsSL https://get.docker.com | sh
 
-# 2. Move the incumbent to the bridge address, HTTP only. Not 127.0.0.1:
-#    Traefik reaches it from inside a container and cannot see the host's
-#    loopback. Not 0.0.0.0 either — that is public unless a firewall says
-#    otherwise, and "unless a firewall says otherwise" is not a boundary.
-#      /etc/apache2/ports.conf     Listen 80        -> Listen 172.17.0.1:8080
-#      the vhost                   <VirtualHost *:80> -> <VirtualHost 172.17.0.1:8080>
-#      the SSL vhost               a2dissite it; TLS terminates at Traefik now
+# 2. Move the incumbent behind Traefik — see "Moving Apache behind Traefik".
 ip -4 addr show docker0            # confirm the address before you commit to it
 
 # 3. Declare it in deploy/production/.env
@@ -157,6 +151,87 @@ systemctl reload apache2 && docker compose -f deploy/production/compose.yaml up 
 # 5. Verify before you walk away.
 curl -sS -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' https://example.org/
 ```
+
+#### Moving Apache behind Traefik
+
+Apache currently owns 80 and 443 and terminates TLS itself. Afterwards Traefik
+owns both and terminates TLS; Apache listens on an address only containers can
+reach and speaks plain HTTP. Three edits and a config test.
+
+First find out what you actually have — these paths are Debian/Ubuntu, and
+`httpd` on RHEL-family systems puts the same things elsewhere:
+
+```bash
+apache2ctl -S                      # every vhost, and which file defines it
+grep -rn '^Listen' /etc/apache2/ports.conf
+ls /etc/apache2/sites-enabled/
+```
+
+**1. `/etc/apache2/ports.conf`** — stop listening publicly:
+
+```apache
+Listen 172.17.0.1:8080             # was: Listen 80
+# Listen 443                       # commented out; Traefik terminates TLS now
+```
+
+`172.17.0.1`, not `127.0.0.1`: Traefik reaches Apache from inside a container
+and cannot see the host's loopback. Not `0.0.0.0` either — that is public unless
+a firewall says otherwise, and "unless a firewall says otherwise" is not a
+boundary.
+
+**2. The HTTP vhost** — change the address it answers on:
+
+```apache
+<VirtualHost 172.17.0.1:8080>      <!-- was: <VirtualHost *:80> -->
+```
+
+**3. Disable the TLS vhost.** Certbot's Apache installer writes it as
+`<site>-le-ssl.conf`, so `sudo a2dissite statuspulse-le-ssl`. It would otherwise
+still try to bind 443, which Traefik now holds. The certificate files stay
+exactly where they are — Traefik reads them, and nothing moves or rewrites them.
+
+##### The trap: certbot's redirect
+
+If certbot ever offered to "redirect HTTP to HTTPS" and you said yes, your HTTP
+vhost contains something like:
+
+```apache
+RewriteRule ^ https://%{SERVER_NAME}%{REQUEST_URI} [END,NE,R=permanent]
+```
+
+**Delete it.** Traefik already redirects HTTP to HTTPS at the edge, then forwards
+the request to Apache as plain HTTP. If Apache redirects that to HTTPS too, the
+browser goes back to Traefik, which forwards it again — **an infinite redirect
+loop**, and the site is down as thoroughly as if you had stopped it. It presents
+as `ERR_TOO_MANY_REDIRECTS` with both servers reporting healthy, which is why it
+is worth deleting before the cutover rather than debugging after.
+
+##### Then test, in this order
+
+```bash
+sudo apache2ctl configtest         # never reload on a config you have not parsed
+sudo systemctl reload apache2
+curl -sS -o /dev/null -w '%{http_code}\n' http://172.17.0.1:8080/   # Apache, direct
+```
+
+That last line is the one that proves the move worked *before* Traefik depends
+on it. If it does not answer, nothing Traefik does afterwards can help.
+
+##### If the site cares who is asking
+
+Behind a proxy every request now appears to come from the Docker bridge. Traefik
+sets the standard headers; Apache has to be told to believe them:
+
+```apache
+RemoteIPHeader X-Forwarded-For
+RemoteIPTrustedProxy 172.17.0.0/16
+SetEnvIf X-Forwarded-Proto https HTTPS=on
+```
+
+`mod_remoteip` restores real client addresses in logs and to the application.
+The `HTTPS=on` line matters for anything that builds absolute URLs from whether
+the request looked secure — without it a PHP or Rails app will happily emit
+`http://` links on an HTTPS page.
 
 **Then disable certbot's renewal.** It cannot renew any more — its authenticator
 wants port 80 and Traefik has it — and leaving the timer enabled means a
