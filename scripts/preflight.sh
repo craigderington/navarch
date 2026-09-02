@@ -128,6 +128,14 @@ else
 		*"$DOMAIN"*)
 			ok "$IP already serves a certificate covering $DOMAIN"
 			;;
+		*"${NAVARCH_COEXIST_DOMAIN:-\$__never}"*)
+			# Declared in .env, so this is a deliberate coexistence rather than a
+			# surprise. The escape hatch is a specific name, not a flag that
+			# silences the check: anything ELSE serving here is still a failure,
+			# which is the whole value of having looked.
+			ok "$IP serves ${NAVARCH_COEXIST_DOMAIN}, which .env declares as the incumbent"
+			printf '     it must be moved behind Traefik — see deploy/README.md\n'
+			;;
 		*)
 			bad "SOMETHING ELSE IS ALREADY SERVING ON $IP"
 			printf '     %s\n' "$(echo "$cert" | tr -s ' \n' ' ')"

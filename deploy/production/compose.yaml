@@ -196,6 +196,12 @@ services:
     environment:
       # Read by the templated platform.yml below.
       NAVARCH_DOMAIN: ${NAVARCH_DOMAIN:?set NAVARCH_DOMAIN in .env}
+      # A site that held this host before Navarch. Empty (the default) and
+      # platform.yml emits nothing for it at all. See deploy/README.md.
+      NAVARCH_COEXIST_DOMAIN: ${NAVARCH_COEXIST_DOMAIN:-}
+      NAVARCH_COEXIST_TARGET: ${NAVARCH_COEXIST_TARGET:-}
+      NAVARCH_COEXIST_CERT: ${NAVARCH_COEXIST_CERT:-}
+      NAVARCH_COEXIST_KEY: ${NAVARCH_COEXIST_KEY:-}
     ports:
       - "80:80"
       - "443:443"
@@ -207,6 +213,14 @@ services:
       # Issued certificates. Back this up with pgdata: losing it means every
       # hostname re-issues, and Let's Encrypt rate limits will notice.
       - acme:/acme
+      # An incumbent site's existing certificates, read-only, so a cutover
+      # serves them from the first request rather than Traefik's self-signed
+      # default while ACME catches up. Defaults to a directory that already
+      # exists: a bind mount whose source is missing makes Docker create an
+      # empty one silently, which is the failure this file was already bitten by
+      # once. Point it at /etc/letsencrypt (the whole tree — live/ is symlinks
+      # into archive/) when you need it.
+      - ${NAVARCH_COEXIST_CERT_DIR:-./dynamic}:/coexist-certs:ro
 
   # The browser console. A separate service because it is optional: an install
   # that only ever uses the CLI simply does not run it, and the API is not

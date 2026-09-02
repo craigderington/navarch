@@ -109,6 +109,76 @@ wildcard covers. Point an ordinary environment two labels deep —
 `a.b.preview.navar.ch` — and it keeps its own certificate, because claiming a
 name the wildcard cannot cover would serve the browser a mismatch.
 
+### Sharing a host with a site that was already there
+
+Traefik must own **80 and 443**. HTTP-01 is answered on 80 and there is no
+second process that can hold it, so an incumbent site moves *behind* Traefik
+rather than beside it. That is the same "production runs one ingress" the
+console and the API already live under; the incumbent just becomes a third
+static route.
+
+Two things make the cutover safe, and both are about the window where neither
+server is listening:
+
+**Pull before you stop anything.** `docker compose pull` first, so the gap is a
+container start and not an image download over the public internet.
+
+**Bring the existing certificate with you.** Point `NAVARCH_COEXIST_CERT` at the
+certificate that is already on disk and Traefik serves it from the very first
+request. Without it there are seconds-to-minutes where Traefik holds 443 for a
+hostname it has no certificate for and answers with its self-signed default — an
+ugly warning on an ordinary site, and on one with **HSTS** a hard refusal in
+every browser, with no click-through and no plain-HTTP fallback.
+
+```bash
+# 1. Docker first, so docker0 exists for Apache to bind to.
+curl -fsSL https://get.docker.com | sh
+
+# 2. Move the incumbent to the bridge address, HTTP only. Not 127.0.0.1:
+#    Traefik reaches it from inside a container and cannot see the host's
+#    loopback. Not 0.0.0.0 either — that is public unless a firewall says
+#    otherwise, and "unless a firewall says otherwise" is not a boundary.
+#      /etc/apache2/ports.conf     Listen 80        -> Listen 172.17.0.1:8080
+#      the vhost                   <VirtualHost *:80> -> <VirtualHost 172.17.0.1:8080>
+#      the SSL vhost               a2dissite it; TLS terminates at Traefik now
+ip -4 addr show docker0            # confirm the address before you commit to it
+
+# 3. Declare it in deploy/production/.env
+#      NAVARCH_COEXIST_DOMAIN=example.org
+#      NAVARCH_COEXIST_TARGET=172.17.0.1:8080
+#      NAVARCH_COEXIST_CERT_DIR=/etc/letsencrypt
+#      NAVARCH_COEXIST_CERT=/coexist-certs/live/example.org/fullchain.pem
+#      NAVARCH_COEXIST_KEY=/coexist-certs/live/example.org/privkey.pem
+
+# 4. Pull, THEN cut over. These two lines are the whole outage.
+docker compose -f deploy/production/compose.yaml pull
+systemctl reload apache2 && docker compose -f deploy/production/compose.yaml up -d
+
+# 5. Verify before you walk away.
+curl -sS -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' https://example.org/
+```
+
+**Then disable certbot's renewal.** It cannot renew any more — its authenticator
+wants port 80 and Traefik has it — and leaving the timer enabled means a
+recurring failure email about a certificate Traefik is already renewing
+correctly. `systemctl disable --now certbot.timer`.
+
+**Rolling back is putting the ports back.** Stop the stack, restore the two
+Apache directives, reload. The incumbent's certificate was never moved or
+modified — Traefik only ever read it.
+
+`preflight.sh` refuses to pass against a host that is already serving somebody
+else's certificate, and `NAVARCH_COEXIST_DOMAIN` is the escape hatch. It is a
+*name*, not a flag: declaring `example.org` still fails if something unexpected
+answers instead, which is the entire value of having looked.
+
+**What this does not fix.** Both services now share one kernel, one Docker
+daemon, one public address and one failure domain — and the agent holds the host
+Docker socket, which is root-equivalent. Reconcile only ever touches containers
+labelled `cc.env`, so it will not disturb anything else running there, but that
+is a property of the code rather than a boundary the kernel enforces. A separate
+instance is still the better answer whenever it is affordable.
+
 ### Transactional email
 
 Optional, and off unless configured. With it, three things reach an

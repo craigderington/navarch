@@ -1,4 +1,5 @@
-# The platform's own two routes: the console and the API.
+# The platform's own static routes: the console, the API, and optionally a site
+# that held this host before Navarch did.
 #
 # Hand-written and static, unlike composectl.yml beside it, which the control
 # plane regenerates every tick. Traefik's file provider reads the whole
@@ -31,6 +32,26 @@ http:
       service: navarch-api
       tls:
         certResolver: le
+{{if env "NAVARCH_COEXIST_DOMAIN"}}
+
+    # A site that held this host before Navarch did.
+    #
+    # Traefik has to own 80 and 443 — HTTP-01 is answered on 80, and there is no
+    # second process that can hold it — so anything already serving here moves
+    # BEHIND Traefik rather than beside it. That is not a concession: production
+    # runs one ingress, and this is the same shape the console and API use.
+    #
+    # A static route, in this file, because the control plane must never write a
+    # route it did not derive from a live deployment. An incumbent site is not a
+    # deployment and never will be.
+    coexist:
+      rule: Host(`{{env "NAVARCH_COEXIST_DOMAIN"}}`) || Host(`www.{{env "NAVARCH_COEXIST_DOMAIN"}}`)
+      entryPoints:
+        - websecure
+      service: coexist
+      tls:
+        certResolver: le
+{{end}}
 
   services:
     navarch-console:
@@ -41,3 +62,30 @@ http:
       loadBalancer:
         servers:
           - url: http://controlplane:8417
+{{if env "NAVARCH_COEXIST_DOMAIN"}}
+    coexist:
+      loadBalancer:
+        servers:
+          # The incumbent, moved to a loopback port and speaking plain HTTP.
+          # TLS terminates at Traefik now; terminating again behind it would be
+          # two places to renew a certificate and two answers to "is this https".
+          - url: http://{{env "NAVARCH_COEXIST_TARGET"}}
+{{end}}
+{{if env "NAVARCH_COEXIST_CERT"}}
+
+# The incumbent's EXISTING certificate, served from the very first request.
+#
+# Without this there is a window — seconds, sometimes minutes — where Traefik
+# holds 443 for a hostname it has not been issued a certificate for yet and
+# answers with its self-signed default. For an ordinary site that is an ugly
+# warning somebody clicks through. For one with HSTS preload it is a hard
+# refusal in every browser, with no click-through and no plain-HTTP fallback,
+# lasting until ACME finishes.
+#
+# So the cutover serves the certificate that already exists on disk, and ACME
+# renews it on Traefik's own schedule afterwards. No gap, and nothing to undo.
+tls:
+  certificates:
+    - certFile: {{env "NAVARCH_COEXIST_CERT"}}
+      keyFile: {{env "NAVARCH_COEXIST_KEY"}}
+{{end}}
