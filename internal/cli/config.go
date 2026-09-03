@@ -95,43 +95,58 @@ func loadConfigFile() Config {
 	return Config{}
 }
 
+// credential is the one thing --token and --token-file both express.
+//
+// It is resolved as a single value: whichever tier last names EITHER of them
+// replaces the credential outright. That is not a stylistic preference. Layering
+// the two fields independently and then combining them with "the token wins if
+// it is set" — which is what this did — lets the LOWEST-precedence source beat
+// the highest, because a `token:` in the config file is already non-empty by the
+// time a --token-file on the command line is considered. The request then went
+// out under a credential the operator did not name, silently, and against the
+// wrong install if the stored one pointed somewhere else.
+type credential struct{ token, file string }
+
+func (c credential) given() bool { return c.token != "" || c.file != "" }
+
 func resolveConfig(flags Config) (Config, error) {
 	file := loadConfigFile()
 	cfg := defaultConfig()
 	if file.URL != "" {
 		cfg.URL = file.URL
 	}
-	if file.Token != "" {
-		cfg.Token = file.Token
-	}
-	if file.TokenFile != "" {
-		cfg.TokenFile = file.TokenFile
-	}
 	if file.Output != "" {
 		cfg.Output = file.Output
 	}
 
+	// One credential, resolved across all three tiers in order. Within a single
+	// tier the direct value still beats the indirection — `--token` over
+	// `--token-file`, `NAVARCH_TOKEN` over `NAVARCH_TOKEN_FILE` — which is the
+	// pre-existing behaviour and the reading that surprises nobody.
+	//
+	// The environment tier is itself two-dimensional and deliberate: the
+	// dedicated CLI token outranks the shared stack token, and within each of
+	// those the new name outranks its legacy predecessor.
+	var cred credential
+	for _, c := range []credential{
+		{file.Token, file.TokenFile},
+		{
+			firstEnv(envToken, envTokenLegacy, envAgentToken, envAgentTokenLegacy),
+			firstEnv(envTokenFile, envTokenFileLegacy),
+		},
+		{flags.Token, flags.TokenFile},
+	} {
+		if c.given() {
+			cred = c
+		}
+	}
+	cfg.Token, cfg.TokenFile = cred.token, cred.file
+
 	if v := firstEnv(envURL, envURLLegacy); v != "" {
 		cfg.URL = v
 	}
-	// Ordering is two-dimensional and deliberate: the dedicated CLI token
-	// outranks the shared stack token (pre-existing behaviour), and within each
-	// of those tiers the new name outranks the legacy one.
-	if v := firstEnv(envToken, envTokenLegacy, envAgentToken, envAgentTokenLegacy); v != "" {
-		cfg.Token = v
-	}
-	if v := firstEnv(envTokenFile, envTokenFileLegacy); v != "" {
-		cfg.TokenFile = v
-	}
-
 	if flags.URL != "" {
 		cfg.URL = flags.URL
-	}
-	if flags.Token != "" {
-		cfg.Token = flags.Token
-	}
-	if flags.TokenFile != "" {
-		cfg.TokenFile = flags.TokenFile
 	}
 	if flags.Output != "" {
 		cfg.Output = flags.Output
@@ -235,8 +250,9 @@ func saveConfig(url, token string) (string, error) {
 	}
 	cfg.URL = url
 	cfg.Token = token
-	// A token that has just been written inline would otherwise be shadowed on
-	// the next run by a stale token_file pointing somewhere else.
+	// A file holding both keys expresses two credentials of which only one can
+	// take effect, and the one that loses is invisible. Logging in names the
+	// token directly, so the indirection goes.
 	cfg.TokenFile = ""
 
 	body, err := yaml.Marshal(cfg)

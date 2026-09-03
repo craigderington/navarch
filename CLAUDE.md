@@ -64,6 +64,28 @@ carry the bearer token and an unset token is a hard failure, not a degraded
 mode. `TestEnvPrecedenceAcrossTheRename` covers both directions. The legacy
 half is removable once nothing sets it.
 
+**`--token` and `--token-file` are one value, resolved tier by tier — not two
+fields combined at the end.** `resolveConfig` layered them independently (file →
+env → flag, each field on its own) and then combined with `if cfg.Token == "" &&
+cfg.TokenFile != ""`. That question ignores *where* each came from, so a `token:`
+in `~/.config/navarch/config.yaml` — the lowest-precedence source there is — beat
+a `--token-file` typed on the command line, which is the highest. The request
+went out under a credential the operator had just overridden, silently, and
+against the wrong install if the stored one pointed elsewhere. Each tier now
+replaces the credential outright if it names *either* form; within one tier the
+direct value still beats the indirection, which is the pre-existing reading.
+`TestACredentialOnTheCommandLineBeatsAStoredOne` and
+`TestTheEnvironmentBeatsTheFileAndLosesToTheFlags` pin it, verified to fail
+against the old rule.
+
+**`internal/cli`'s `TestMain` gives every test its own `$HOME` and a cleared
+environment**, because configuration resolves from the real config file and the
+real `NAVARCH_*` variables. Without it a test asserting on "the token that
+reached the server" asserts on whatever the developer is logged into — which is
+how the bug above surfaced, with a live operator token printed into a failure
+message. CI stayed green the whole time, having no config file: the machine that
+would notice is the one where nobody is looking.
+
 **The domain is `navar.ch`, and it renames nothing.** Every `navarch.*` was
 taken or priced as a sale, and this is not the consolation it looks like: the
 domain hack spells the product across the dot, so the binary, the module path,
