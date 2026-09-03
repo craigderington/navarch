@@ -51,7 +51,7 @@ func cmdValidate(ctx context.Context, e env, args []string) error {
 
 func cmdOrg(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch org list|create ...")
+		return usageFor("org")
 	}
 	switch args[0] {
 	case "list":
@@ -85,13 +85,13 @@ func cmdOrg(ctx context.Context, e env, args []string) error {
 		}
 		return emitOne(e, o, []string{"ID", "SLUG", "NAME"}, []string{o.ID, o.Slug, o.Name})
 	default:
-		return usage("usage: navarch org list|create ...")
+		return usageFor("org")
 	}
 }
 
 func cmdApp(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch app list|create --org ID ...")
+		return usageFor("app")
 	}
 	switch args[0] {
 	case "list":
@@ -137,13 +137,13 @@ func cmdApp(ctx context.Context, e env, args []string) error {
 		}
 		return emitOne(e, a, []string{"ID", "SLUG", "NAME", "ORG"}, []string{a.ID, a.Slug, a.Name, a.OrgID})
 	default:
-		return usage("usage: navarch app list|create --org ID ...")
+		return usageFor("app")
 	}
 }
 
 func cmdStack(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch stack list|create|get|push|versions ...")
+		return usageFor("stack")
 	}
 	switch args[0] {
 	case "list":
@@ -236,13 +236,13 @@ func cmdStack(ctx context.Context, e env, args []string) error {
 		}
 		return emit(e, vs, []string{"ID", "VERSION", "DIGEST", "CREATED_BY", "CREATED"}, rows)
 	default:
-		return usage("usage: navarch stack list|create|get|push|versions ...")
+		return usageFor("stack")
 	}
 }
 
 func cmdEnv(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch env list|create|get ...")
+		return usageFor("env")
 	}
 	switch args[0] {
 	case "list":
@@ -310,20 +310,20 @@ func cmdEnv(ctx context.Context, e env, args []string) error {
 		return emitOne(e, ev, []string{"ID", "SLUG", "HOSTNAME", "NODE", "LIVE"},
 			[]string{ev.ID, ev.Slug, ev.Hostname, homeNode(ev.HomeNode), live})
 	default:
-		return usage("usage: navarch env list|create|get ...")
+		return usageFor("env")
 	}
 }
 
 func cmdPreview(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 || args[0] != "create" {
-		return usage("usage: navarch preview create --stack ID --slug SLUG [--inherit ENV_SLUG] [--ttl HOURS] [--version ID]")
+		return usageFor("preview")
 	}
 	flags, _, err := flagMap(args[1:])
 	if err != nil {
 		return err
 	}
 	if flags["stack"] == "" || flags["slug"] == "" {
-		return usage("usage: navarch preview create --stack ID --slug SLUG [--inherit ENV_SLUG] [--ttl HOURS] [--version ID]")
+		return usageFor("preview")
 	}
 	in := client.CreatePreviewInput{
 		Slug:               flags["slug"],
@@ -372,7 +372,7 @@ func cmdDeploy(ctx context.Context, e env, args []string) error {
 
 func cmdDeployment(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch deployment list|get ...")
+		return usageFor("deployment")
 	}
 	switch args[0] {
 	case "list":
@@ -408,7 +408,7 @@ func cmdDeployment(ctx context.Context, e env, args []string) error {
 			[]string{d.ID, strconv.Itoa(d.Revision), d.Slot, d.State,
 				nodeStatus(d.HomeNode, d.HomeNodeState), d.ProjectName})
 	default:
-		return usage("usage: navarch deployment list|get ...")
+		return usageFor("deployment")
 	}
 }
 
@@ -459,7 +459,7 @@ func cmdRollback(ctx context.Context, e env, args []string) error {
 
 func cmdSecret(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch secret list|set|delete ...")
+		return usageFor("secret")
 	}
 	switch args[0] {
 	case "list":
@@ -550,13 +550,13 @@ func cmdSecret(ctx context.Context, e env, args []string) error {
 		fmt.Fprintf(e.out, "deleted\t%s\n", pos[0])
 		return nil
 	default:
-		return usage("usage: navarch secret list|set|delete ...")
+		return usageFor("secret")
 	}
 }
 
 func cmdNode(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch node list|get|drain|uncordon|rotate-recipient|join-token ...")
+		return usageFor("node")
 	}
 	switch args[0] {
 	case "list":
@@ -760,7 +760,7 @@ func cmdNode(ctx context.Context, e env, args []string) error {
 		fmt.Fprintf(e.out, "rotated\t%s\t%s\n", n.Hostname, n.AgeRecipient)
 		return nil
 	default:
-		return usage("usage: navarch node list|get|drain|uncordon|rotate-recipient|join-token ...")
+		return usageFor("node")
 	}
 }
 
@@ -1144,7 +1144,7 @@ func cmdWhoami(ctx context.Context, e env, args []string) error {
 
 func cmdMember(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch member list|add|remove ...")
+		return usageFor("member")
 	}
 	switch args[0] {
 	case "list":
@@ -1320,7 +1320,7 @@ func cmdLogout(_ context.Context, e env, args []string) error {
 
 func cmdToken(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch token list|create|revoke ...")
+		return usageFor("token")
 	}
 	switch args[0] {
 	case "list":
@@ -1395,7 +1395,7 @@ func orDash(s string) string {
 // verb they have no reason to guess.
 func cmdInvite(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch invite list|create|revoke|accept ...")
+		return usageFor("invite")
 	}
 	switch args[0] {
 	case "list":
@@ -1541,7 +1541,7 @@ func inviteAccept(ctx context.Context, e env, args []string) error {
 // under a verb they have no reason to guess.
 func cmdAccess(ctx context.Context, e env, args []string) error {
 	if len(args) == 0 {
-		return usage("usage: navarch access request|list|approve|decline ...")
+		return usageFor("access")
 	}
 	switch args[0] {
 	case "request":

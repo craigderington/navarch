@@ -24,8 +24,19 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	if flags.help && len(rest) == 0 {
-		fmt.Fprint(stdout, rootHelp)
+	// --help is answered here for EVERY command, not only when it is the sole
+	// argument, and it returns before a client exists or anything is
+	// dispatched.
+	//
+	// It used to be honoured only for `navarch --help`. splitGlobals consumed
+	// the flag and dropped it, so `navarch <cmd> ... --help` ran the command
+	// with the flag silently discarded — `navarch health --help` contacted the
+	// server, and `navarch token create --help` MINTED A CREDENTIAL and printed
+	// its plaintext. A help flag must never have an effect, and the guarantee
+	// has to be structural: it cannot depend on each command remembering to
+	// check for one.
+	if flags.help {
+		fmt.Fprint(stdout, helpFor(rest))
 		return 0
 	}
 	if len(rest) == 0 {
@@ -242,6 +253,75 @@ func dispatch(ctx context.Context, e env, cmd string, args []string) error {
 	default:
 		return usage(fmt.Sprintf("unknown command %q\n\n%s", cmd, rootHelp))
 	}
+}
+
+// commandUsage is the one-line synopsis for each command, and the single source
+// for three things that were three copies: the too-few-arguments error, the
+// unknown-subcommand error, and `navarch <command> --help`.
+//
+// Aliases have their own entries rather than being resolved first, so a lookup
+// is a lookup — `navarch orgs --help` must answer, and a caller that has to
+// know "orgs" means "org" before it can ask for help is a second place to keep
+// the alias list.
+var commandUsage = map[string]string{
+	"health":      "usage: navarch health",
+	"validate":    "usage: navarch validate FILE",
+	"org":         "usage: navarch org list|create ...",
+	"orgs":        "usage: navarch org list|create ...",
+	"app":         "usage: navarch app list|create --org ID ...",
+	"apps":        "usage: navarch app list|create --org ID ...",
+	"stack":       "usage: navarch stack list|create|get|push|versions ...",
+	"stacks":      "usage: navarch stack list|create|get|push|versions ...",
+	"env":         "usage: navarch env list|create|get ...",
+	"envs":        "usage: navarch env list|create|get ...",
+	"preview":     "usage: navarch preview create --stack ID --slug SLUG [--inherit ENV_SLUG] [--ttl HOURS] [--version ID]",
+	"previews":    "usage: navarch preview create --stack ID --slug SLUG [--inherit ENV_SLUG] [--ttl HOURS] [--version ID]",
+	"deploy":      "usage: navarch deploy --env ORG/APP/STACK/ENV [--version ID] [--created-by NAME]",
+	"deployment":  "usage: navarch deployment list|get ...",
+	"deployments": "usage: navarch deployment list|get ...",
+	"promote":     "usage: navarch promote DEPLOYMENT_ID",
+	"rollback":    "usage: navarch rollback --env ORG/APP/STACK/ENV [--to REVISION]",
+	"secret":      "usage: navarch secret list|set|delete ...",
+	"secrets":     "usage: navarch secret list|set|delete ...",
+	"node":        "usage: navarch node list|get|drain|uncordon|rotate-recipient|join-token ...",
+	"nodes":       "usage: navarch node list|get|drain|uncordon|rotate-recipient|join-token ...",
+	"events":      "usage: navarch events --org ORG [--limit N] [--before ID]",
+	"logs":        "usage: navarch logs ORG/APP/STACK/ENV --service NAME [--tail N] [--follow]",
+	"wait":        "usage: navarch wait DEPLOYMENT_ID [--state live] [--timeout 180]",
+	"whoami":      "usage: navarch whoami",
+	"token":       "usage: navarch token list|create|revoke ...",
+	"tokens":      "usage: navarch token list|create|revoke ...",
+	"member":      "usage: navarch member list|add|remove ...",
+	"members":     "usage: navarch member list|add|remove ...",
+	"invite":      "usage: navarch invite list|create|revoke|accept ...",
+	"invites":     "usage: navarch invite list|create|revoke|accept ...",
+	"access":      "usage: navarch access request|list|approve|decline ...",
+	"login":       "usage: navarch login [--url URL] [--stdin]",
+	"logout":      "usage: navarch logout",
+	"tui":         "usage: navarch tui [--org ORG] [--refresh 5s] [--log-file PATH]",
+	"version":     "usage: navarch version",
+}
+
+// helpFor answers `--help`. An unrecognised command gets the root help rather
+// than an error: somebody who typed a name that does not exist and asked for
+// help wants the list, not a refusal.
+func helpFor(rest []string) string {
+	if len(rest) == 0 {
+		return rootHelp
+	}
+	if u, ok := commandUsage[rest[0]]; ok {
+		return u + "\n"
+	}
+	return rootHelp
+}
+
+// usageFor is what a command returns when it was given nothing usable. Reading
+// the same table the help path reads is what stops the two answers drifting.
+func usageFor(cmd string) error {
+	if u, ok := commandUsage[cmd]; ok {
+		return usage(u)
+	}
+	return usage("usage: navarch " + cmd)
 }
 
 func printJSON(w io.Writer, v any) error {

@@ -64,6 +64,22 @@ carry the bearer token and an unset token is a hard failure, not a degraded
 mode. `TestEnvPrecedenceAcrossTheRename` covers both directions. The legacy
 half is removable once nothing sets it.
 
+**`--help` is answered before dispatch, for every command, and it may never
+have an effect.** `splitGlobals` consumes `-h`/`--help` and does not pass it on,
+and `Run` used to honour it only when nothing else was on the line — so
+`navarch <cmd> ... --help` ran the command with the flag silently discarded.
+`navarch health --help` contacted the server; `navarch token create --help`
+**minted an operator token and printed its plaintext to stdout**, a live
+credential handed to whoever could read the scrollback. The guarantee has to be
+structural rather than each command remembering to look for a help flag, so
+`Run` returns on `flags.help` before a client is built or `dispatch` is reached.
+`commandUsage` is the one synopsis table behind three answers that used to be
+separate literals — the too-few-arguments error, the unknown-subcommand error,
+and `--help`. `TestHelpNeverPerformsAnAction` enumerates the commands out of
+`rootHelp` itself and asserts on **a request counter**, not on the output: a
+test that only checked what was printed would pass against the bug for every
+command whose result happens to look like usage.
+
 **`--token` and `--token-file` are one value, resolved tier by tier — not two
 fields combined at the end.** `resolveConfig` layered them independently (file →
 env → flag, each field on its own) and then combined with `if cfg.Token == "" &&
