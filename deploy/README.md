@@ -521,7 +521,7 @@ deploy/production/compose.yaml`, every time, and never `-v` on this host.
 
 ```bash
 # 1. Choose the version
-$EDITOR deploy/production/.env    # NAVARCH_VERSION=1.3.1
+$EDITOR deploy/production/.env    # NAVARCH_VERSION=1.3.2
 docker compose -f deploy/production/compose.yaml pull
 
 # 2. Apply migrations while the OLD control plane is still serving
