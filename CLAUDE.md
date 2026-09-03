@@ -630,6 +630,25 @@ working, not a bug, and the fix is `make nuke` — nothing releases a live
 environment's reservation. The full demo suite passes from a clean fleet and
 will not survive being run several times over without one.
 
+**The dev stack names its own compose project, and that is a safety boundary.**
+`compose.yaml` carries `name: navarch-dev` because compose otherwise defaults
+the project name to the *directory name*, while `deploy/production/compose.yaml`
+names itself `navarch`. On a host where this repository is cloned as `navarch`
+the two files therefore resolved to one project — sharing the network
+`navarch_default` and, because both declare `pgdata` and `traefik-dynamic`, the
+same volumes. Running `docker compose up -d` from the repository root on the
+production host then took the live stack down: compose treated the production
+containers as its own, tried to rebuild them from the dev file's `build:`
+stanzas, and aborted partway with `container ... is not connected to the network
+navarch_default`, leaving Traefik dead and nothing serving. The database
+survived only because nothing that day carried `-v` — a `down -v` from the root
+would have deleted the production `pgdata`, since the dev file mounts it under
+that same name. Recovery was `docker compose -f deploy/production/compose.yaml
+down --remove-orphans` (never `-v`) and `up -d`. **Never run the root
+`compose.yaml` on a host running production**, and do not remove the explicit
+name: a project boundary that depends on what somebody called the directory is
+not a boundary.
+
 **`make up` passes `--remove-orphans`, and that is load-bearing.** Renaming a
 service leaves the old container running, and a stale agent keeps registering:
 `RegisterNode` upserts by `(org_id, hostname)`, so an orphan and its replacement

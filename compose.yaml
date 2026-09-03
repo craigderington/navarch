@@ -1,3 +1,23 @@
+# The dev stack: Postgres, the control plane, and a four-node fleet in DinD.
+#
+# The project name is explicit, and that is not cosmetic. Compose defaults it to
+# the DIRECTORY NAME, while deploy/production/compose.yaml names itself
+# `navarch` — so on a host where this repository is cloned as `navarch`, the two
+# files resolve to the SAME project. They then share the network
+# `navarch_default` and, because both declare volumes called `pgdata` and
+# `traefik-dynamic`, the same volumes.
+#
+# That happened. Running `docker compose up -d` from this directory on the
+# production host took the live stack down: compose believed the production
+# containers were its own, tried to rebuild them from the two `build:` stanzas
+# below, and failed partway with "container ... is not connected to the network
+# navarch_default", leaving nothing serving. The database survived only because
+# no command that day carried `-v`; one that did would have deleted the
+# production `pgdata`, since this file mounts it under the same name.
+#
+# A name that depends on what somebody called the directory is not a boundary.
+name: navarch-dev
+
 # composectl local development stack.
 # Ports are deliberately non-standard to avoid colliding with other
 # projects already bound to the 3000/5000/8000/9000 ranges.

@@ -498,6 +498,23 @@ have a certificate for a name that does not point here.
 
 ---
 
+## Never run the dev stack here
+
+Every command in this guide names `deploy/production/compose.yaml` explicitly.
+That is not verbosity — run compose from the repository root on this host and it
+picks up the **dev** stack, which builds its own images, starts a four-node DinD
+fleet, and declares volumes called `pgdata` and `traefik-dynamic`.
+
+Those are the same names this file uses. The dev stack sets no project name of
+its own, so if the repository is cloned as `navarch` both files resolve to the
+project `navarch` and compose cannot tell them apart. It will stop the running
+production containers as though they were its own, and `docker compose down -v`
+from the root would delete the production database.
+
+`compose.yaml` now sets `name: navarch-dev`, which makes them distinct projects
+whatever the directory is called. Keep the habit anyway: `-f
+deploy/production/compose.yaml`, every time, and never `-v` on this host.
+
 ## Upgrade
 
 **Pull, migrate, restart. In that order.**
