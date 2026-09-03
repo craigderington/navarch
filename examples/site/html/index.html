@@ -96,18 +96,25 @@
      ticks are drawn by a repeating gradient rather than 60 elements. */
   .sheet {
     max-width: var(--sheet);
-    /* Space below the closed sheet, so the page ends rather than stopping. */
-    margin: 0 auto clamp(40px, 6vw, 72px);
-    border-left: 1px solid var(--rule);
-    border-right: 1px solid var(--rule);
-    /* The neatline closes. A chart's border is a rectangle, and leaving the
-       bottom open was the reason the page looked cut off at the end. */
-    border-bottom: 1px solid var(--rule);
+    /* Equal space above and below, so the sheet sits ON the ground rather than
+       being cropped by it. The margin used to be bottom-only, which left the
+       neatline running off the top of the viewport — a chart printed with no
+       top margin, which is the one thing a chart always has.
+       Horizontal margin stays auto: on a narrow screen the sheet fills the
+       width and its side rules land on the edges, which is correct. */
+    margin: clamp(40px, 6vw, 72px) auto;
+    /* The neatline closes on all four sides. A chart's border is a rectangle,
+       and this was a U — bottom and sides only. Leaving the bottom open made
+       the page look cut off at the end; leaving the top open made it look like
+       it had scrolled up out of frame before you touched anything. */
+    border: 1px solid var(--rule);
     position: relative;
   }
   .sheet::before, .sheet::after {
     content: "";
-    position: absolute; top: 0; bottom: 1px; width: 9px;
+    /* Inset by the border on both ends, so the graticule ticks sit inside the
+       neatline instead of overprinting it. */
+    position: absolute; top: 1px; bottom: 1px; width: 9px;
     background-image: repeating-linear-gradient(
       to bottom, var(--rule) 0 1px, transparent 1px 34px);
     pointer-events: none;
@@ -115,7 +122,17 @@
   .sheet::before { left: 0; }
   .sheet::after  { right: 0; }
 
-  .band { padding: 0 clamp(26px, 5vw, 68px); }
+  /* The gutter, and ONLY the gutter — longhands, never the `padding` shorthand.
+     `padding: 0 X` also asserts a vertical zero, and as a class it outranks the
+     bare `section` and `footer` selectors that set the page's vertical rhythm.
+     It did, for the life of this page: every section below the hero computed
+     padding-top/bottom of 0 and the footer was a 19px strip sitting on the
+     closing neatline. `.hero` and `.masthead` escaped only by being classes
+     declared further down the sheet, which is luck, not a rule. */
+  .band {
+    padding-left: clamp(26px, 5vw, 68px);
+    padding-right: clamp(26px, 5vw, 68px);
+  }
   .rule-top { border-top: 1px solid var(--rule); }
 
   /* --------------------------------------------------------------- masthead */
