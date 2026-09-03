@@ -88,37 +88,59 @@ func (s *Store) CreateInvite(ctx context.Context, p CreateInviteParams) (*Operat
 		}
 	}
 
+	var inv *OperatorInvite
+	err := s.tx(ctx, func(tx pgx.Tx) error {
+		var err error
+		inv, err = createInviteTx(ctx, tx, p)
+		return err
+	})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return inv, nil
+}
+
+// createInviteTx is the only place an invitation is minted.
+//
+// It exists as a separate function because approving an access request has to
+// mark the request and mint the invite in one transaction, and the alternative
+// — a second INSERT into operator_invites written next to the first — would be
+// a second way to hand out access to an organization. There is one, and both
+// callers go through it: supersede, insert, and record the event, in that
+// order and under the caller's transaction.
+//
+// The caller is responsible for normalising and validating p; CreateInvite does
+// it before opening its transaction, and ApproveAccessRequest passes an address
+// that was already validated when the request was filed.
+func createInviteTx(ctx context.Context, tx pgx.Tx, p CreateInviteParams) (*OperatorInvite, error) {
 	plain, hash, err := newBearerToken()
 	if err != nil {
 		return nil, err
 	}
 	inv := OperatorInvite{Plaintext: plain}
-	err = s.tx(ctx, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `
-			UPDATE operator_invites SET revoked_at = now()
-			WHERE org_id = $1 AND lower(email) = lower($2)
-			  AND redeemed_at IS NULL AND revoked_at IS NULL
-		`, p.OrgID, p.Email); err != nil {
-			return err
-		}
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO operator_invites (org_id, email, role, token_hash, invited_by, expires_at)
-			VALUES ($1, $2, $3, $4, $5, now() + make_interval(secs => $6))
-			RETURNING id, org_id, email, role, invited_by, expires_at, redeemed_at, revoked_at, created_at
-		`, p.OrgID, p.Email, p.Role, hash, p.InvitedBy, p.TTL.Seconds()).
-			Scan(&inv.ID, &inv.OrgID, &inv.Email, &inv.Role, &inv.InvitedBy,
-				&inv.ExpiresAt, &inv.RedeemedAt, &inv.RevokedAt, &inv.CreatedAt); err != nil {
-			return err
-		}
-		// The address is the subject of the event, so it belongs in it. Note
-		// what does not: the token. An audit trail that recorded the credential
-		// would be a second place to steal it from.
-		return appendEventTx(ctx, tx, p.OrgID, nil, nil, "operator.invited",
-			fmt.Sprintf("invited %s as %s", p.Email, p.Role),
-			map[string]any{"email": p.Email, "role": p.Role, "invite": inv.ID.String()})
-	})
-	if err != nil {
-		return nil, mapErr(err)
+	if _, err := tx.Exec(ctx, `
+		UPDATE operator_invites SET revoked_at = now()
+		WHERE org_id = $1 AND lower(email) = lower($2)
+		  AND redeemed_at IS NULL AND revoked_at IS NULL
+	`, p.OrgID, p.Email); err != nil {
+		return nil, err
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO operator_invites (org_id, email, role, token_hash, invited_by, expires_at)
+		VALUES ($1, $2, $3, $4, $5, now() + make_interval(secs => $6))
+		RETURNING id, org_id, email, role, invited_by, expires_at, redeemed_at, revoked_at, created_at
+	`, p.OrgID, p.Email, p.Role, hash, p.InvitedBy, p.TTL.Seconds()).
+		Scan(&inv.ID, &inv.OrgID, &inv.Email, &inv.Role, &inv.InvitedBy,
+			&inv.ExpiresAt, &inv.RedeemedAt, &inv.RevokedAt, &inv.CreatedAt); err != nil {
+		return nil, err
+	}
+	// The address is the subject of the event, so it belongs in it. Note what
+	// does not: the token. An audit trail that recorded the credential would be
+	// a second place to steal it from.
+	if err := appendEventTx(ctx, tx, p.OrgID, nil, nil, "operator.invited",
+		fmt.Sprintf("invited %s as %s", p.Email, p.Role),
+		map[string]any{"email": p.Email, "role": p.Role, "invite": inv.ID.String()}); err != nil {
+		return nil, err
 	}
 	return &inv, nil
 }
