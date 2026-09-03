@@ -1235,6 +1235,55 @@ A disabled operator redeeming an invite would re-enable themselves by the back
 door, so that is an `ErrConflict` and the transaction rolls back — the invite is
 not consumed by the attempt.
 
+**An access request is a note, not an identity, and that is what lets it be
+public.** `POST /v1/access-requests` is the third unauthenticated route and the
+only one that writes a row for a caller holding no credential. It is defensible
+because it creates *nothing* — no operator, no organization, no membership, no
+token. The Sprint 9 plan frames the alternative correctly: self-serve signup
+needs email verification before it is safe, because an unverified `operators`
+row lets somebody squat an address and then be collected by an invitation meant
+for its real owner. A request row has no such power, so it needs none of that.
+
+Four things are load-bearing:
+
+- **The organization comes from `COMPOSECTL_SIGNUP_ORG`, never from the
+  request.** A stranger does not know which org they are asking to join, and a
+  caller who could name one would turn an unauthenticated route into an
+  org-enumeration oracle. Unset — the default — means the route **does not
+  exist**, so an install that has not opted in has no unauthenticated write
+  surface at all. A slug naming no org is a **503, not a 404**: collapsing those
+  would hide a broken install behind the answer a closed door gives.
+- **The response never varies with what already exists.** First request, repeat,
+  already-an-operator and previously-declined all answer 202 with the same body.
+  Anything else is an account-existence oracle anyone on the internet can query,
+  which is the same reason a non-member gets 404 rather than 403 everywhere else.
+- **Approving mints through `createInviteTx`, the single path.** It was extracted
+  out of `CreateInvite` precisely so approval could mark the request and issue
+  the invitation in one transaction without a second `INSERT INTO
+  operator_invites` growing beside the first. The claim is an `UPDATE … RETURNING`
+  guarded on `state = 'pending'`, the shape `RedeemInvite` and `RedeemJoinToken`
+  use, so two operators clicking approve at once mint one credential, not two.
+- **The console lends no authority.** Its public form posts to the API with a
+  client built on no token. The console holds each *session's* operator token
+  and has none of its own, which is what stops an anonymous visitor borrowing
+  one — `TestRequestingAccessCarriesNoCredential` asserts on the header the API
+  receives, not on how the handler builds its client, because a future service
+  token for the console would otherwise turn that form into a confused deputy.
+
+**What it does not have is rate limiting, and nothing else does either.** The
+2026-08-19 audit recorded that (S10); bounded bodies and authentication were why
+it was acceptable, and this route removes the second. One pending row per address
+(a partial unique index, upserted onto) stops resubmissions accumulating, and the
+notification fires only when the upsert actually inserted — decided by `xmax = 0`
+in the same statement, so two simultaneous submissions cannot both mail. Neither
+bounds an attacker with a supply of distinct addresses. That is the standing gap,
+and it is why the door is off unless an operator opens it.
+
+Declining records the decision rather than deleting the row, and is deliberately
+**not** a denylist: the partial index covers pending rows only, so the same
+address may ask again. A permanent, silent block nobody can see or lift is worse
+than a second decline.
+
 **The audit actor rides on the context, not on signatures.** Events are appended
 deep inside store transactions — `CreateDeployment`, `PromoteDeployment`,
 `SetSecret`, `RegisterNode`, the reaper — so threading an actor argument would

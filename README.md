@@ -158,6 +158,39 @@ navarch deploy --env dev/shop/main/staging
 navarch events --org dev
 ```
 
+### Getting in
+
+Navarch is invite-only, and there are two ways somebody comes to have a
+credential. An operator can invite them:
+
+```bash
+navarch invite create acme ada@example.com --role member
+navarch invite accept nav_...             # what the invitee runs; needs no token
+```
+
+Or they can ask, if the install has opened that door:
+
+```bash
+navarch access request you@example.com --url https://api.navar.ch   # no token
+navarch access list acme                  # who has asked
+navarch access approve acme <request-id>  # sends them an invitation
+navarch access decline acme <request-id>  # sends nothing; not a block
+```
+
+**A request creates nothing.** No operator, no organization, no membership and
+no token — only a note that somebody asked. That is what lets it live on an
+unauthenticated route while self-serve signup cannot: signup needs email
+verification first, because an unverified operator row lets an address be
+squatted and then collected by an invitation meant for its real owner. Approving
+a request goes through the same code path as inviting by hand, so there is one
+way to hand out access and not two.
+
+The door is closed unless `COMPOSECTL_SIGNUP_ORG` names an organization, and the
+form the console serves at `/request-access` is public. **Nothing in Navarch
+rate-limits anything** — one pending row per address and one notification per
+new address are what stand in for it, and neither bounds somebody with a supply
+of addresses.
+
 ### Naming things
 
 Anywhere an id is accepted, a slug path rooted at the organization works too.
@@ -345,6 +378,13 @@ Named here rather than discovered in production:
   policy loop with no operational history behind it is a guess on a schedule.
 - **Roles are recorded but not enforced.** Every organization member has the
   same authority; the column exists so finer grants are a data migration later.
+- **No self-serve signup.** Nobody creates their own account. `access request`
+  asks and `access approve` sends an invitation, so a human decides every time.
+  Signup proper needs email verification, rate limiting and quotas before it is
+  safe, and none of those exist yet.
+- **No rate limiting, anywhere.** Bounded request bodies and authentication were
+  what made that acceptable; the public access-request route removes the second
+  of those, which is why it is off by default.
 - **Nodes are not shared between organizations.** A node is a trust boundary:
   one agent holds one decryption identity for every environment it hosts, and
   tenant containers share a kernel. An organization brings its own nodes.

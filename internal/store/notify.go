@@ -70,6 +70,29 @@ func (s *Store) NotifyTargetsForEnvironment(ctx context.Context, environmentID u
 	`, environmentID)
 }
 
+// OrgOperatorEmails is every enabled member of an organization.
+//
+// Its own method rather than a NotifyTarget, because the subject here is the
+// organization itself: an access request names no app, stack or environment, so
+// the four slug fields would all be empty and the type would be describing
+// something that does not exist. Disabled operators are excluded for the reason
+// they are everywhere else — an operator is disabled rather than deleted so
+// audit events keep their actor, and continuing to mail someone whose access
+// was revoked is the opposite of what disabling them meant.
+func (s *Store) OrgOperatorEmails(ctx context.Context, orgID uuid.UUID) ([]string, error) {
+	var emails []string
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(array_agg(op.email) FILTER (WHERE op.disabled_at IS NULL), '{}')
+		FROM organization_members m
+		JOIN operators op ON op.id = m.operator_id
+		WHERE m.org_id = $1
+	`, orgID).Scan(&emails)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return emails, nil
+}
+
 func (s *Store) notifyTargets(ctx context.Context, query string, id uuid.UUID) (*NotifyTarget, error) {
 	var t NotifyTarget
 	err := s.pool.QueryRow(ctx, query, id).

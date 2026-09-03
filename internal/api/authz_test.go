@@ -49,6 +49,11 @@ var unscopedRoutes = map[string]string{
 		"for its own org's routes so it can configure a router beside it; an operator " +
 		"token reaching here would read another org's hostnames",
 	"GET /v1/nodes": "org comes from a query parameter, checked in the handler",
+	"POST /v1/access-requests": "somebody asking for access has no identity yet — " +
+		"that is the point. It creates no operator, membership or token, so there is " +
+		"nothing to scope; the organization comes from COMPOSECTL_SIGNUP_ORG on the " +
+		"server, never from the caller, and the route 404s on an install that has not " +
+		"set it",
 }
 
 // Every operator route must refuse an operator who is not in the owning org,
@@ -163,7 +168,7 @@ func newScopedOperator(t *testing.T, st *store.Store) *scopedOperator {
 type scopedFixture struct {
 	op                                             *scopedOperator
 	orgID, appID, stackID, envID, deployID, nodeID uuid.UUID
-	logID, joinTokenID, inviteID                   uuid.UUID
+	logID, joinTokenID, inviteID, accessRequestID  uuid.UUID
 }
 
 func newScopedFixture(t *testing.T, st *store.Store) *scopedFixture {
@@ -251,10 +256,19 @@ func newScopedFixture(t *testing.T, st *store.Store) *scopedFixture {
 		t.Fatalf("CreateInvite: %v", err)
 	}
 
+	// And a real access request, same reasoning again: approve and decline must
+	// refuse the intruder for membership, not because the row is missing.
+	ar, _, err := st.CreateAccessRequest(ctx, store.CreateAccessRequestParams{
+		OrgID: org.ID, Email: "asked-" + slug + "@example.com",
+	})
+	if err != nil {
+		t.Fatalf("CreateAccessRequest: %v", err)
+	}
+
 	return &scopedFixture{
 		op: op, orgID: org.ID, appID: app.ID, stackID: stack.ID,
 		envID: env.ID, deployID: dep.ID, nodeID: node.ID, joinTokenID: jt.ID,
-		inviteID: inv.ID,
+		inviteID: inv.ID, accessRequestID: ar.ID,
 		// No log request is created: GET/DELETE /v1/logs/{id} resolve through
 		// OrgForLogRequest, which returns ErrNotFound for an unknown id — the
 		// same 404 a non-member gets, which is exactly the property under test.
@@ -274,6 +288,7 @@ func (f *scopedFixture) fill(t *testing.T, path string) string {
 		"{env}", f.envID.String(),
 		"{operator}", f.op.id.String(),
 		"{invite}", f.inviteID.String(),
+		"{request}", f.accessRequestID.String(),
 		"{key}", "some-key",
 	)
 	out := rep.Replace(path)

@@ -130,6 +130,7 @@ func run(log *slog.Logger) error {
 		api.WithMailer(apiMailer),
 		api.WithPreviewDomain(cfg.PreviewDomain),
 		api.WithConsoleURL(cfg.ConsoleURL),
+		api.WithSignupOrg(cfg.SignupOrg),
 		api.WithBearerToken(cfg.AgentToken),
 		api.WithRequireJoinToken(cfg.RequireJoinToken),
 		api.WithRouteStrand(time.Duration(cfg.RouteStrandSeconds)*time.Second),

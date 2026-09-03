@@ -45,10 +45,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /logout", s.postLogout)
 	s.mux.HandleFunc("GET /invite", s.getInvite)
 	s.mux.HandleFunc("POST /invite", s.postInvite)
+	s.mux.HandleFunc("GET /request-access", s.getRequestAccess)
+	s.mux.HandleFunc("POST /request-access", s.postRequestAccess)
 
 	s.mux.HandleFunc("GET /{$}", s.guard(s.fleet))
 	s.mux.HandleFunc("GET /orgs/{org}", s.guard(s.environments))
 	s.mux.HandleFunc("GET /orgs/{org}/events", s.guard(s.events))
+	s.mux.HandleFunc("GET /orgs/{org}/access-requests", s.guard(s.accessRequests))
 	s.mux.HandleFunc("GET /envs/{env}", s.guard(s.environment))
 	s.mux.HandleFunc("GET /deployments/{id}", s.guard(s.deployment))
 	s.routeActions()

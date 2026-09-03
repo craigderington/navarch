@@ -51,6 +51,9 @@ type Server struct {
 	// consoleURL is where an invited operator redeems. Configured, never
 	// derived from the request — see inviteURL.
 	consoleURL string
+	// signupOrg is the organization slug public access requests are filed
+	// against. Empty disables the public route entirely.
+	signupOrg string
 }
 
 // ServerOption keeps NewServer's existing two-argument form working; only the
@@ -87,6 +90,15 @@ func WithRequireJoinToken(v bool) ServerOption {
 // WithMailer makes invitations arrive by email as well as by link.
 func WithMailer(m Mailer) ServerOption {
 	return func(s *Server) { s.mailer = m }
+}
+
+// WithSignupOrg opens the public request-access door onto one organization.
+//
+// Empty — the default — means the route does not exist. An install that has not
+// opted in has no unauthenticated write surface at all, which is why this is a
+// server setting and not a field somebody can put in a request body.
+func WithSignupOrg(slug string) ServerOption {
+	return func(s *Server) { s.signupOrg = slug }
 }
 
 // WithConsoleURL sets the base an invitation link is built from.
@@ -135,6 +147,20 @@ func publicPath(p string) bool {
 		// RETURNING so two simultaneous redemptions cannot both succeed. It
 		// names exactly one organization, so nothing it grants is broader than
 		// the invitation itself.
+		return true
+	case "/v1/access-requests":
+		// Asking for access, from somebody who by definition has no credential
+		// yet. It creates no identity — no operator, no membership, no token —
+		// which is the whole reason it can be here while self-serve signup
+		// cannot: signup needs email verification first, because an unverified
+		// operator row lets an address be squatted and then collected by an
+		// invitation meant for its real owner.
+		//
+		// The handler refuses unless COMPOSECTL_SIGNUP_ORG names an
+		// organization, so this path is a 404 on an install that has not opted
+		// in. What it still lacks is rate limiting, which nothing in this system
+		// has — see internal/api/access_requests.go for what stands in for it
+		// and what that does not cover.
 		return true
 	}
 	return false
@@ -477,6 +503,11 @@ func (s *Server) routes() {
 	s.handle("GET /v1/orgs/{org}/invites", s.handleListInvites)
 	s.handle("DELETE /v1/orgs/{org}/invites/{invite}", s.handleRevokeInvite)
 	s.handle("POST /v1/invites/redeem", s.handleRedeemInvite)
+
+	s.handle("POST /v1/access-requests", s.handleCreateAccessRequest)
+	s.handle("GET /v1/orgs/{org}/access-requests", s.handleListAccessRequests)
+	s.handle("POST /v1/orgs/{org}/access-requests/{request}/approve", s.handleApproveAccessRequest)
+	s.handle("POST /v1/orgs/{org}/access-requests/{request}/decline", s.handleDeclineAccessRequest)
 
 	s.handle("POST /v1/orgs", s.handleCreateOrg)
 	s.handle("GET /v1/orgs", s.handleListOrgs)

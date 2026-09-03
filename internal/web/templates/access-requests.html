@@ -1,0 +1,42 @@
+{{define "access-requests.html"}}{{template "layout" .}}{{end}}
+{{define "content"}}
+  <h1>Access requests</h1>
+  <p class="sub"><a href="/">Fleet</a> · <a href="/orgs/{{.Org}}">Environments</a> ·
+     pending first</p>
+  <div class="panel scroll">
+    <table>
+      <thead><tr>
+        <th>Asked</th><th>Email</th><th>Name</th><th class="wrap">What they said</th>
+        <th>State</th><th></th>
+      </tr></thead>
+      <tbody>
+      {{range .Requests}}
+        <tr>
+          <td class="mono dim">{{ago .CreatedAt}}</td>
+          <td class="mono">{{.Email}}</td>
+          <td>{{.Name}}</td>
+          <td class="wrap">{{.Note}}</td>
+          <td class="mono">{{.State}}</td>
+          <td>
+            {{if eq .State "pending"}}
+              <!-- Both go through the confirmation interstitial, like every
+                   other mutating action here: approving sends somebody a
+                   credential, and declining is the kind of thing an operator
+                   should not do by clicking past it. -->
+              <a href="/confirm?action=approve-access&amp;id={{$.Org}}/{{.ID}}&amp;subject={{.Email}}&amp;back=/orgs/{{$.Org}}/access-requests">Approve</a>
+              ·
+              <a href="/confirm?action=decline-access&amp;id={{$.Org}}/{{.ID}}&amp;subject={{.Email}}&amp;back=/orgs/{{$.Org}}/access-requests">Decline</a>
+            {{else}}
+              <span class="dim">—</span>
+            {{end}}
+          </td>
+        </tr>
+      {{else}}
+        <tr><td colspan="6" class="empty">Nobody has asked.</td></tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  <p class="sub">Approving sends an invitation, which is what actually creates an
+     account. Declining sends nothing and is not a block — they may ask again.</p>
+{{end}}

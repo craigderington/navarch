@@ -1,7 +1,7 @@
 {{define "events.html"}}{{template "layout" .}}{{end}}
 {{define "content"}}
   <h1>Events</h1>
-  <p class="sub"><a href="/">Fleet</a> · <a href="/orgs/{{.Org}}">Environments</a> · newest first</p>
+  <p class="sub"><a href="/">Fleet</a> · <a href="/orgs/{{.Org}}">Environments</a> · <a href="/orgs/{{.Org}}/access-requests">Access requests</a> · newest first</p>
   <div class="panel scroll">
     <table>
       <thead><tr><th>When</th><th>Kind</th><th>Actor</th><th class="wrap">Message</th></tr></thead>

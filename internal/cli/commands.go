@@ -1531,3 +1531,146 @@ func inviteAccept(ctx context.Context, e env, args []string) error {
 	fmt.Fprintln(e.out, "run `navarch whoami` to see what you can reach")
 	return nil
 }
+
+// cmdAccess handles the door: `request` for somebody who has no credential,
+// `list`/`approve`/`decline` for the operator who reads what came through it.
+//
+// One command group for both sides, the same choice cmdInvite makes and for the
+// same reason: a person who wants access will look under `access`, and putting
+// the asking half somewhere else means the answer to "how do I get in" lives
+// under a verb they have no reason to guess.
+func cmdAccess(ctx context.Context, e env, args []string) error {
+	if len(args) == 0 {
+		return usage("usage: navarch access request|list|approve|decline ...")
+	}
+	switch args[0] {
+	case "request":
+		return accessRequest(ctx, e, args)
+
+	case "list":
+		if err := need(args, 2, "usage: navarch access list ORG"); err != nil {
+			return err
+		}
+		orgID, err := e.resolveOrg(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		reqs, err := e.c.ListAccessRequests(ctx, orgID)
+		if err != nil {
+			return err
+		}
+		rows := make([][]string, 0, len(reqs))
+		for _, r := range reqs {
+			rows = append(rows, []string{
+				r.ID, r.Email, r.Name, r.State, r.CreatedAt.Format(time.RFC3339),
+			})
+		}
+		return emit(e, reqs, []string{"ID", "EMAIL", "NAME", "STATE", "ASKED"}, rows)
+
+	case "approve":
+		if err := need(args, 3, "usage: navarch access approve ORG REQUEST_ID [--role ROLE] [--expires-in-days N]"); err != nil {
+			return err
+		}
+		orgID, err := e.resolveOrg(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		flags, _, err := flagMap(args[3:])
+		if err != nil {
+			return err
+		}
+		hours := 0
+		if v := flags["expires-in-days"]; v != "" {
+			days, err := strconv.Atoi(v)
+			if err != nil || days <= 0 {
+				return usage("--expires-in-days must be a positive whole number of days")
+			}
+			hours = days * 24
+		}
+		res, err := e.c.ApproveAccessRequest(ctx, orgID, args[2], client.ApproveAccessRequestInput{
+			Role: flags["role"], TTLHours: hours,
+		})
+		if err != nil {
+			return err
+		}
+		if e.cfg.Output == "json" {
+			return printJSON(e.out, res)
+		}
+		// The link alone on stdout, exactly as `invite create` prints it: it is
+		// the thing that gets copied, and approving is the same act of handing
+		// somebody a credential.
+		fmt.Fprintf(e.out, "%s\n", res.URL)
+		switch {
+		case res.Emailed:
+			fmt.Fprintf(e.err, "approved %s; emailed, and the link above works too\n", res.AccessRequest.Email)
+		case res.Error != "":
+			fmt.Fprintf(e.err, "approved %s, but the email was NOT sent: %s\nsend them the link above yourself\n",
+				res.AccessRequest.Email, res.Error)
+		default:
+			fmt.Fprintf(e.err, "approved %s; no mail provider is configured, so send them the link above\n",
+				res.AccessRequest.Email)
+		}
+		return nil
+
+	case "decline":
+		if err := need(args, 3, "usage: navarch access decline ORG REQUEST_ID"); err != nil {
+			return err
+		}
+		orgID, err := e.resolveOrg(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		ar, err := e.c.DeclineAccessRequest(ctx, orgID, args[2])
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(e.out, "declined\t%s\n", ar.Email)
+		// Worth saying, because the obvious assumption is the opposite: this is
+		// not a denylist and they can ask again.
+		fmt.Fprintln(e.err, "nothing was sent; they may ask again")
+		return nil
+
+	default:
+		return usage(fmt.Sprintf("unknown access subcommand %q", args[0]))
+	}
+}
+
+// accessRequest asks for access on an install that has opened the door.
+//
+// Like `invite accept`, it builds its own client with no token: the person
+// running it has none by definition, and a stale one in the environment must
+// not make it fail. Unlike every other command here it names no organization —
+// the server decides which one requests are filed against, because a caller who
+// could name one would turn an unauthenticated route into a way to discover
+// which organizations exist.
+func accessRequest(ctx context.Context, e env, args []string) error {
+	if err := need(args, 2, "usage: navarch access request EMAIL [--name NAME] [--note TEXT] [--url URL]"); err != nil {
+		return err
+	}
+	flags, _, err := flagMap(args[2:])
+	if err != nil {
+		return err
+	}
+	url := flags["url"]
+	if url == "" {
+		url = e.cfg.URL
+	}
+	if err := guardTransport(url, e.err); err != nil {
+		return err
+	}
+	c, err := client.New(url, "")
+	if err != nil {
+		return err
+	}
+	if err := c.RequestAccess(ctx, client.RequestAccessInput{
+		Email: strings.TrimSpace(args[1]), Name: flags["name"], Note: flags["note"],
+	}); err != nil {
+		return err
+	}
+	// Deliberately says nothing about what already existed — the API does not
+	// tell us, on purpose, and inventing a friendlier message here would be
+	// claiming to know something this command cannot.
+	fmt.Fprintf(e.out, "requested\t%s\n", strings.TrimSpace(args[1]))
+	fmt.Fprintln(e.err, "an operator has to approve it; you will get an invitation by email if they do")
+	return nil
+}

@@ -235,6 +235,8 @@ func dispatch(ctx context.Context, e env, cmd string, args []string) error {
 		return cmdMember(ctx, e, args)
 	case "invite", "invites":
 		return cmdInvite(ctx, e, args)
+	case "access":
+		return cmdAccess(ctx, e, args)
 	case "tui":
 		return cmdTUI(ctx, e, args)
 	default:
@@ -358,6 +360,7 @@ Commands:
   org                  Create and list organizations
   member               List, add, and remove an organization's operators
   invite               Invite operators by email, and accept an invitation
+  access               Ask for access, and review who has asked
   app                  Create and list applications
   stack                Create, list, get, push, and version stacks
   env                  Create, list, and get environments
@@ -393,6 +396,9 @@ Examples:
   navarch login --url https://api.navar.ch   # prompts, never takes a token on argv
   navarch invite create acme ada@example.com --role member
   navarch invite accept nav_... --url https://api.navar.ch   # no token needed first
+  navarch access request you@example.com --url https://api.navar.ch  # no token either
+  navarch access list acme
+  navarch access approve acme <request-id>
   navarch health
   navarch validate examples/hello/compose.yaml
   navarch stack push dev/preview/main examples/hello/compose.yaml

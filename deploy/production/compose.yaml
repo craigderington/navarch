@@ -130,6 +130,13 @@ services:
       # route this same file publishes — and a link built from a request's Host
       # header would be one an attacker could aim.
       COMPOSECTL_CONSOLE_URL: https://console.${NAVARCH_DOMAIN}
+
+      # The organization public access requests are filed against, and the
+      # switch that opens that door at all. Unset — the default — means
+      # POST /v1/access-requests does not exist, so an install that has not
+      # opted in has no unauthenticated write surface. Nothing in the system
+      # rate-limits, so open it deliberately.
+      COMPOSECTL_SIGNUP_ORG: ${NAVARCH_SIGNUP_ORG:-}
     env_file:
       # The Mailgun credential, and nothing else. Optional: without it invites
       # still return a link to paste, failed rollouts are still recorded, and

@@ -115,6 +115,20 @@ type Config struct {
 	// first, and the two notification paths carry on without it. See
 	// internal/mail for why only invites treat a send failure as fatal.
 	Mail mail.Config
+	// SignupOrg is the organization slug that public access requests are filed
+	// against, and the switch that turns the request-access door on at all.
+	//
+	// Empty by default, and an empty value means the public route does not
+	// exist rather than that it accepts anything: an install that has not
+	// opted in has no unauthenticated write surface, which is the same bargain
+	// the preview wildcard and mail make.
+	//
+	// It is a server setting rather than a field on the request because a
+	// stranger does not know which organization they are asking to join, and a
+	// requester who could name one would turn an unauthenticated route into an
+	// organization-enumeration oracle.
+	SignupOrg string
+
 	// ConsoleURL is where an invited operator is sent to redeem an invitation.
 	// It lives here rather than being derived from the request, because an
 	// invite link built from a Host header is a link an attacker can aim.
@@ -138,6 +152,7 @@ func Load() (*Config, error) {
 		RouterCertResolver:     os.Getenv("COMPOSECTL_ROUTER_CERT_RESOLVER"),
 		RouterWildcardResolver: os.Getenv("COMPOSECTL_ROUTER_WILDCARD_RESOLVER"),
 		ConsoleURL:             strings.TrimSuffix(os.Getenv("COMPOSECTL_CONSOLE_URL"), "/"),
+		SignupOrg:              strings.TrimSpace(os.Getenv("COMPOSECTL_SIGNUP_ORG")),
 		Mail: mail.Config{
 			Domain:  os.Getenv("COMPOSECTL_MAILGUN_DOMAIN"),
 			APIKey:  os.Getenv("COMPOSECTL_MAILGUN_API_KEY"),

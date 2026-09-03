@@ -432,3 +432,127 @@ func TestARejectedInviteExplainsWithoutGuessing(t *testing.T) {
 		t.Fatal("a rejected invitation must not establish a session")
 	}
 }
+
+// The public form must reach the API with no credential at all.
+//
+// This is the property that keeps it from being a confused deputy. The console
+// holds each session's own operator token and has none of its own, so an
+// anonymous visitor has nothing to borrow — but a future change that gave the
+// console a service token would silently turn this form into a way for anybody
+// on the internet to act with it. The assertion is on the header the API
+// actually receives, not on how the handler builds its client.
+func TestRequestingAccessCarriesNoCredential(t *testing.T) {
+	var seen int
+	var auth string
+	var body []byte
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/access-requests" {
+			seen++
+			auth = r.Header.Get("Authorization")
+			body, _ = io.ReadAll(r.Body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"status":"received"}`)
+	}))
+	defer api.Close()
+
+	srv, err := New(api.URL, discard())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// A GET must render and file nothing: link previewers and prefetch issue
+	// GETs nobody asked for.
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/request-access", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /request-access = %d", rec.Code)
+	}
+	if seen != 0 {
+		t.Fatalf("a GET filed %d request(s)", seen)
+	}
+
+	form := url.Values{"email": {"stranger@example.com"}, "note": {"a stack"}}
+	req := httptest.NewRequest(http.MethodPost, "/request-access", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /request-access = %d, want a redirect: %s", rec.Code, rec.Body.String())
+	}
+	if seen != 1 {
+		t.Fatalf("the form filed %d requests, want 1", seen)
+	}
+	if auth != "" {
+		t.Fatalf("the console sent a credential with an anonymous request: %q", auth)
+	}
+	if !strings.Contains(string(body), "stranger@example.com") {
+		t.Fatalf("the address did not reach the API: %s", body)
+	}
+	// Redirect rather than render, so a refresh does not file it again.
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "done=1") {
+		t.Fatalf("redirected to %q, want the acknowledgement page", loc)
+	}
+}
+
+// Asking is public; deciding is not. Without this, adding the review page to
+// the console would have quietly published who has asked for access.
+func TestReviewingAccessRequestsNeedsASession(t *testing.T) {
+	api := fakeAPI(t, "nav_operator")
+	defer api.Close()
+	srv, err := New(api.URL, discard())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/orgs/org1/access-requests", nil))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("got %d, want a redirect to login", rec.Code)
+	}
+}
+
+// Approving somebody must not be reachable without the session's CSRF token,
+// like every other mutating action here — it hands out a credential.
+func TestApprovingAccessRequiresTheCSRFToken(t *testing.T) {
+	var approvals int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer nav_operator" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/approve") {
+			approvals++
+			io.WriteString(w, `{"access_request":{"id":"r1","email":"ada@example.com","state":"approved"},
+				"invite":{"id":"i1","email":"ada@example.com"},"url":"https://console/invite?token=x","emailed":true}`)
+			return
+		}
+		io.WriteString(w, `{"operator":{"id":"op1","email":"ada@example.com"},
+			"organizations":[{"id":"org1","slug":"acme"}]}`)
+	}))
+	defer api.Close()
+
+	srv, err := New(api.URL, discard())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cookie := login(t, srv, "nav_operator")
+	if cookie == "" {
+		t.Fatal("no session cookie")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/orgs/org1/access-requests/r1/approve",
+		strings.NewReader(url.Values{"csrf": {"wrong"}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403 without a valid CSRF token", rec.Code)
+	}
+	if approvals != 0 {
+		t.Fatalf("an approval reached the API %d time(s) without a CSRF token", approvals)
+	}
+}

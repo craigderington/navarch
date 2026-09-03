@@ -29,6 +29,7 @@ var templates embed.FS
 var pages = []string{
 	"fleet.html", "environments.html", "environment.html",
 	"deployment.html", "events.html", "error.html", "confirm.html",
+	"access-requests.html",
 }
 
 func parsePages() (map[string]*template.Template, error) {
@@ -40,9 +41,10 @@ func parsePages() (map[string]*template.Template, error) {
 		}
 		out[name] = t
 	}
-	// login.html and invite.html are standalone: both render before there is a
-	// session, so neither can use a layout whose header shows who you are.
-	for _, name := range []string{"login.html", "invite.html"} {
+	// login.html, invite.html and request-access.html are standalone: all three
+	// render before there is a session, so none can use a layout whose header
+	// shows who you are.
+	for _, name := range []string{"login.html", "invite.html", "request-access.html"} {
 		t, err := template.New(name).Funcs(funcs).ParseFS(templates, "templates/"+name)
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", name, err)

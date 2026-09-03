@@ -297,6 +297,33 @@ navarch invite accept nav_... --url https://api.navar.ch
 
 That is the one command that needs no token first, which is the whole point.
 
+### Letting strangers ask
+
+Off by default. Set it and the console serves a public form at
+`/request-access`, and `POST /v1/access-requests` starts existing:
+
+```bash
+$EDITOR deploy/production/.env    # NAVARCH_SIGNUP_ORG=acme
+docker compose -f deploy/production/compose.yaml up -d controlplane
+```
+
+```bash
+navarch access list acme
+navarch access approve acme <request-id>   # sends them an invitation
+navarch access decline acme <request-id>   # sends nothing; they may ask again
+```
+
+**A request grants nothing.** It creates no operator, no membership and no
+token — approving it is what mints an invitation, through the same path
+`invite create` uses. So an unverified address cannot be squatted into an
+account, which is the hazard that makes real signup a larger piece of work.
+
+**Open it deliberately.** This is an unauthenticated route that writes rows, and
+nothing in Navarch rate-limits anything. One pending row per address stops
+resubmissions accumulating, and only a genuinely new address sends mail, so the
+form cannot be used to flood an inbox by repetition — but neither bounds
+somebody with a supply of distinct addresses. Unset, the route does not exist.
+
 **The link is exchanged for a credential; it is never the credential.** It works
 once, expires in seven days by default, and is worth nothing afterwards.
 Re-inviting the same address supersedes the previous link rather than leaving

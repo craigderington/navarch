@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/craigderington/navarch/internal/client"
@@ -64,6 +65,28 @@ var actions = map[string]action{
 		Explain: "Lifts the drain. The node becomes ready or unreachable depending on whether " +
 			"it has heartbeated recently — the control plane derives that rather than assuming it.",
 		Path: func(id string) string { return "/nodes/" + id + "/uncordon" },
+	},
+	// Both access actions take a composite id of "ORG/REQUEST": the API route is
+	// org-scoped like every other operator route, and the confirmation
+	// interstitial carries exactly one id.
+	"approve-access": {
+		Key: "approve-access", Verb: "Approve", Title: "Approve this access request",
+		Explain: "Sends this person an invitation, which is what actually creates their account. " +
+			"The link works once and expires; nothing is granted until they open it.",
+		Path: func(id string) string {
+			org, req, _ := strings.Cut(id, "/")
+			return "/orgs/" + org + "/access-requests/" + req + "/approve"
+		},
+	},
+	"decline-access": {
+		Key: "decline-access", Verb: "Decline", Title: "Decline this access request",
+		Explain: "Closes the request and sends nothing. It is recorded rather than deleted, " +
+			"and it is not a block — the same address may ask again.",
+		Danger: true,
+		Path: func(id string) string {
+			org, req, _ := strings.Cut(id, "/")
+			return "/orgs/" + org + "/access-requests/" + req + "/decline"
+		},
 	},
 	"rotate-recipient": {
 		Key: "rotate-recipient", Verb: "Approve key", Title: "Approve this node's new age key",
@@ -199,6 +222,34 @@ func (s *Server) routeActions() {
 			}
 			// The state the control plane derived, not a hopeful "ready".
 			return "uncordoned; the node is now " + state, nil
+		}))
+
+	s.mux.HandleFunc("POST /orgs/{org}/access-requests/{id}/approve", s.act(
+		func(ctx context.Context, cl *client.Client, id string, r *http.Request) (string, error) {
+			res, err := cl.ApproveAccessRequest(ctx, r.PathValue("org"), id,
+				client.ApproveAccessRequestInput{Role: "member"})
+			if err != nil {
+				return "", err
+			}
+			// Whether the mail went, always — an operator who believes it
+			// arrived will not send the link, and the invitation will expire
+			// unused. The link itself is not put in the flash: it is a
+			// credential, and the flash lives in a session and is rendered into
+			// a page that may be shoulder-read or screenshotted.
+			if res.Emailed {
+				return "approved " + res.AccessRequest.Email + "; the invitation was emailed", nil
+			}
+			return "approved " + res.AccessRequest.Email +
+				", but no email was sent — use `navarch access approve` to get the link", nil
+		}))
+
+	s.mux.HandleFunc("POST /orgs/{org}/access-requests/{id}/decline", s.act(
+		func(ctx context.Context, cl *client.Client, id string, r *http.Request) (string, error) {
+			ar, err := cl.DeclineAccessRequest(ctx, r.PathValue("org"), id)
+			if err != nil {
+				return "", err
+			}
+			return "declined " + ar.Email + "; nothing was sent, and they may ask again", nil
 		}))
 
 	s.mux.HandleFunc("POST /nodes/{id}/rotate-recipient", s.act(

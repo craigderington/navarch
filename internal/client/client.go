@@ -704,3 +704,80 @@ func (c *Client) RedeemInvite(ctx context.Context, token, tokenName string) (*Re
 	}
 	return &out, nil
 }
+
+// ---------------------------------------------------------- access requests
+
+type AccessRequest struct {
+	ID        string     `json:"id"`
+	OrgID     string     `json:"org_id"`
+	Email     string     `json:"email"`
+	Name      string     `json:"name,omitempty"`
+	Note      string     `json:"note,omitempty"`
+	State     string     `json:"state"`
+	InviteID  *string    `json:"invite_id,omitempty"`
+	DecidedAt *time.Time `json:"decided_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+type RequestAccessInput struct {
+	Email string `json:"email"`
+	Name  string `json:"name,omitempty"`
+	Note  string `json:"note,omitempty"`
+}
+
+// RequestAccess files a request against whichever organization the server is
+// configured to accept them for.
+//
+// No organization argument, deliberately: the server decides, and a caller who
+// could name one would turn an unauthenticated route into an
+// organization-enumeration oracle. Like RedeemInvite, this works on a client
+// holding no token — the whole point is that the person calling it has none.
+func (c *Client) RequestAccess(ctx context.Context, in RequestAccessInput) error {
+	return c.doJSON(ctx, http.MethodPost, "/v1/access-requests", in, nil)
+}
+
+func (c *Client) ListAccessRequests(ctx context.Context, orgID string) ([]AccessRequest, error) {
+	var out struct {
+		Requests []AccessRequest `json:"access_requests"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/orgs/"+orgID+"/access-requests", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Requests, nil
+}
+
+type ApproveAccessRequestInput struct {
+	Role     string `json:"role,omitempty"`
+	TTLHours int    `json:"ttl_hours,omitempty"`
+}
+
+// ApproveAccessRequestResult carries the invitation approval produced, and its
+// link — returned for the same reason CreateInvite's is, so an install with no
+// mail configured can still onboard somebody by pasting it.
+type ApproveAccessRequestResult struct {
+	AccessRequest AccessRequest `json:"access_request"`
+	Invite        Invite        `json:"invite"`
+	URL           string        `json:"url"`
+	Emailed       bool          `json:"emailed"`
+	Error         string        `json:"email_error,omitempty"`
+}
+
+func (c *Client) ApproveAccessRequest(ctx context.Context, orgID, requestID string, in ApproveAccessRequestInput) (*ApproveAccessRequestResult, error) {
+	var out ApproveAccessRequestResult
+	path := "/v1/orgs/" + orgID + "/access-requests/" + requestID + "/approve"
+	if err := c.doJSON(ctx, http.MethodPost, path, in, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) DeclineAccessRequest(ctx context.Context, orgID, requestID string) (*AccessRequest, error) {
+	var out struct {
+		AccessRequest AccessRequest `json:"access_request"`
+	}
+	path := "/v1/orgs/" + orgID + "/access-requests/" + requestID + "/decline"
+	if err := c.doJSON(ctx, http.MethodPost, path, struct{}{}, &out); err != nil {
+		return nil, err
+	}
+	return &out.AccessRequest, nil
+}

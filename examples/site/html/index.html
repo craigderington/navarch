@@ -170,6 +170,11 @@
   }
   .masthead nav a { color: var(--ink-soft); text-decoration: none; }
   .masthead nav a:hover { color: var(--magenta); }
+  /* The one nav item that is an action rather than a place. Magenta, because
+     this page spends that colour on the thing that matters and there is exactly
+     one of those in the masthead. */
+  .masthead nav a.nav-key { color: var(--magenta); }
+  .masthead nav a.nav-key:hover { color: var(--ink); }
 
   /* ------------------------------------------------------------------- hero
      The title block of a chart: name, then the statement of what the sheet
@@ -347,6 +352,11 @@
       <a href="#register">Register</a>
       <a href="#passage">Passage</a>
       <a href="#notes">Notes</a>
+      <!-- The only link here that leaves the page, and the only action a
+           stranger can take. Navarch is invite-only, so there is no signup to
+           send them to; this asks an operator, and creates nothing until one
+           agrees. -->
+      <a class="nav-key" href="https://console.navar.ch/request-access">Request access</a>
     </nav>
   </header>
 
@@ -571,7 +581,8 @@
           not a gap for you to find in production.
         </p>
         <div class="actions">
-          <a class="btn btn-key" href="#cardinality">Read the concept</a>
+          <a class="btn btn-key" href="https://console.navar.ch/request-access">Request access</a>
+          <a class="btn" href="#cardinality">Read the concept</a>
         </div>
       </div>
       <div class="omission">
