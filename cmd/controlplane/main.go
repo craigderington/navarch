@@ -101,6 +101,31 @@ func run(log *slog.Logger) error {
 	}
 	defer st.Close()
 
+	// What schema is actually in effect, said out loud at every start.
+	//
+	// The images are pinned by tag and pulled from a registry; `migrations/` is
+	// bind-mounted off the host filesystem. Those two are upgraded by different
+	// commands and drift silently — upgrade the images without pulling the
+	// repository and this starts cleanly, serves everything that existed
+	// before, and fails only on whatever the new migration was for, as a 500
+	// from one handler with nothing anywhere saying why. That cost an afternoon
+	// once. One line here turns it into a glance.
+	//
+	// It does not refuse to start on an old schema, because it cannot know what
+	// it needs: the migrations are not compiled in, so there is no expected
+	// version to compare against. Reporting the number an operator can check
+	// against `ls migrations/` is the honest limit of what this can assert.
+	if v, dirty, err := st.SchemaVersion(ctx); err != nil {
+		log.Warn("could not read the schema version; is the database migrated?", "err", err)
+	} else if dirty {
+		// Neither the old shape nor the new one. golang-migrate will refuse to
+		// move until somebody resolves it, so this is an error, not a note.
+		log.Error("schema is DIRTY — a migration failed partway and must be resolved by hand",
+			"version", v)
+	} else {
+		log.Info("schema version", "version", v)
+	}
+
 	metricsRegistry := metrics.New()
 	// Delivered container output lives here and nowhere else. One buffer shared
 	// by the API that fills it and the reaper that frees it, because a second
@@ -120,6 +145,17 @@ func run(log *slog.Logger) error {
 	} else {
 		log.Info("transactional email not configured; invites still return a link")
 	}
+	// The request-access door, reported both ways for the same reason mail is:
+	// unset is a legitimate default, so compose has no `:?` guard to fail on and
+	// a misspelled variable name is indistinguishable from a deliberate choice.
+	// Saying which state it is in makes a typo visible at boot instead of when
+	// a stranger clicks the link and gets a form that cannot submit.
+	if cfg.SignupOrg != "" {
+		log.Info("public access requests enabled", "org", cfg.SignupOrg)
+	} else {
+		log.Info("public access requests disabled; POST /v1/access-requests does not exist")
+	}
+
 	var apiMailer api.Mailer
 	var notifier rollout.Notifier
 	if sender != nil {

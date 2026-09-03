@@ -1292,6 +1292,32 @@ A disabled operator redeeming an invite would re-enable themselves by the back
 door, so that is an `ErrConflict` and the transaction rolls back — the invite is
 not consumed by the attempt.
 
+**The control plane says which schema is in effect at every start, because the
+two halves of a deploy are pinned by different mechanisms.** Server images come
+from a registry by tag; `migrations/` is bind-mounted off the host filesystem
+(`deploy/production/compose.yaml`, `../../migrations:/migrations:ro`). Upgrading
+the images without pulling the repository leaves the binary new and the schema
+old, and nothing reports it: startup is clean, every pre-existing route works,
+and only the feature the new migration was for fails — as a 500 from one
+handler. That happened with 0019; the symptom was a public route answering 404
+and then 500 while the configuration it appeared to be about was correct all
+along. `SchemaVersion` reads golang-migrate's own `schema_migrations`, so the
+number can be compared against `ls migrations/` in one step, and `dirty` is
+logged at ERROR because golang-migrate refuses to move until a human resolves
+it. It does **not** refuse to start on an old schema: the migrations are not
+compiled in, so there is no expected version to compare against, and asserting
+one would be inventing it.
+
+**Every optional switch reports which way it went.** `COMPOSECTL_SIGNUP_ORG`
+cannot use compose's `:?` guard — unset legitimately means off — so a misspelled
+name in `.env` is indistinguishable from a deliberate choice, and the only
+symptom is a 404 that looks exactly like the intended default. That cost an hour.
+Startup now logs `public access requests enabled org=…` or `… disabled`, the same
+shape the mail path already used, so a typo is visible at boot rather than when a
+stranger clicks the link. Both were verified by starting the binary against real
+databases in all four states — current, behind, dirty, and with the variable
+misspelled the way it actually was.
+
 **An access request is a note, not an identity, and that is what lets it be
 public.** `POST /v1/access-requests` is the third unauthenticated route and the
 only one that writes a row for a caller holding no credential. It is defensible

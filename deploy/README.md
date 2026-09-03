@@ -531,6 +531,21 @@ docker compose -f deploy/production/compose.yaml run --rm migrate
 docker compose -f deploy/production/compose.yaml up -d
 ```
 
+**Pull the repository too, not just the images.** `NAVARCH_VERSION` pins the
+images, which come from a registry — but `migrations/` is bind-mounted off this
+filesystem, so step 2 applies whatever is checked out here. Bump the version
+without a `git pull` and step 2 is a silent no-op: the new binaries start
+cleanly, serve everything that existed before, and fail only on whatever the new
+migration was for.
+
+The control plane logs the schema version at every start, which is the fastest
+way to check:
+
+```bash
+docker compose -f deploy/production/compose.yaml logs controlplane | grep -i schema
+ls migrations/ | tail -2      # the two should agree
+```
+
 ### Why that order is safe, and why it is the only safe one
 
 Migrations here are **immutable and additive**. A migration file is never
