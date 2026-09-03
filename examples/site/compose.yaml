@@ -14,13 +14,13 @@
 # what gets pushed to a real install — where the agent has to pull it from
 # somewhere. `make site-image` builds and tags exactly this name, then streams
 # it onto each dev node, and the agent pulls only when an image is absent, so
-# the local demo never reaches the network. The `:2` is a content tag, bumped
+# the local demo never reaches the network. The `:3` is a content tag, bumped
 # by hand when the site changes: `:latest` would never update here, since an
 # image that is already present is never re-pulled.
 
 services:
   web:
-    image: ghcr.io/craigderington/navarch/site:2
+    image: ghcr.io/craigderington/navarch/site:3
     # swap is the whole point here. The site is stateless — it mounts nothing
     # and coordinates with nobody — so two copies during a rollout are not just
     # safe, they are how the traffic flip happens without downtime.

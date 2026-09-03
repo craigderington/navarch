@@ -457,7 +457,7 @@ That is the whole sequence, and it is the same six commands for any stack. The
 hostname is yours to choose; the certificate follows the route, so there is no
 seventh step for TLS.
 
-`ghcr.io/craigderington/navarch/site:2` is published by the release workflow
+`ghcr.io/craigderington/navarch/site:3` is published by the release workflow
 alongside the platform images. **The platform never builds** — `build:` is a
 rejected compose directive — so every stack you deploy is an image you pushed
 somewhere the node can pull from. That is the contract that makes a deployed
